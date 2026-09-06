@@ -24,19 +24,19 @@ export const StatsOverview: React.FC = () => {
 
   const handleRunDiagnostic = async () => {
     setIsRunningDiagnostic(true);
-    setDiagnosticStatus('Pinging local gateway on http://127.0.0.1:16888/health...');
+    setDiagnosticStatus('正在向本地网关 http://127.0.0.1:16888/health 发起健康检测...');
     try {
       const res = await fetch(`http://127.0.0.1:${stats.port}/health`);
       if (res.ok) {
         const data = await res.json();
         setDiagnosticStatus(
-          `Healthy! Gateway responded with 200 OK: ${JSON.stringify(data)}`
+          `健康状态正常！网关返回 200 OK: ${JSON.stringify(data)}`
         );
       } else {
-        setDiagnosticStatus(`Received status ${res.status} from gateway.`);
+        setDiagnosticStatus(`网关返回异常状态码: ${res.status}`);
       }
     } catch (err: unknown) {
-      setDiagnosticStatus(`Diagnostic error: ${String(err)}`);
+      setDiagnosticStatus(`自检异常: ${String(err)}`);
     } finally {
       setIsRunningDiagnostic(false);
     }
@@ -46,12 +46,12 @@ export const StatsOverview: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Metric Cards Grid */}
+      {/* 核心指标卡片 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Total Requests */}
-        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
+        {/* 请求总数 */}
+        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs">
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-            <span>Total Requests</span>
+            <span>请求处理总数</span>
             <Activity className="w-4 h-4 text-indigo-500" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
@@ -59,94 +59,94 @@ export const StatsOverview: React.FC = () => {
               {stats.totalRequests}
             </span>
             <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
-              active stream
+              实时流量
             </span>
           </div>
         </div>
 
-        {/* Active Streams */}
-        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
+        {/* 并发连接 */}
+        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs">
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-            <span>Concurrent Streams</span>
+            <span>当前并发请求</span>
             <Zap className="w-4 h-4 text-amber-500" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-gray-900 dark:text-gray-100">
               {stats.activeRequests}
             </span>
-            <span className="text-xs text-gray-400">Tokio tasks</span>
+            <span className="text-xs text-gray-400">Tokio 异步任务</span>
           </div>
         </div>
 
-        {/* Active Providers */}
-        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
+        {/* 在线服务商 */}
+        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs">
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-            <span>Active Providers</span>
+            <span>已启用服务商</span>
             <Server className="w-4 h-4 text-emerald-500" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-gray-900 dark:text-gray-100">
               {activeProvidersCount}
             </span>
-            <span className="text-xs text-gray-400">/ {providers.length} total</span>
+            <span className="text-xs text-gray-400">/ 共 {providers.length} 个</span>
           </div>
         </div>
 
-        {/* Error Count */}
-        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
+        {/* 异常降级 */}
+        <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs">
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-            <span>Error &amp; Failover</span>
+            <span>错误与自动降级</span>
             <AlertTriangle className="w-4 h-4 text-red-500" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-gray-900 dark:text-gray-100">
               {stats.errorCount}
             </span>
-            <span className="text-xs text-gray-400">failovers</span>
+            <span className="text-xs text-gray-400">次自动容灾切换</span>
           </div>
         </div>
       </div>
 
-      {/* Gateway Kernel Details */}
+      {/* 内核详情与自检面板 */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="p-5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
+        <div className="p-5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs">
           <div className="flex items-center gap-2 mb-3">
             <Cpu className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Built-in Gateway Kernel
+              原生网关内核架构
             </h3>
           </div>
           <div className="space-y-2 text-xs font-mono text-gray-600 dark:text-gray-300">
             <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-              <span className="text-gray-400">Runtime:</span>
-              <span>Rust Axum 0.8 + Tokio Async (Native)</span>
+              <span className="text-gray-400">底层运行时:</span>
+              <span>Rust Axum 0.8 + Tokio Async (独立线程 Reactor)</span>
             </div>
             <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-              <span className="text-gray-400">Host &amp; Port:</span>
+              <span className="text-gray-400">监听地址与端口:</span>
               <span>127.0.0.1:{stats.port}</span>
             </div>
             <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-              <span className="text-gray-400">Active Routing Rules:</span>
-              <span>{routes.length} Rules Configured</span>
+              <span className="text-gray-400">生效路由规则:</span>
+              <span>{routes.length} 条规则已加载</span>
             </div>
             <div className="flex justify-between py-1">
-              <span className="text-gray-400">Gateway Uptime:</span>
+              <span className="text-gray-400">网关已连续运行:</span>
               <span>{formatUptime(stats.uptimeSecs)}</span>
             </div>
           </div>
         </div>
 
-        {/* Self Diagnostic Panel */}
-        <div className="p-5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm flex flex-col justify-between">
+        {/* 连通性自检面板 */}
+        <div className="p-5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Terminal className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                Gateway Self-Diagnostic
+                本地网关自检探针
               </h3>
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-              Verify local gateway loopback connection, health endpoint, and latency.
+              对本地 127.0.0.1:16888 发起真实 HTTP 健康检查，验证回环网络连通性与协议响应。
             </p>
 
             {diagnosticStatus && (
@@ -159,10 +159,10 @@ export const StatsOverview: React.FC = () => {
           <button
             onClick={handleRunDiagnostic}
             disabled={isRunningDiagnostic}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm self-start"
+            className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-xs self-start cursor-pointer"
           >
             <Play className="w-3.5 h-3.5" />
-            <span>{isRunningDiagnostic ? 'Testing...' : 'Run Gateway Self-Check'}</span>
+            <span>{isRunningDiagnostic ? '自检中...' : '立即运行网关自检'}</span>
           </button>
         </div>
       </div>

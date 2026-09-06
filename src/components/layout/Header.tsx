@@ -25,7 +25,7 @@ export const Header: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Native AI Routing & Gateway
+            原生 AI 路由与多 Provider 聚合网关
           </p>
         </div>
       </div>
@@ -38,10 +38,10 @@ export const Header: React.FC = () => {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
           </span>
-          <span>127.0.0.1:{stats.port}</span>
+          <span>网关运行中 (127.0.0.1:{stats.port})</span>
           {stats.activeRequests > 0 && (
             <span className="ml-1 px-1.5 py-0.2 bg-emerald-200 dark:bg-emerald-800 text-[10px] font-bold rounded-full">
-              {stats.activeRequests} active
+              {stats.activeRequests} 处理中
             </span>
           )}
         </div>
@@ -56,7 +56,7 @@ export const Header: React.FC = () => {
             }`}
           >
             <Terminal className="w-3 h-3" />
-            <span>Claude Code: {claudeIntercepted ? 'Intercepted' : 'Direct'}</span>
+            <span>Claude Code: {claudeIntercepted ? '已接管' : '直连'}</span>
           </div>
 
           <div
@@ -67,7 +67,7 @@ export const Header: React.FC = () => {
             }`}
           >
             <ShieldCheck className="w-3 h-3" />
-            <span>Codex: {codexIntercepted ? 'Intercepted' : 'Direct'}</span>
+            <span>Codex: {codexIntercepted ? '已接管' : '直连'}</span>
           </div>
         </div>
 
@@ -75,7 +75,7 @@ export const Header: React.FC = () => {
         <button
           onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           className="p-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          title="Toggle Theme"
+          title={theme === 'dark' ? '切换为明亮模式' : '切换为深色模式'}
         >
           {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
         </button>

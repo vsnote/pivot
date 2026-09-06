@@ -50,11 +50,11 @@ export const RouteModal: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pattern.trim()) {
-      setError('Model pattern is required (e.g. claude-*, gpt-*, *)');
+      setError('请输入模型匹配模式 (例如 claude-*, gpt-*, *)');
       return;
     }
     if (!targetProviderId) {
-      setError('Target provider is required');
+      setError('请选择目标服务商');
       return;
     }
 
@@ -84,14 +84,14 @@ export const RouteModal: React.FC = () => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
       <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
-        {/* Header */}
+        {/* 弹窗头部 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-800">
           <div>
             <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              {editingRoute ? 'Edit Route Rule' : 'New Route Rule'}
+              {editingRoute ? '编辑路由规则' : '添加路由规则'}
             </h2>
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              Define matching pattern, primary provider, and fallback failover
+              配置模型匹配模式、主服务商及故障自动降级队列
             </p>
           </div>
           <button
@@ -102,7 +102,7 @@ export const RouteModal: React.FC = () => {
           </button>
         </div>
 
-        {/* Form */}
+        {/* 弹窗表单 */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           {error && (
             <div className="p-3 text-xs bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-lg">
@@ -112,25 +112,25 @@ export const RouteModal: React.FC = () => {
 
           <div>
             <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Model Matching Pattern
+              模型匹配模式 (Pattern)
             </label>
             <input
               type="text"
-              placeholder="e.g. claude-*, gpt-4*, deepseek/*, *"
+              placeholder="例如 claude-*, gpt-4*, deepseek/*, *"
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
               required
             />
             <p className="text-[11px] text-gray-400 mt-1">
-              Supports wildcards (`*`, `?`), regex, and prefix matching.
+              支持通配符 (`*`, `?`)、前缀路由匹配 (如 `deepseek/`) 和精准匹配。
             </p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Target Provider
+                目标服务商 (Target)
               </label>
               <select
                 value={targetProviderId}
@@ -147,11 +147,11 @@ export const RouteModal: React.FC = () => {
 
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Target Model (Optional)
+                模型重定向 (可选)
               </label>
               <input
                 type="text"
-                placeholder="Leave empty for pass-through"
+                placeholder="留空则透传请求模型名"
                 value={targetModel}
                 onChange={(e) => setTargetModel(e.target.value)}
                 className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
@@ -159,10 +159,10 @@ export const RouteModal: React.FC = () => {
             </div>
           </div>
 
-          {/* Fallback Providers Queue */}
+          {/* 故障降级备选队列 */}
           <div>
             <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Fallback Failover Queue (429, 5xx, or Timeout)
+              故障降级备选队列 (遇到 429、5xx 错误或超时时自动顺延)
             </label>
             <div className="grid grid-cols-2 gap-2 border border-gray-200 dark:border-gray-700 rounded-lg p-3 max-h-36 overflow-y-auto">
               {providers
@@ -190,7 +190,7 @@ export const RouteModal: React.FC = () => {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Rule Priority
+                规则优先级 (越大约先匹配)
               </label>
               <input
                 type="number"
@@ -198,16 +198,15 @@ export const RouteModal: React.FC = () => {
                 onChange={(e) => setPriority(parseInt(e.target.value) || 0)}
                 className="w-full px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
               />
-              <span className="text-[11px] text-gray-400">Higher priority checked first</span>
             </div>
 
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Description
+                规则备注
               </label>
               <input
                 type="text"
-                placeholder="Rule description"
+                placeholder="例如：所有 Claude 请求优先走中继"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 className="w-full px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
@@ -221,27 +220,27 @@ export const RouteModal: React.FC = () => {
               id="enable-route"
               checked={enabled}
               onChange={(e) => setEnabled(e.target.checked)}
-              className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+              className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
             />
-            <label htmlFor="enable-route" className="text-sm text-gray-700 dark:text-gray-300">
-              Rule active
+            <label htmlFor="enable-route" className="text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
+              立即启用此规则
             </label>
           </div>
 
-          {/* Footer */}
+          {/* 底部按钮 */}
           <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-200 dark:border-gray-800">
             <button
               type="button"
               onClick={closeRouteModal}
               className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700"
             >
-              Cancel
+              取消
             </button>
             <button
               type="submit"
-              className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-sm"
+              className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-xs"
             >
-              {editingRoute ? 'Save Changes' : 'Create Rule'}
+              {editingRoute ? '保存修改' : '创建规则'}
             </button>
           </div>
         </form>

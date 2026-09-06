@@ -78,7 +78,7 @@ export interface Preset {
   defaultModels: string[];
   description: string;
   icon?: string;
-  category: 'Commercial' | 'Open Source / Local' | 'Aggregator' | 'Cloud';
+  category: string;
 }
 
 export type ActiveTab = 'dashboard' | 'providers' | 'routes' | 'interceptor' | 'logs' | 'settings';
