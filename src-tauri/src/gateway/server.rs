@@ -130,6 +130,21 @@ fn extract_session_id(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+fn extract_client_api_key(headers: &HeaderMap) -> Option<String> {
+    if let Some(val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    if let Some(val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        let trimmed = val.trim_start_matches("Bearer ").trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
 /// Handler for Claude Code and Anthropic clients calling `/v1/messages`
 async fn handle_messages(
     State(state): State<GatewayState>,
@@ -142,6 +157,7 @@ async fn handle_messages(
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
     let session_id = extract_session_id(&headers);
+    let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
     let routes = state.db.get_routes().unwrap_or_default();
 
@@ -174,6 +190,7 @@ async fn handle_messages(
             cand,
             &req_id,
             is_stream,
+            client_key.as_deref(),
         ).await;
 
         match resp_result {
@@ -250,8 +267,10 @@ async fn dispatch_anthropic_request(
     cand: &RouteCandidate,
     req_id: &str,
     is_stream: bool,
+    client_key: Option<&str>,
 ) -> Result<Response, (StatusCode, String)> {
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
+    let effective_key = cand.api_key.as_deref().or(client_key);
 
     match cand.provider.protocol.as_str() {
         "anthropic" => {
@@ -270,7 +289,7 @@ async fn dispatch_anthropic_request(
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
 
-            if let Some(ref key) = cand.api_key {
+            if let Some(key) = effective_key {
                 req_builder = req_builder.header("x-api-key", key);
             }
 
@@ -314,7 +333,7 @@ async fn dispatch_anthropic_request(
                 .timeout(timeout)
                 .header("content-type", "application/json");
 
-            if let Some(ref key) = cand.api_key {
+            if let Some(key) = effective_key {
                 req_builder = req_builder.header("authorization", format!("Bearer {}", key));
             }
 
@@ -434,6 +453,7 @@ async fn handle_chat_completions(
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
     let session_id = extract_session_id(&headers);
+    let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
     let routes = state.db.get_routes().unwrap_or_default();
 
@@ -466,6 +486,7 @@ async fn handle_chat_completions(
             cand,
             &req_id,
             is_stream,
+            client_key.as_deref(),
         ).await;
 
         match resp_result {
@@ -540,8 +561,10 @@ async fn dispatch_openai_request(
     cand: &RouteCandidate,
     req_id: &str,
     is_stream: bool,
+    client_key: Option<&str>,
 ) -> Result<Response, (StatusCode, String)> {
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
+    let effective_key = cand.api_key.as_deref().or(client_key);
 
     match cand.provider.protocol.as_str() {
         "openai" | "openrouter" | "ollama" => {
@@ -558,7 +581,7 @@ async fn dispatch_openai_request(
                 .timeout(timeout)
                 .header("content-type", "application/json");
 
-            if let Some(ref key) = cand.api_key {
+            if let Some(key) = effective_key {
                 req_builder = req_builder.header("authorization", format!("Bearer {}", key));
             }
 
@@ -602,7 +625,7 @@ async fn dispatch_openai_request(
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
 
-            if let Some(ref key) = cand.api_key {
+            if let Some(key) = effective_key {
                 req_builder = req_builder.header("x-api-key", key);
             }
 
