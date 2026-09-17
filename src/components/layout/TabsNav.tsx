@@ -25,31 +25,31 @@ export const TabsNav: React.FC = () => {
   const tabs: TabItem[] = [
     {
       id: 'providers',
-      label: '服务商管理',
+      label: '服务商',
       icon: <Server className="w-4 h-4" />,
       badge: `${activeProvidersCount}/${providers.length}`,
     },
     {
       id: 'routes',
-      label: '路由矩阵',
+      label: '路由',
       icon: <Network className="w-4 h-4" />,
       badge: `${routes.length} 条`,
     },
     {
       id: 'interceptor',
-      label: '客户端接管',
+      label: '客户端',
       icon: <Cpu className="w-4 h-4" />,
-      badge: interceptedCount > 0 ? `${interceptedCount} 已接管` : undefined,
+      badge: interceptedCount > 0 ? `${interceptedCount} 已代理` : undefined,
     },
     {
       id: 'logs',
-      label: '请求日志',
+      label: '日志',
       icon: <FileText className="w-4 h-4" />,
       badge: logs.length > 0 ? logs.length : undefined,
     },
     {
       id: 'dashboard',
-      label: '网关监控',
+      label: '监控',
       icon: <BarChart3 className="w-4 h-4" />,
     },
   ];

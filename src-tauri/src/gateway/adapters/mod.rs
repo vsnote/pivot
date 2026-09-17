@@ -1,5 +1,5 @@
-pub mod anthropic_to_openai;
 pub mod anthropic_to_gemini;
+pub mod anthropic_to_openai;
 pub mod openai_to_anthropic;
 
 use crate::gateway::types::*;
@@ -15,12 +15,217 @@ pub struct SseState {
     pub current_tool_id: Option<String>,
     pub current_tool_name: Option<String>,
     pub total_output_tokens: u32,
+    pub stream_finished: bool,
 }
 
 impl SseState {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+fn close_active_anthropic_blocks(events: &mut Vec<String>, state: &mut SseState) {
+    if state.in_thinking_block {
+        events.push(format!(
+            "event: content_block_stop\ndata: {}\n\n",
+            json!({ "type": "content_block_stop", "index": state.current_block_index })
+        ));
+        state.in_thinking_block = false;
+        state.current_block_index += 1;
+    }
+    if state.in_text_block {
+        events.push(format!(
+            "event: content_block_stop\ndata: {}\n\n",
+            json!({ "type": "content_block_stop", "index": state.current_block_index })
+        ));
+        state.in_text_block = false;
+        state.current_block_index += 1;
+    }
+    if state.in_tool_block {
+        events.push(format!(
+            "event: content_block_stop\ndata: {}\n\n",
+            json!({ "type": "content_block_stop", "index": state.current_block_index })
+        ));
+        state.in_tool_block = false;
+        state.current_block_index += 1;
+    }
+}
+
+/// Convert a Gemini streaming response line to Anthropic SSE events.
+/// Gemini emits one JSON object per `data:` line and does not use a `[DONE]`
+/// sentinel, so the caller must invoke `finish_gemini_stream` when the body
+/// ends if the upstream did not include a finish reason.
+pub fn parse_gemini_chunk_to_anthropic_events(
+    line: &str,
+    state: &mut SseState,
+    msg_id: &str,
+    model: &str,
+) -> Vec<String> {
+    let mut events = Vec::new();
+    if state.stream_finished {
+        return events;
+    }
+
+    let trimmed = line.trim();
+    if !trimmed.starts_with("data:") {
+        return events;
+    }
+    let payload = trimmed.trim_start_matches("data:").trim();
+    let value: Value = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(_) => return events,
+    };
+
+    let candidates = value.get("candidates").and_then(Value::as_array);
+    let usage = value.get("usageMetadata");
+    if candidates.is_none() && usage.is_none() {
+        return events;
+    }
+
+    if !state.message_started {
+        state.message_started = true;
+        events.push(format!(
+            "event: message_start\ndata: {}\n\n",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": format!("msg_{}", msg_id),
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                }
+            })
+        ));
+    }
+
+    if let Some(candidates) = candidates {
+        if let Some(candidate) = candidates.first() {
+            if let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(Value::as_array)
+            {
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        if state.in_tool_block {
+                            close_active_anthropic_blocks(&mut events, state);
+                        }
+                        if !state.in_text_block {
+                            state.in_text_block = true;
+                            events.push(format!(
+                                "event: content_block_start\ndata: {}\n\n",
+                                json!({
+                                    "type": "content_block_start",
+                                    "index": state.current_block_index,
+                                    "content_block": { "type": "text", "text": "" }
+                                })
+                            ));
+                        }
+                        events.push(format!(
+                            "event: content_block_delta\ndata: {}\n\n",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": state.current_block_index,
+                                "delta": { "type": "text_delta", "text": text }
+                            })
+                        ));
+                        state.total_output_tokens = state.total_output_tokens.saturating_add(1);
+                    }
+
+                    if let Some(function_call) = part.get("functionCall") {
+                        if state.in_text_block {
+                            close_active_anthropic_blocks(&mut events, state);
+                        }
+                        if !state.in_tool_block {
+                            let name = function_call
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_string();
+                            let id = format!("{}_tool_{}", msg_id, state.current_block_index);
+                            state.in_tool_block = true;
+                            state.current_tool_id = Some(id.clone());
+                            state.current_tool_name = Some(name.clone());
+                            events.push(format!(
+                                "event: content_block_start\ndata: {}\n\n",
+                                json!({
+                                    "type": "content_block_start",
+                                    "index": state.current_block_index,
+                                    "content_block": { "type": "tool_use", "id": id, "name": name }
+                                })
+                            ));
+                        }
+                        if let Some(args) = function_call.get("args") {
+                            let partial_json =
+                                serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+                            events.push(format!(
+                                "event: content_block_delta\ndata: {}\n\n",
+                                json!({
+                                    "type": "content_block_delta",
+                                    "index": state.current_block_index,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": partial_json
+                                    }
+                                })
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+                let stop_reason = match reason {
+                    "MAX_TOKENS" => "max_tokens",
+                    "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" => "end_turn",
+                    _ => "end_turn",
+                };
+                if let Some(output_tokens) = usage
+                    .and_then(|u| u.get("candidatesTokenCount"))
+                    .and_then(Value::as_u64)
+                {
+                    state.total_output_tokens = output_tokens as u32;
+                }
+                events.extend(finish_gemini_stream(state, stop_reason));
+                return events;
+            }
+        }
+    }
+
+    if let Some(output_tokens) = usage
+        .and_then(|u| u.get("candidatesTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        state.total_output_tokens = output_tokens as u32;
+    }
+    events
+}
+
+/// Finish an Anthropic SSE response produced from Gemini streaming output.
+pub fn finish_gemini_stream(state: &mut SseState, stop_reason: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    if !state.message_started || state.stream_finished {
+        return events;
+    }
+    close_active_anthropic_blocks(&mut events, state);
+    events.push(format!(
+        "event: message_delta\ndata: {}\n\n",
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "usage": { "output_tokens": state.total_output_tokens }
+        })
+    ));
+    events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
+    state.stream_finished = true;
+    events
 }
 
 /// Convert an OpenAI SSE line (`data: {...}`) to Anthropic SSE events
@@ -31,6 +236,9 @@ pub fn parse_openai_chunk_to_anthropic_events(
     model: &str,
 ) -> Vec<String> {
     let mut events = Vec::new();
+    if state.stream_finished {
+        return events;
+    }
     let trimmed = line.trim();
 
     if !trimmed.starts_with("data:") {
@@ -73,6 +281,7 @@ pub fn parse_openai_chunk_to_anthropic_events(
             })
         ));
         events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
+        state.stream_finished = true;
         return events;
     }
 
@@ -194,7 +403,11 @@ pub fn parse_openai_chunk_to_anthropic_events(
                         state.current_block_index += 1;
                     }
 
-                    let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
+                    let name = tc
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_default();
                     state.in_tool_block = true;
                     state.current_tool_id = Some(id.clone());
                     state.current_tool_name = Some(name.clone());
@@ -267,7 +480,11 @@ pub fn parse_openai_chunk_to_anthropic_events(
                 _ => "end_turn",
             };
 
-            let out_tokens = chunk.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(state.total_output_tokens);
+            let out_tokens = chunk
+                .usage
+                .as_ref()
+                .map(|u| u.completion_tokens)
+                .unwrap_or(state.total_output_tokens);
             events.push(format!(
                 "event: message_delta\ndata: {}\n\n",
                 json!({
@@ -277,6 +494,7 @@ pub fn parse_openai_chunk_to_anthropic_events(
                 })
             ));
             events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
+            state.stream_finished = true;
         }
     }
 
@@ -307,7 +525,10 @@ pub fn parse_anthropic_event_to_openai_chunks(
     match event_type {
         "content_block_delta" => {
             let delta = val.get("delta");
-            let delta_type = delta.and_then(|d| d.get("type")).and_then(|t| t.as_str()).unwrap_or("");
+            let delta_type = delta
+                .and_then(|d| d.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
             if delta_type == "text_delta" {
                 if let Some(text) = delta.and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
                     let chunk = json!({
@@ -324,7 +545,10 @@ pub fn parse_anthropic_event_to_openai_chunks(
                     chunks.push(format!("data: {}\n\n", chunk));
                 }
             } else if delta_type == "input_json_delta" {
-                if let Some(partial) = delta.and_then(|d| d.get("partial_json")).and_then(|p| p.as_str()) {
+                if let Some(partial) = delta
+                    .and_then(|d| d.get("partial_json"))
+                    .and_then(|p| p.as_str())
+                {
                     let chunk = json!({
                         "id": msg_id,
                         "object": "chat.completion.chunk",
@@ -346,7 +570,11 @@ pub fn parse_anthropic_event_to_openai_chunks(
             }
         }
         "message_delta" => {
-            let stop_reason = val.get("delta").and_then(|d| d.get("stop_reason")).and_then(|s| s.as_str()).unwrap_or("stop");
+            let stop_reason = val
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("stop");
             let finish_reason = match stop_reason {
                 "tool_use" => "tool_calls",
                 "max_tokens" => "length",
@@ -372,4 +600,75 @@ pub fn parse_anthropic_event_to_openai_chunks(
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_stream_is_translated_to_anthropic_events() {
+        let mut state = SseState::new();
+        let first = parse_gemini_chunk_to_anthropic_events(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#,
+            &mut state,
+            "req-1",
+            "claude-3-7-sonnet",
+        );
+        let first_output = first.concat();
+        assert!(first_output.contains("message_start"));
+        assert!(first_output.contains("content_block_start"));
+        assert!(first_output.contains("hello"));
+        assert!(!state.stream_finished);
+
+        let second = parse_gemini_chunk_to_anthropic_events(
+            r#"data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":7}}"#,
+            &mut state,
+            "req-1",
+            "claude-3-7-sonnet",
+        );
+        let second_output = second.concat();
+        assert!(second_output.contains("content_block_stop"));
+        assert!(second_output.contains("stop_reason"));
+        assert!(second_output.contains("message_stop"));
+        assert_eq!(state.total_output_tokens, 7);
+        assert!(state.stream_finished);
+        assert!(finish_gemini_stream(&mut state, "end_turn").is_empty());
+    }
+
+    #[test]
+    fn gemini_stream_without_finish_reason_is_closed_at_eof() {
+        let mut state = SseState::new();
+        let events = parse_gemini_chunk_to_anthropic_events(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}"#,
+            &mut state,
+            "req-2",
+            "gemini-2.0-flash",
+        );
+        assert!(!events.is_empty());
+        let final_events = finish_gemini_stream(&mut state, "end_turn");
+        let output = final_events.concat();
+        assert!(output.contains("message_delta"));
+        assert!(output.contains("message_stop"));
+        assert!(state.stream_finished);
+    }
+
+    #[test]
+    fn openai_stream_emits_only_one_message_stop() {
+        let mut state = SseState::new();
+        let finish = parse_openai_chunk_to_anthropic_events(
+            r#"data: {"id":"chat-1","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
+            &mut state,
+            "req-3",
+            "claude-3-7-sonnet",
+        );
+        assert_eq!(finish.concat().matches("event: message_stop").count(), 1);
+        let done = parse_openai_chunk_to_anthropic_events(
+            "data: [DONE]",
+            &mut state,
+            "req-3",
+            "claude-3-7-sonnet",
+        );
+        assert!(done.is_empty());
+    }
 }

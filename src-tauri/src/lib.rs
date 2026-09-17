@@ -1,7 +1,9 @@
 pub mod commands;
+pub mod provider_models;
 pub mod db;
 pub mod gateway;
 pub mod interceptor;
+pub mod macos_tab;
 pub mod state;
 pub mod tray;
 
@@ -12,6 +14,7 @@ use gateway::server::{GatewayState, GatewayStatsInternal};
 use state::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Manager;
 
 const DEFAULT_PORT: u16 = 16888;
 
@@ -55,6 +58,11 @@ pub fn run() {
                 tracing::warn!("Failed to setup system tray: {}", e);
             }
 
+            // Setup macOS Native Tab Bar
+            if let Some(main_win) = handle.get_webview_window("main") {
+                macos_tab::setup_native_tabs(&main_win);
+            }
+
             // Start Axum HTTP Gateway Server
             let gw_state = GatewayState {
                 db,
@@ -72,6 +80,7 @@ pub fn run() {
             get_gateway_status,
             get_providers,
             save_provider,
+            set_provider_enabled,
             delete_provider,
             test_provider_latency,
             get_routes,
@@ -81,7 +90,9 @@ pub fn run() {
             get_interceptor_status,
             toggle_interceptor,
             get_presets,
-            import_preset,
+            fetch_provider_models,
+            sync_native_tab,
+            set_native_toolbar_enabled,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

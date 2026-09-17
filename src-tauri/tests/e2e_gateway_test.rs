@@ -16,6 +16,41 @@ use tauri_app_lib::gateway::server::{create_gateway_router, GatewayState, Gatewa
 static MOCK_CALL_COUNT_A: AtomicUsize = AtomicUsize::new(0);
 static MOCK_CALL_COUNT_B: AtomicUsize = AtomicUsize::new(0);
 
+fn mock_openai_stream_response(id: &str, model: &str, text: &str) -> axum::response::Response {
+    let role_chunk = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": 1700000000,
+        "model": model,
+        "choices": [{ "index": 0, "delta": { "role": "assistant" }, "finish_reason": null }]
+    });
+    let text_chunk = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": 1700000000,
+        "model": model,
+        "choices": [{ "index": 0, "delta": { "content": text }, "finish_reason": null }]
+    });
+    let finish_chunk = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": 1700000000,
+        "model": model,
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 }
+    });
+    let body = format!(
+        "data: {role}\n\ndata: {text}\n\ndata: {finish}\n\ndata: [DONE]\n\n",
+        role = role_chunk,
+        text = text_chunk,
+        finish = finish_chunk,
+    );
+    axum::response::Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from(body))
+        .unwrap()
+}
+
 // Mock Upstream A: returns 429 on first call to trigger fallback
 async fn mock_upstream_a_handler(Json(body): Json<Value>) -> (StatusCode, axum::response::Response) {
     let count = MOCK_CALL_COUNT_A.fetch_add(1, Ordering::SeqCst);
@@ -28,6 +63,12 @@ async fn mock_upstream_a_handler(Json(body): Json<Value>) -> (StatusCode, axum::
             Json(json!({ "error": { "message": "Rate limit reached on Primary", "type": "rate_limit_error" } })).into_response()
         )
     } else {
+        if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+            return (
+                StatusCode::OK,
+                mock_openai_stream_response("chatcmpl-stream-a", model, "Hello from stream A!"),
+            );
+        }
         (
             StatusCode::OK,
             Json(json!({
@@ -53,6 +94,13 @@ async fn mock_upstream_a_handler(Json(body): Json<Value>) -> (StatusCode, axum::
 async fn mock_upstream_b_handler(Json(body): Json<Value>) -> (StatusCode, axum::response::Response) {
     MOCK_CALL_COUNT_B.fetch_add(1, Ordering::SeqCst);
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
+
+    if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+        return (
+            StatusCode::OK,
+            mock_openai_stream_response("chatcmpl-stream-b", model, "Hello from stream B!"),
+        );
+    }
 
     (
         StatusCode::OK,
@@ -105,6 +153,7 @@ async fn test_e2e_gateway_routing_and_failover() {
         name: "Primary OpenAI Mock".to_string(),
         protocol: "openai".to_string(),
         base_url: "http://127.0.0.1:17881".to_string(),
+        preset_id: None,
         api_keys: vec!["sk-test-key-a".to_string()],
         models: vec!["gpt-4o".to_string(), "claude-3-7-sonnet".to_string()],
         enabled: true,
@@ -121,6 +170,7 @@ async fn test_e2e_gateway_routing_and_failover() {
         name: "Fallback Provider B".to_string(),
         protocol: "openai".to_string(),
         base_url: "http://127.0.0.1:17882".to_string(),
+        preset_id: None,
         api_keys: vec!["sk-test-key-b".to_string()],
         models: vec!["deepseek-chat".to_string()],
         enabled: true,
@@ -218,6 +268,90 @@ async fn test_e2e_gateway_routing_and_failover() {
     assert_eq!(logs[0].status_code, 200);
     assert!(logs[0].fallback_used);
     assert_eq!(logs[0].routed_provider_id, "provider_fallback");
+    assert_eq!(logs[0].prompt_tokens, 20);
+    assert_eq!(logs[0].completion_tokens, 12);
 
-    println!("E2E Gateway Routing & Fallback Queue Test PASSED!");
+    // 6. Send an OpenAI-compatible request to `/v1/chat/completions`.
+    // The model is listed by the fallback provider, so it should route there
+    // directly and preserve the OpenAI response shape.
+    let chat_req = json!({
+        "model": "deepseek-chat",
+        "messages": [{ "role": "user", "content": "Say hello" }]
+    });
+    let chat_resp = http_client
+        .post("http://127.0.0.1:16899/v1/chat/completions")
+        .header("content-type", "application/json")
+        .json(&chat_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_resp.status(), 200);
+    let chat_json: Value = chat_resp.json().await.unwrap();
+    assert_eq!(
+        chat_json.get("object").and_then(|v| v.as_str()),
+        Some("chat.completion")
+    );
+    assert_eq!(
+        chat_json["usage"]["prompt_tokens"].as_u64(),
+        Some(20)
+    );
+
+    // The second request should also contribute upstream usage to gateway stats.
+    let stats_resp = http_client
+        .get("http://127.0.0.1:16899/api/stats")
+        .send()
+        .await
+        .unwrap();
+    let stats_json: Value = stats_resp.json().await.unwrap();
+    assert_eq!(stats_json["totalPromptTokens"].as_u64(), Some(40));
+    assert_eq!(stats_json["totalCompletionTokens"].as_u64(), Some(24));
+
+    // 7. Verify OpenAI SSE is translated to Anthropic SSE for Claude clients.
+    let stream_resp = http_client
+        .post("http://127.0.0.1:16899/v1/messages")
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": "claude-3-7-sonnet",
+            "messages": [{ "role": "user", "content": "Stream hello" }],
+            "max_tokens": 128,
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_resp.status(), 200);
+    assert_eq!(
+        stream_resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let stream_body = stream_resp.text().await.unwrap();
+    assert!(stream_body.contains("event: message_start"));
+    assert!(stream_body.contains("event: content_block_delta"));
+    assert!(stream_body.contains("Hello from stream A!"));
+    assert_eq!(stream_body.matches("event: message_stop").count(), 1);
+
+    let final_stats: Value = http_client
+        .get("http://127.0.0.1:16899/api/stats")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(final_stats["totalPromptTokens"].as_u64(), Some(40));
+    assert_eq!(final_stats["totalCompletionTokens"].as_u64(), Some(24));
+
+    let logs = db.get_logs(10, 0).unwrap();
+    assert_eq!(logs.len(), 3);
+    assert_eq!(logs[0].path, "/v1/messages");
+    assert!(logs[0].is_stream);
+    assert_eq!(logs[1].path, "/v1/chat/completions");
+    assert_eq!(logs[1].prompt_tokens, 20);
+    assert_eq!(logs[1].completion_tokens, 12);
+
+    println!("E2E Gateway Routing, Fallback, Usage & Chat Test PASSED!");
 }

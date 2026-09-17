@@ -1,8 +1,10 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   ActiveTab,
+  SettingsSection,
   GatewayStats,
   InterceptorStatus,
   Preset,
@@ -15,6 +17,9 @@ interface AppStore {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
 
+  settingsSection: SettingsSection;
+  setSettingsSection: (section: SettingsSection) => void;
+
   theme: 'dark' | 'light' | 'system';
   setTheme: (theme: 'dark' | 'light' | 'system') => void;
 
@@ -26,17 +31,14 @@ interface AppStore {
   logs: RequestLog[];
 
   isLoading: boolean;
+  initialLoaded: boolean;
   error: string | null;
 
   // Modals
-  isProviderModalOpen: boolean;
+  isProviderEditorOpen: boolean;
   editingProvider: Provider | null;
-  openProviderModal: (p?: Provider | null) => void;
-  closeProviderModal: () => void;
-
-  isPresetDrawerOpen: boolean;
-  openPresetDrawer: () => void;
-  closePresetDrawer: () => void;
+  openProviderEditor: (p?: Provider | null) => void;
+  closeProviderEditor: () => void;
 
   isRouteModalOpen: boolean;
   editingRoute: RouteRule | null;
@@ -52,30 +54,67 @@ interface AppStore {
   toggleProvider: (id: string, enabled: boolean) => Promise<void>;
   saveRoutes: (routes: RouteRule[]) => Promise<void>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
-  importPreset: (presetId: string) => Promise<void>;
   clearLogs: () => Promise<void>;
   initEventListeners: () => Promise<() => void>;
 }
 
+const SETTINGS_SECTIONS: SettingsSection[] = ['clients', 'routes', 'gateway', 'logs', 'about'];
+const LEGACY_TABS: Partial<Record<ActiveTab, SettingsSection>> = {
+  dashboard: 'gateway',
+  routes: 'routes',
+  interceptor: 'clients',
+  logs: 'logs',
+};
+
+const isNativeRuntime = () =>
+  typeof window !== 'undefined' && (isTauri() || window.location.protocol === 'tauri:');
+
+const getInitialTheme = (): 'dark' | 'light' | 'system' => {
+  if (typeof window === 'undefined') return 'system';
+  const saved = localStorage.getItem('omni_theme');
+  return saved === 'dark' || saved === 'light' ? saved : 'system';
+};
+
+export const applyAppTheme = (theme: 'dark' | 'light' | 'system') => {
+  const isDark =
+    theme === 'dark' ||
+    (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+
+  document.documentElement.classList.toggle('dark', isDark);
+  document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+
+  if (isNativeRuntime()) {
+    getCurrentWindow().setTheme(isDark ? 'dark' : 'light').catch(() => {});
+  }
+};
+
 export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'providers',
-  setActiveTab: (tab) => set({ activeTab: tab }),
-
-  theme: 'dark',
+  setActiveTab: (tab) => {
+    const section = LEGACY_TABS[tab] ?? get().settingsSection;
+    const activeTab = tab === 'providers' ? 'providers' : 'settings';
+    set({ activeTab, settingsSection: section });
+    if (isNativeRuntime()) {
+      invoke('sync_native_tab', { tab: activeTab === 'providers' ? 'providers' : section })
+        .catch((error) => console.warn('无法同步原生导航', error));
+    }
+  },
+  settingsSection: 'clients',
+  setSettingsSection: (section) => {
+    set({ activeTab: 'settings', settingsSection: section });
+    if (isNativeRuntime()) {
+      invoke('sync_native_tab', { tab: section })
+        .catch((error) => console.warn('无法同步原生导航', error));
+    }
+  },
+  theme: getInitialTheme(),
   setTheme: (theme) => {
     set({ theme });
-    const isDark =
-      theme === 'dark' ||
-      (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    if (isDark) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    localStorage.setItem('omni_theme', theme);
   },
 
   stats: {
-    isRunning: true,
+    isRunning: false,
     host: '127.0.0.1',
     port: 16888,
     activeRequests: 0,
@@ -85,6 +124,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     errorCount: 0,
     uptimeSecs: 0,
   },
+  // 生产初始数据必须为空：演示数据曾复用 anthropic 等真实主键，
+  // 加载完成前打开编辑页会导致占位密钥覆盖真实配置。
   providers: [],
   routes: [],
   interceptors: [],
@@ -92,16 +133,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
   logs: [],
 
   isLoading: false,
+  initialLoaded: false,
   error: null,
 
-  isProviderModalOpen: false,
+  isProviderEditorOpen: false,
   editingProvider: null,
-  openProviderModal: (p = null) => set({ isProviderModalOpen: true, editingProvider: p }),
-  closeProviderModal: () => set({ isProviderModalOpen: false, editingProvider: null }),
-
-  isPresetDrawerOpen: false,
-  openPresetDrawer: () => set({ isPresetDrawerOpen: true }),
-  closePresetDrawer: () => set({ isPresetDrawerOpen: false }),
+  openProviderEditor: (p = null) => {
+    if (get().isProviderEditorOpen) {
+      get().setActiveTab('providers');
+      return;
+    }
+    // 初始数据未就绪时禁止打开编辑页，避免旧快照覆盖真实配置，
+    // 也避免新增记录被随后到达的初始列表覆盖。
+    if (!get().initialLoaded) return;
+    get().setActiveTab('providers');
+    set({ isProviderEditorOpen: true, editingProvider: p });
+  },
+  closeProviderEditor: () => set({ isProviderEditorOpen: false, editingProvider: null }),
 
   isRouteModalOpen: false,
   editingRoute: null,
@@ -128,7 +176,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
         presets,
         logs,
         isLoading: false,
+        initialLoaded: true,
       });
+      // 真实数据到达后，正在编辑的旧草稿可能已失效，强制关闭避免误保存。
+      if (get().isProviderEditorOpen) {
+        set({ isProviderEditorOpen: false, editingProvider: null });
+      }
     } catch (err: unknown) {
       set({ error: String(err), isLoading: false });
     }
@@ -146,8 +199,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   saveProvider: async (provider: Provider) => {
     try {
       await invoke('save_provider', { provider });
-      const providers = await invoke<Provider[]>('get_providers');
-      set({ providers, isProviderModalOpen: false, editingProvider: null });
+      // A successful write must not be reported as failed if a subsequent list request fails.
+      set((state) => ({ providers: [...state.providers.filter((p) => p.id !== provider.id), provider]
+        .sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)) }));
     } catch (err: unknown) {
       set({ error: String(err) });
       throw err;
@@ -183,8 +237,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   toggleProvider: async (id: string, enabled: boolean) => {
     const provider = get().providers.find((p) => p.id === id);
     if (!provider) return;
-    const updated = { ...provider, enabled };
-    await get().saveProvider(updated);
+    await invoke('set_provider_enabled', { id, enabled });
+    set((state) => ({ providers: state.providers.map((p) => p.id === id ? { ...p, enabled } : p) }));
   },
 
   saveRoutes: async (routes: RouteRule[]) => {
@@ -209,24 +263,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  importPreset: async (presetId: string) => {
-    try {
-      const provider = await invoke<Provider>('import_preset', { presetId });
-      set((state) => {
-        const existingIdx = state.providers.findIndex((p) => p.id === provider.id);
-        if (existingIdx >= 0) {
-          const updated = [...state.providers];
-          updated[existingIdx] = provider;
-          return { providers: updated };
-        }
-        return { providers: [provider, ...state.providers] };
-      });
-    } catch (err: unknown) {
-      set({ error: String(err) });
-      throw err;
-    }
-  },
-
   clearLogs: async () => {
     try {
       await invoke('clear_logs');
@@ -237,24 +273,52 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   initEventListeners: async () => {
-    const unlisten = await listen<RequestLog>('gw-log', (event) => {
-      set((state) => ({
-        logs: [event.payload, ...state.logs.slice(0, 499)],
-        stats: {
-          ...state.stats,
-          totalRequests: state.stats.totalRequests + 1,
-        },
-      }));
-    });
+    try {
+      if (isNativeRuntime()) {
+        const unlistenLog = await listen<RequestLog>('gw-log', (event) => {
+          set((state) => ({
+            logs: [event.payload, ...state.logs.slice(0, 499)],
+            stats: {
+              ...state.stats,
+              totalRequests: state.stats.totalRequests + 1,
+            },
+          }));
+        });
 
-    // Also set interval to refresh stats every 3 seconds
-    const timer = setInterval(() => {
-      get().refreshStats();
-    }, 3000);
+        // 监听 macOS 原生 NSSegmentedControl 切换事件
+        const unlistenTab = await listen<string>('native-tab-selected', (event) => {
+          const tabId = event.payload;
+          if (tabId === 'providers') {
+            set({ activeTab: 'providers' });
+          } else if (SETTINGS_SECTIONS.includes(tabId as SettingsSection)) {
+            set({ activeTab: 'settings', settingsSection: tabId as SettingsSection });
+          }
+        });
 
-    return () => {
-      unlisten();
-      clearInterval(timer);
-    };
+        const unlistenAddProvider = await listen('native-add-provider', () => {
+          get().openProviderEditor(null);
+        });
+
+        const unlistenTheme = await listen('native-theme-toggle', () => {
+          get().setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark');
+        });
+
+        // Also set interval to refresh stats every 3 seconds
+        const timer = setInterval(() => {
+          get().refreshStats();
+        }, 3000);
+
+        return () => {
+          unlistenLog();
+          unlistenTab();
+          unlistenAddProvider();
+          unlistenTheme();
+          clearInterval(timer);
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return () => {};
   },
 }));

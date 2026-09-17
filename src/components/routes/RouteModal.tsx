@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { RouteRule } from '@/types';
+import { Select } from '@/components/common/Select';
+import { useDialogAccessibility } from '@/components/common/useDialogAccessibility';
 import { X } from 'lucide-react';
 
 export const RouteModal: React.FC = () => {
@@ -15,6 +17,7 @@ export const RouteModal: React.FC = () => {
   const [description, setDescription] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useDialogAccessibility(isRouteModalOpen, closeRouteModal);
 
   useEffect(() => {
     if (editingRoute) {
@@ -50,7 +53,7 @@ export const RouteModal: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pattern.trim()) {
-      setError('请输入模型匹配模式 (例如 claude-*, gpt-*, *)');
+      setError('请输入模型匹配规则，例如 claude-*、gpt-* 或 *');
       return;
     }
     if (!targetProviderId) {
@@ -82,28 +85,31 @@ export const RouteModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 pt-14">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="route-modal-title"
+        className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-2xl w-full max-w-lg max-h-[calc(100dvh-4.5rem)] overflow-hidden flex flex-col"
+      >
         {/* 弹窗头部 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-800">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              {editingRoute ? '编辑路由规则' : '添加路由规则'}
-            </h2>
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              配置模型匹配模式、主服务商及故障自动降级队列
-            </p>
-          </div>
+          <h2 id="route-modal-title" className="text-base font-semibold text-gray-900 dark:text-gray-100">
+            {editingRoute ? '编辑路由' : '添加路由'}
+          </h2>
           <button
+            type="button"
             onClick={closeRouteModal}
-            className="p-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+            aria-label="关闭路由窗口"
+            className="p-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* 弹窗表单 */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="min-h-0 overflow-y-auto p-6 space-y-4">
           {error && (
             <div className="p-3 text-xs bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-lg">
               {error}
@@ -112,10 +118,11 @@ export const RouteModal: React.FC = () => {
 
           <div>
             <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-              模型匹配模式 (Pattern)
+              模型匹配规则
             </label>
             <input
               type="text"
+              data-autofocus
               placeholder="例如 claude-*, gpt-4*, deepseek/*, *"
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
@@ -123,35 +130,34 @@ export const RouteModal: React.FC = () => {
               required
             />
             <p className="text-[11px] text-gray-400 mt-1">
-              支持通配符 (`*`, `?`)、前缀路由匹配 (如 `deepseek/`) 和精准匹配。
+              支持通配符（*、?）、前缀匹配（如 deepseek/）和精确匹配。
             </p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                目标服务商 (Target)
+                目标服务商
               </label>
-              <select
+              <Select
                 value={targetProviderId}
                 onChange={(e) => setTargetProviderId(e.target.value)}
-                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
               >
                 {providers.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name} ({p.protocol})
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
 
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                模型重定向 (可选)
+                目标模型（可选）
               </label>
               <input
                 type="text"
-                placeholder="留空则透传请求模型名"
+                placeholder="留空则使用请求中的模型名称"
                 value={targetModel}
                 onChange={(e) => setTargetModel(e.target.value)}
                 className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
@@ -162,7 +168,7 @@ export const RouteModal: React.FC = () => {
           {/* 故障降级备选队列 */}
           <div>
             <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-              故障降级备选队列 (遇到 429、5xx 错误或超时时自动顺延)
+              备用服务商（遇到 429、5xx 或超时时依次尝试）
             </label>
             <div className="grid grid-cols-2 gap-2 border border-gray-200 dark:border-gray-700 rounded-lg p-3 max-h-36 overflow-y-auto">
               {providers
@@ -190,7 +196,7 @@ export const RouteModal: React.FC = () => {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                规则优先级 (越大约先匹配)
+                优先级（数值越大越先匹配）
               </label>
               <input
                 type="number"
@@ -202,11 +208,11 @@ export const RouteModal: React.FC = () => {
 
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                规则备注
+                备注
               </label>
               <input
                 type="text"
-                placeholder="例如：所有 Claude 请求优先走中继"
+                placeholder="例如：Claude 请求优先使用中继"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 className="w-full px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
@@ -223,7 +229,7 @@ export const RouteModal: React.FC = () => {
               className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
             />
             <label htmlFor="enable-route" className="text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
-              立即启用此规则
+              立即启用
             </label>
           </div>
 
@@ -240,7 +246,7 @@ export const RouteModal: React.FC = () => {
               type="submit"
               className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-xs"
             >
-              {editingRoute ? '保存修改' : '创建规则'}
+              {editingRoute ? '保存修改' : '创建路由'}
             </button>
           </div>
         </form>

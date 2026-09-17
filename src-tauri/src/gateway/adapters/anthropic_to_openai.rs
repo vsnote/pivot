@@ -1,7 +1,10 @@
 use crate::gateway::types::*;
 use serde_json::{json, Value};
 
-pub fn convert_anthropic_req_to_openai(req: &AnthropicMessageRequest, target_model: &str) -> OpenAIChatRequest {
+pub fn convert_anthropic_req_to_openai(
+    req: &AnthropicMessageRequest,
+    target_model: &str,
+) -> OpenAIChatRequest {
     let mut openai_messages = Vec::new();
 
     // 1. Convert System prompt
@@ -57,10 +60,19 @@ pub fn convert_anthropic_req_to_openai(req: &AnthropicMessageRequest, target_mod
                             }
                         }
                         "tool_use" => {
-                            let id = block.get("id").and_then(|s| s.as_str()).unwrap_or("call_default").to_string();
-                            let name = block.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                            let id = block
+                                .get("id")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("call_default")
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let input = block.get("input").cloned().unwrap_or(json!({}));
-                            let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                            let input_str =
+                                serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
 
                             tool_calls.push(OpenAIToolCall {
                                 index: Some(tool_calls.len()),
@@ -73,7 +85,11 @@ pub fn convert_anthropic_req_to_openai(req: &AnthropicMessageRequest, target_mod
                             });
                         }
                         "tool_result" => {
-                            let tool_use_id = block.get("tool_use_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                            let tool_use_id = block
+                                .get("tool_use_id")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let content_val = block.get("content");
                             let res_text = match content_val {
                                 Some(Value::String(s)) => s.clone(),
@@ -106,8 +122,16 @@ pub fn convert_anthropic_req_to_openai(req: &AnthropicMessageRequest, target_mod
                 if !text_parts.is_empty() || !tool_calls.is_empty() {
                     openai_messages.push(OpenAIMessage {
                         role: msg.role.clone(),
-                        content: if text_parts.is_empty() { None } else { Some(Value::String(text_parts)) },
-                        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                        content: if text_parts.is_empty() {
+                            None
+                        } else {
+                            Some(Value::String(text_parts))
+                        },
+                        tool_calls: if tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(tool_calls)
+                        },
                         tool_call_id: None,
                         reasoning_content: None,
                         name: None,
@@ -142,11 +166,17 @@ pub fn convert_anthropic_req_to_openai(req: &AnthropicMessageRequest, target_mod
         tools: openai_tools,
         tool_choice: req.tool_choice.clone(),
         stream: req.stream,
-        stream_options: req.stream.filter(|s| *s).map(|_| json!({ "include_usage": true })),
+        stream_options: req
+            .stream
+            .filter(|s| *s)
+            .map(|_| json!({ "include_usage": true })),
     }
 }
 
-pub fn convert_openai_resp_to_anthropic(resp: &OpenAIChatResponse, req_model: &str) -> AnthropicResponse {
+pub fn convert_openai_resp_to_anthropic(
+    resp: &OpenAIChatResponse,
+    req_model: &str,
+) -> AnthropicResponse {
     let mut content_blocks = Vec::new();
     let mut stop_reason = Some("end_turn".to_string());
 
@@ -172,7 +202,8 @@ pub fn convert_openai_resp_to_anthropic(resp: &OpenAIChatResponse, req_model: &s
 
         if let Some(ref tool_calls) = choice.message.tool_calls {
             for tc in tool_calls {
-                let parsed_input: Value = serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| json!({}));
+                let parsed_input: Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| json!({}));
                 content_blocks.push(json!({
                     "type": "tool_use",
                     "id": tc.id,
@@ -193,13 +224,17 @@ pub fn convert_openai_resp_to_anthropic(resp: &OpenAIChatResponse, req_model: &s
         }
     }
 
-    let usage = resp.usage.as_ref().map(|u| AnthropicUsage {
-        input_tokens: u.prompt_tokens,
-        output_tokens: u.completion_tokens,
-    }).unwrap_or(AnthropicUsage {
-        input_tokens: 0,
-        output_tokens: 0,
-    });
+    let usage = resp
+        .usage
+        .as_ref()
+        .map(|u| AnthropicUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+        })
+        .unwrap_or(AnthropicUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        });
 
     AnthropicResponse {
         id: format!("msg_{}", resp.id),
@@ -228,27 +263,25 @@ mod tests {
                 },
                 AnthropicMessage {
                     role: "assistant".to_string(),
-                    content: Value::Array(vec![
-                        json!({
-                            "type": "tool_use",
-                            "id": "call_123",
-                            "name": "bash",
-                            "input": { "command": "ls -la" }
-                        })
-                    ]),
+                    content: Value::Array(vec![json!({
+                        "type": "tool_use",
+                        "id": "call_123",
+                        "name": "bash",
+                        "input": { "command": "ls -la" }
+                    })]),
                 },
                 AnthropicMessage {
                     role: "user".to_string(),
-                    content: Value::Array(vec![
-                        json!({
-                            "type": "tool_result",
-                            "tool_use_id": "call_123",
-                            "content": "file1.txt\nfile2.txt"
-                        })
-                    ]),
+                    content: Value::Array(vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": "call_123",
+                        "content": "file1.txt\nfile2.txt"
+                    })]),
                 },
             ],
-            system: Some(Value::String("You are a helpful coding assistant.".to_string())),
+            system: Some(Value::String(
+                "You are a helpful coding assistant.".to_string(),
+            )),
             max_tokens: Some(4096),
             temperature: Some(0.7),
             tools: Some(vec![AnthropicTool {
@@ -274,7 +307,10 @@ mod tests {
         assert_eq!(oai_req.messages[2].role, "assistant");
         assert!(oai_req.messages[2].tool_calls.is_some());
         assert_eq!(oai_req.messages[3].role, "tool");
-        assert_eq!(oai_req.messages[3].tool_call_id, Some("call_123".to_string()));
+        assert_eq!(
+            oai_req.messages[3].tool_call_id,
+            Some("call_123".to_string())
+        );
         assert_eq!(oai_req.tools.as_ref().unwrap().len(), 1);
     }
 }

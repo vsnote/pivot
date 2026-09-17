@@ -18,7 +18,7 @@ pub async fn get_gateway_status(state: State<'_, AppState>) -> Result<Value, Str
         .unwrap_or(0);
 
     Ok(json!({
-        "isRunning": true,
+        "isRunning": state.stats.is_running.load(Ordering::Relaxed),
         "host": "127.0.0.1",
         "port": state.port,
         "activeRequests": state.stats.active_requests.load(Ordering::Relaxed),
@@ -36,7 +36,8 @@ pub async fn get_providers(state: State<'_, AppState>) -> Result<Vec<Provider>, 
 }
 
 #[tauri::command]
-pub async fn save_provider(state: State<'_, AppState>, provider: Provider) -> Result<(), String> {
+pub async fn save_provider(state: State<'_, AppState>, mut provider: Provider) -> Result<(), String> {
+    crate::provider_models::validate_provider(&mut provider)?;
     state.db.save_provider(&provider).map_err(|e| e.to_string())
 }
 
@@ -56,7 +57,10 @@ pub async fn test_provider_latency(state: State<'_, AppState>, id: String) -> Re
     let start = Instant::now();
     let url = provider.base_url.trim_end_matches('/').to_string();
 
-    let mut req = state.http_client.get(&url).timeout(std::time::Duration::from_secs(5));
+    let mut req = state
+        .http_client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5));
     if let Some(key) = provider.api_keys.first() {
         if provider.protocol == "anthropic" {
             req = req.header("x-api-key", key);
@@ -113,7 +117,9 @@ pub async fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_interceptor_status(state: State<'_, AppState>) -> Result<Vec<InterceptorInfo>, String> {
+pub async fn get_interceptor_status(
+    state: State<'_, AppState>,
+) -> Result<Vec<InterceptorInfo>, String> {
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     Ok(mgr.get_all_status())
 }
@@ -134,30 +140,21 @@ pub fn get_presets() -> Vec<Preset> {
 }
 
 #[tauri::command]
-pub async fn import_preset(state: State<'_, AppState>, preset_id: String) -> Result<Provider, String> {
-    let presets = presets::get_default_presets();
-    let preset = presets
-        .into_iter()
-        .find(|p| p.id == preset_id)
-        .ok_or_else(|| format!("Preset not found: {}", preset_id))?;
+pub fn sync_native_tab(tab: String) {
+    crate::macos_tab::set_selected_tab(&tab);
+}
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let provider = Provider {
-        id: preset.id,
-        name: preset.name,
-        protocol: preset.protocol,
-        base_url: preset.base_url,
-        api_keys: Vec::new(),
-        models: preset.default_models,
-        enabled: true,
-        priority: 10,
-        weight: 1,
-        timeout_secs: 60,
-        latency_ms: None,
-        created_at: Some(now.clone()),
-        updated_at: Some(now),
-    };
+#[tauri::command]
+pub fn set_native_toolbar_enabled(enabled: bool) {
+    crate::macos_tab::set_toolbar_enabled(enabled);
+}
 
-    state.db.save_provider(&provider).map_err(|e| e.to_string())?;
-    Ok(provider)
+#[tauri::command]
+pub async fn fetch_provider_models(protocol: String, base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    crate::provider_models::fetch_models(&protocol, &base_url, &api_key).await
+}
+
+#[tauri::command]
+pub async fn set_provider_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    state.db.set_provider_enabled(&id, enabled).map_err(|e| e.to_string())
 }

@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test": "node --test scripts/test_*.mjs",
     "test:cli": "node scripts/simulate_claude_cli.mjs"
   },
   "dependencies": {

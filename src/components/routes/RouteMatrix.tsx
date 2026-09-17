@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { Switch } from '@/components/common/Switch';
 import {
   Plus,
   ArrowRight,
   Edit2,
   Trash2,
-  Sparkles,
   Search,
   CheckCircle2,
+  Network,
 } from 'lucide-react';
 
 export const RouteMatrix: React.FC = () => {
@@ -16,6 +17,8 @@ export const RouteMatrix: React.FC = () => {
   const [testModelInput, setTestModelInput] = useState('claude-3-7-sonnet-20250219');
 
   const handleDelete = async (id: string) => {
+    const route = routes.find((item) => item.id === id);
+    if (!window.confirm(`确定删除路由“${route?.pattern ?? id}”吗？此操作无法撤销。`)) return;
     const updated = routes.filter((r) => r.id !== id);
     await saveRoutes(updated);
   };
@@ -40,7 +43,7 @@ export const RouteMatrix: React.FC = () => {
       const p = providers.find((pr) => pr.id.toLowerCase() === prefix.toLowerCase());
       if (p) {
         return {
-          matchedRule: '前缀路由分发规则',
+          matchedRule: '前缀路由',
           primary: p.name,
           primaryModel: sub,
           fallbacks: providers.filter((pr) => pr.id !== p.id && pr.enabled).map((pr) => pr.name),
@@ -55,7 +58,7 @@ export const RouteMatrix: React.FC = () => {
       if (r.pattern === '*' || input.toLowerCase().includes(r.pattern.replace('*', '').toLowerCase())) {
         const p = providers.find((pr) => pr.id === r.targetProviderId);
         return {
-          matchedRule: `命中规则 '${r.pattern}' (优先级: ${r.priority})`,
+          matchedRule: `命中“${r.pattern}”（优先级 ${r.priority}）`,
           primary: p ? p.name : r.targetProviderId,
           primaryModel: r.targetModel || input,
           fallbacks: r.fallbackProviderIds.map((id: string) => getProviderName(id)),
@@ -69,178 +72,174 @@ export const RouteMatrix: React.FC = () => {
   const simulation = simulateRoute();
 
   return (
-    <div className="space-y-6">
-      {/* 顶部工具栏 */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            动态路由矩阵
-          </h2>
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            将客户端传入的模型请求按模式智能分发至目标服务商，支持多级故障自动降级队列
-          </p>
-        </div>
-
-        <button
-          onClick={() => openRouteModal(null)}
-          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors shadow-xs self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>添加路由规则</span>
-        </button>
-      </div>
-
-      {/* 实时路由匹配模拟器 */}
-      <div className="p-4 rounded-xl border border-indigo-200/70 dark:border-indigo-900/60 bg-gradient-to-r from-indigo-50/40 via-white to-violet-50/30 dark:from-indigo-950/20 dark:via-gray-900 dark:to-violet-950/20 shadow-xs">
-        <div className="flex items-center gap-2 mb-2 text-indigo-700 dark:text-indigo-300">
-          <Sparkles className="w-4 h-4" />
-          <h3 className="text-xs font-semibold uppercase tracking-wider">
-            实时路由匹配模拟器
-          </h3>
-        </div>
-
+    <div className="space-y-4 pb-8 animate-in fade-in duration-150">
+      {/* 顶部操作栏：模型匹配测试与添加路由 */}
+      <div className="p-3.5 rounded-xl border border-gray-200/80 dark:border-white/10 bg-white dark:bg-[#1a1b1e] shadow-xs">
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
           <div className="relative flex-1">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
               value={testModelInput}
               onChange={(e) => setTestModelInput(e.target.value)}
-              placeholder="输入模型名称测试路由匹配 (例如 claude-3-7-sonnet, openai/gpt-4o, deepseek-r1)..."
-              className="w-full pl-9 pr-4 py-2 text-sm font-mono rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              placeholder="输入模型名称测试路由，例如 claude-3-7-sonnet、gpt-4o"
+              className="w-full pl-8.5 pr-4 py-1.5 text-xs font-mono rounded-lg border border-gray-200 dark:border-zinc-800 bg-gray-50/60 dark:bg-zinc-900/60 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/30"
             />
           </div>
 
-          {simulation && (
-            <div className="flex items-center gap-2 text-xs bg-white dark:bg-gray-800 p-2 rounded-lg border border-gray-200 dark:border-gray-700 font-mono">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-              <div className="truncate">
-                <span className="text-gray-400">目标: </span>
-                <span className="font-semibold text-indigo-600 dark:text-indigo-400">
-                  {simulation.primary}
-                </span>
-                <span className="text-gray-500"> ({simulation.primaryModel})</span>
-                {simulation.fallbacks.length > 0 && (
-                  <span className="text-gray-400">
-                    {' '}
-                    &rarr; 降级备选: {simulation.fallbacks.join(', ')}
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
+          <button
+            onClick={() => openRouteModal(null)}
+            className="flex items-center justify-center gap-1.5 px-3 h-7 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors shadow-xs shrink-0 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>添加路由</span>
+          </button>
         </div>
+
+        {simulation && (
+          <div className="mt-2.5 flex items-center gap-2 text-xs bg-indigo-50/60 dark:bg-indigo-950/30 p-2 rounded-lg border border-indigo-100 dark:border-indigo-900/40 font-mono">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <div className="truncate text-[11.5px]">
+              <span className="text-gray-500 dark:text-zinc-400">路由至：</span>
+              <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                {simulation.primary}
+              </span>
+              <span className="text-gray-500 dark:text-zinc-400">（{simulation.primaryModel}）</span>
+              {simulation.fallbacks.length > 0 && (
+                <span className="text-gray-400 dark:text-zinc-500">
+                  {' '}
+                  &rarr; 备用：{simulation.fallbacks.join('、')}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* 规则表格 */}
-      <div className="border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden bg-white dark:bg-gray-900 shadow-xs">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-gray-200 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-800/50 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              <th className="py-3 px-4">匹配模式 (Pattern)</th>
-              <th className="py-3 px-4">目标服务商 (Target)</th>
-              <th className="py-3 px-4">模型重定向 (Override)</th>
-              <th className="py-3 px-4">降级备选队列 (Fallbacks)</th>
-              <th className="py-3 px-4 text-center">优先级</th>
-              <th className="py-3 px-4 text-center">状态</th>
-              <th className="py-3 px-4 text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-sm">
-            {routes.map((route) => {
-              const primaryProv = providers.find((p) => p.id === route.targetProviderId);
-              return (
-                <tr
-                  key={route.id}
-                  className={`hover:bg-gray-50/80 dark:hover:bg-gray-800/40 transition-colors ${
-                    !route.enabled ? 'opacity-50' : ''
-                  }`}
-                >
-                  {/* Pattern */}
-                  <td className="py-3 px-4">
-                    <span className="font-mono text-xs font-semibold px-2 py-1 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/50 dark:border-indigo-800/40">
+
+      {/* 规则卡片行列表 */}
+      {routes.length === 0 ? (
+        <div className="text-center py-16 border border-dashed border-gray-200 dark:border-gray-800 rounded-xl bg-white/50 dark:bg-[#1a1b1e]/50">
+          <Network className="w-10 h-10 text-gray-400 mx-auto mb-2.5" />
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+            暂无路由
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 max-w-sm mx-auto">
+            添加路由后，可按模型名称分发请求并设置备用服务商。
+          </p>
+          <div className="mt-4">
+            <button
+              onClick={() => openRouteModal(null)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>创建路由</span>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {routes.map((route) => {
+            const primaryProv = providers.find((p) => p.id === route.targetProviderId);
+
+            return (
+              <div
+                key={route.id}
+                className="group rounded-xl border border-gray-200/80 dark:border-gray-800/80 bg-white dark:bg-[#1a1b1e] p-3 transition-all duration-150 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-gray-300 dark:hover:border-gray-700 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+              >
+                {/* 左侧：模式、指向目标、降级 */}
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap text-xs">
+                    {/* Pattern Badge */}
+                    <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/50">
                       {route.pattern}
                     </span>
-                    {route.description && (
-                      <div className="text-[11px] text-gray-400 mt-1 max-w-xs truncate">
-                        {route.description}
-                      </div>
-                    )}
-                  </td>
 
-                  {/* Target Provider */}
-                  <td className="py-3 px-4">
-                    <span className="font-medium text-gray-900 dark:text-gray-100">
-                      {primaryProv ? primaryProv.name : route.targetProviderId}
-                    </span>
-                    <span className="ml-1.5 text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 uppercase">
-                      {primaryProv?.protocol || 'api'}
-                    </span>
-                  </td>
+                    <ArrowRight className="w-3.5 h-3.5 text-gray-400 shrink-0" />
 
-                  {/* Target Model Override */}
-                  <td className="py-3 px-4 font-mono text-xs text-gray-500 dark:text-gray-400">
-                    {route.targetModel || <span className="italic text-gray-400">透传原模型</span>}
-                  </td>
+                    {/* Target Provider */}
+                    <div className="flex items-center gap-1.5 font-medium text-gray-900 dark:text-gray-100">
+                      <span>{primaryProv ? primaryProv.name : route.targetProviderId}</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 uppercase border border-gray-200/60 dark:border-gray-700/60">
+                        {primaryProv?.protocol || 'api'}
+                      </span>
+                    </div>
 
-                  {/* Fallback Queue */}
-                  <td className="py-3 px-4">
-                    {route.fallbackProviderIds.length === 0 ? (
-                      <span className="text-xs text-gray-400 italic">无</span>
+                    {/* Target Model Override */}
+                    {route.targetModel ? (
+                      <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border border-violet-200/60 dark:border-violet-800/50">
+                        &rarr; {route.targetModel}
+                      </span>
                     ) : (
-                      <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] text-gray-400 italic">
+                        (透传请求模型)
+                      </span>
+                    )}
+
+                    {/* Priority Badge */}
+                    <span className="ml-auto sm:ml-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 border border-gray-200/60 dark:border-gray-700/60">
+                      优先级：{route.priority}
+                    </span>
+                  </div>
+
+                  {/* 降级与说明 */}
+                  <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
+                    {route.description && (
+                      <span className="text-gray-500 dark:text-gray-400 text-xs">
+                        {route.description}
+                      </span>
+                    )}
+
+                    {route.fallbackProviderIds.length > 0 && (
+                      <div className="flex items-center gap-1 text-[11px] font-mono text-gray-400">
+                        <span>备用：</span>
                         {route.fallbackProviderIds.map((fbId, idx) => (
                           <React.Fragment key={fbId}>
-                            {idx > 0 && <ArrowRight className="w-3 h-3 text-gray-400" />}
-                            <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 font-mono text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60">
+                            {idx > 0 && <span>&rarr;</span>}
+                            <span className="px-1.5 py-0.2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200/50 dark:border-amber-800/40">
                               {getProviderName(fbId)}
                             </span>
                           </React.Fragment>
                         ))}
                       </div>
                     )}
-                  </td>
+                  </div>
+                </div>
 
-                  {/* Priority */}
-                  <td className="py-3 px-4 text-center font-mono text-xs text-gray-600 dark:text-gray-400">
-                    {route.priority}
-                  </td>
+                {/* 右侧：开关与操作 */}
+                <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => openRouteModal(route)}
+                      aria-label={`编辑路由 ${route.pattern}`}
+                      className="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                      title="编辑路由"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(route.id)}
+                      aria-label={`删除路由 ${route.pattern}`}
+                      className="p-1 rounded-md text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                      title="删除路由"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
 
-                  {/* Toggle */}
-                  <td className="py-3 px-4 text-center">
-                    <input
-                      type="checkbox"
-                      checked={route.enabled}
-                      onChange={(e) => handleToggle(route.id, e.target.checked)}
-                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                    />
-                  </td>
-
-                  {/* Actions */}
-                  <td className="py-3 px-4 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        onClick={() => openRouteModal(route)}
-                        className="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-                        title="编辑规则"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(route.id)}
-                        className="p-1 rounded text-gray-400 hover:text-red-600 dark:hover:text-red-400"
-                        title="删除规则"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                  {/* 开关 */}
+                  <Switch
+                    checked={route.enabled}
+                    onCheckedChange={(checked) => handleToggle(route.id, checked)}
+                    ariaLabel={`${route.enabled ? '停用' : '启用'}路由 ${route.pattern}`}
+                    className="ml-1"
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

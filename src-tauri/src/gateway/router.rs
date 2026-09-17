@@ -84,8 +84,10 @@ impl RoutingEngine {
             return Err("No active providers enabled in OmniSwitch".to_string());
         }
 
-        let provider_map: HashMap<&str, &Provider> =
-            active_providers.iter().map(|p| (p.id.as_str(), *p)).collect();
+        let provider_map: HashMap<&str, &Provider> = active_providers
+            .iter()
+            .map(|p| (p.id.as_str(), *p))
+            .collect();
 
         // 1. Check for prefix routing (e.g. "openai/gpt-4o", "anthropic/claude-3-7-sonnet")
         if let Some((prefix, sub_model)) = incoming_model.split_once('/') {
@@ -155,7 +157,11 @@ impl RoutingEngine {
 
         // 3. Fallback: match any provider that contains the model in its models list
         for provider in &active_providers {
-            if provider.models.iter().any(|m| m.eq_ignore_ascii_case(incoming_model)) {
+            if provider
+                .models
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(incoming_model))
+            {
                 let primary = RouteCandidate {
                     provider: (*provider).clone(),
                     target_model: incoming_model.to_string(),
@@ -267,6 +273,7 @@ mod tests {
             name: "Anthropic".to_string(),
             protocol: "anthropic".to_string(),
             base_url: "https://api.anthropic.com/v1".to_string(),
+            preset_id: None,
             api_keys: vec!["sk-ant-1".to_string(), "sk-ant-2".to_string()],
             models: vec!["claude-3-7-sonnet".to_string()],
             enabled: true,
@@ -283,6 +290,7 @@ mod tests {
             name: "OpenRouter".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
+            preset_id: None,
             api_keys: vec!["sk-or-1".to_string()],
             models: vec!["anthropic/claude-3.7-sonnet".to_string()],
             enabled: true,
@@ -308,20 +316,36 @@ mod tests {
         let providers = vec![p1.clone(), p2.clone()];
 
         // Test normal route match
-        let rm = engine.resolve_route("claude-3-7-sonnet", Some("sess_123"), &providers, &routes).unwrap();
+        let rm = engine
+            .resolve_route("claude-3-7-sonnet", Some("sess_123"), &providers, &routes)
+            .unwrap();
         assert_eq!(rm.primary.provider.id, "anthropic");
         assert_eq!(rm.primary.target_model, "claude-3-7-sonnet");
         assert_eq!(rm.fallbacks.len(), 1);
         assert_eq!(rm.fallbacks[0].provider.id, "openrouter");
 
         // Test Session Affinity gives deterministic key
-        let key1 = engine.select_api_key(&p1, Some("user_session_abc")).unwrap();
-        let key2 = engine.select_api_key(&p1, Some("user_session_abc")).unwrap();
+        let key1 = engine
+            .select_api_key(&p1, Some("user_session_abc"))
+            .unwrap();
+        let key2 = engine
+            .select_api_key(&p1, Some("user_session_abc"))
+            .unwrap();
         assert_eq!(key1, key2);
 
         // Test Prefix routing (e.g. "openrouter/anthropic/claude-3.7-sonnet")
-        let rm_prefix = engine.resolve_route("openrouter/anthropic/claude-3.7-sonnet", None, &providers, &routes).unwrap();
+        let rm_prefix = engine
+            .resolve_route(
+                "openrouter/anthropic/claude-3.7-sonnet",
+                None,
+                &providers,
+                &routes,
+            )
+            .unwrap();
         assert_eq!(rm_prefix.primary.provider.id, "openrouter");
-        assert_eq!(rm_prefix.primary.target_model, "anthropic/claude-3.7-sonnet");
+        assert_eq!(
+            rm_prefix.primary.target_model,
+            "anthropic/claude-3.7-sonnet"
+        );
     }
 }

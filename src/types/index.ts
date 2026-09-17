@@ -5,6 +5,7 @@ export interface Provider {
   name: string;
   protocol: Protocol;
   baseUrl: string;
+  presetId?: string | null;
   apiKeys: string[];
   models: string[];
   enabled: boolean;
@@ -80,5 +81,7 @@ export interface Preset {
   icon?: string;
   category: string;
 }
+
+export type SettingsSection = 'clients' | 'routes' | 'gateway' | 'logs' | 'about';
 
 export type ActiveTab = 'dashboard' | 'providers' | 'routes' | 'interceptor' | 'logs' | 'settings';

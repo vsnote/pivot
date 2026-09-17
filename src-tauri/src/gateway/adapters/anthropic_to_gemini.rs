@@ -5,7 +5,11 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
     let mut contents = Vec::new();
 
     for msg in &req.messages {
-        let role = if msg.role == "assistant" { "model" } else { "user" };
+        let role = if msg.role == "assistant" {
+            "model"
+        } else {
+            "user"
+        };
         let mut parts = Vec::new();
 
         match &msg.content {
@@ -30,7 +34,11 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                             }
                         }
                         "tool_use" => {
-                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let args = block.get("input").cloned().unwrap_or(json!({}));
                             parts.push(GeminiPart {
                                 text: None,
@@ -117,7 +125,10 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
     }
 }
 
-pub fn convert_gemini_resp_to_anthropic(resp: &GeminiResponse, req_model: &str) -> AnthropicResponse {
+pub fn convert_gemini_resp_to_anthropic(
+    resp: &GeminiResponse,
+    req_model: &str,
+) -> AnthropicResponse {
     let mut content_blocks = Vec::new();
     let mut stop_reason = Some("end_turn".to_string());
 
@@ -132,7 +143,11 @@ pub fn convert_gemini_resp_to_anthropic(resp: &GeminiResponse, req_model: &str) 
                         }));
                     }
                     if let Some(ref fc) = part.function_call {
-                        let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let name = fc
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let args = fc.get("args").cloned().unwrap_or(json!({}));
                         content_blocks.push(json!({
                             "type": "tool_use",
@@ -147,13 +162,17 @@ pub fn convert_gemini_resp_to_anthropic(resp: &GeminiResponse, req_model: &str) 
         }
     }
 
-    let usage = resp.usage_metadata.as_ref().map(|u| AnthropicUsage {
-        input_tokens: u.prompt_token_count.unwrap_or(0),
-        output_tokens: u.candidates_token_count.unwrap_or(0),
-    }).unwrap_or(AnthropicUsage {
-        input_tokens: 0,
-        output_tokens: 0,
-    });
+    let usage = resp
+        .usage_metadata
+        .as_ref()
+        .map(|u| AnthropicUsage {
+            input_tokens: u.prompt_token_count.unwrap_or(0),
+            output_tokens: u.candidates_token_count.unwrap_or(0),
+        })
+        .unwrap_or(AnthropicUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        });
 
     AnthropicResponse {
         id: format!("msg_{}", uuid::Uuid::new_v4()),

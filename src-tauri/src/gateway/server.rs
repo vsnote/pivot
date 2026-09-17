@@ -1,6 +1,7 @@
 use crate::db::{Database, RequestLog};
 use crate::gateway::adapters::{
-    anthropic_to_gemini, anthropic_to_openai, openai_to_anthropic, parse_anthropic_event_to_openai_chunks,
+    anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, openai_to_anthropic,
+    parse_anthropic_event_to_openai_chunks, parse_gemini_chunk_to_anthropic_events,
     parse_openai_chunk_to_anthropic_events, SseState,
 };
 use crate::gateway::router::{RouteCandidate, RoutingEngine};
@@ -16,7 +17,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -24,6 +25,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Debug, Default)]
 pub struct GatewayStatsInternal {
+    pub is_running: AtomicBool,
     pub active_requests: AtomicI64,
     pub total_requests: AtomicU64,
     pub total_prompt_tokens: AtomicU64,
@@ -39,6 +41,12 @@ pub struct GatewayState {
     pub http_client: reqwest::Client,
     pub stats: Arc<GatewayStatsInternal>,
     pub app_handle: Option<tauri::AppHandle>,
+}
+
+struct DispatchResult {
+    response: Response,
+    prompt_tokens: u32,
+    completion_tokens: u32,
 }
 
 pub fn create_gateway_router(state: GatewayState) -> Router {
@@ -67,7 +75,13 @@ async fn health_check() -> Json<Value> {
 }
 
 async fn get_stats(State(state): State<GatewayState>) -> Json<Value> {
-    let uptime = state.stats.start_time.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    let uptime = state
+        .stats
+        .start_time
+        .lock()
+        .unwrap()
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
     Json(json!({
         "activeRequests": state.stats.active_requests.load(Ordering::Relaxed),
         "totalRequests": state.stats.total_requests.load(Ordering::Relaxed),
@@ -161,14 +175,22 @@ async fn handle_messages(
     let providers = state.db.get_providers().unwrap_or_default();
     let routes = state.db.get_routes().unwrap_or_default();
 
-    let route_match = match state.router.resolve_route(&req.model, session_id.as_deref(), &providers, &routes) {
-        Ok(rm) => rm,
-        Err(err) => {
-            state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
-            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
-            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": { "message": err, "type": "routing_error" } }))).into_response();
-        }
-    };
+    let route_match =
+        match state
+            .router
+            .resolve_route(&req.model, session_id.as_deref(), &providers, &routes)
+        {
+            Ok(rm) => rm,
+            Err(err) => {
+                state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": { "message": err, "type": "routing_error" } })),
+                )
+                    .into_response();
+            }
+        };
 
     let is_stream = req.stream.unwrap_or(false);
     let mut candidates = vec![route_match.primary];
@@ -181,7 +203,11 @@ async fn handle_messages(
     for (cand_idx, cand) in candidates.iter().enumerate() {
         if cand_idx > 0 {
             fallback_used = true;
-            tracing::warn!("Failing over to fallback candidate {} ({})", cand.provider.name, cand.target_model);
+            tracing::warn!(
+                "Failing over to fallback candidate {} ({})",
+                cand.provider.name,
+                cand.target_model
+            );
         }
 
         let resp_result = dispatch_anthropic_request(
@@ -191,12 +217,21 @@ async fn handle_messages(
             &req_id,
             is_stream,
             client_key.as_deref(),
-        ).await;
+        )
+        .await;
 
         match resp_result {
-            Ok(resp) => {
+            Ok(result) => {
                 let latency_ms = start_time.elapsed().as_millis() as i64;
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_prompt_tokens
+                    .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_completion_tokens
+                    .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
 
                 // Log the successful request
                 let log = RequestLog {
@@ -211,8 +246,8 @@ async fn handle_messages(
                     routed_model: cand.target_model.clone(),
                     status_code: 200,
                     latency_ms,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
+                    prompt_tokens: result.prompt_tokens as i32,
+                    completion_tokens: result.completion_tokens as i32,
                     error_message: None,
                     is_stream,
                     fallback_used,
@@ -220,7 +255,7 @@ async fn handle_messages(
                 let _ = state.db.insert_log(&log);
                 emit_log_event(&state, &log);
 
-                return resp;
+                return result.response;
             }
             Err((status, err_msg)) => {
                 last_error = err_msg;
@@ -258,7 +293,11 @@ async fn handle_messages(
     let _ = state.db.insert_log(&log);
     emit_log_event(&state, &log);
 
-    (last_status, Json(json!({ "error": { "message": last_error, "type": "upstream_error" } }))).into_response()
+    (
+        last_status,
+        Json(json!({ "error": { "message": last_error, "type": "upstream_error" } })),
+    )
+        .into_response()
 }
 
 async fn dispatch_anthropic_request(
@@ -268,7 +307,7 @@ async fn dispatch_anthropic_request(
     req_id: &str,
     is_stream: bool,
     client_key: Option<&str>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<DispatchResult, (StatusCode, String)> {
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let effective_key = cand.api_key.as_deref().or(client_key);
 
@@ -294,29 +333,57 @@ async fn dispatch_anthropic_request(
             }
 
             let res = req_builder.json(&req_body).send().await.map_err(|e| {
-                (StatusCode::BAD_GATEWAY, format!("Upstream connection failed: {}", e))
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Upstream connection failed: {}", e),
+                )
             })?;
 
             if !res.status().is_success() {
-                let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let text = res.text().await.unwrap_or_default();
                 return Err((status, text));
             }
 
             if is_stream {
-                let stream_bytes = res.bytes_stream().map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
-                Ok(Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .header("connection", "keep-alive")
-                    .body(Body::from_stream(stream_bytes))
-                    .unwrap())
+                let stream_bytes = res
+                    .bytes_stream()
+                    .map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(stream_bytes))
+                        .unwrap(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                })
             } else {
-                let bytes = res.bytes().await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-                Ok(Response::builder()
-                    .header("content-type", "application/json")
-                    .body(Body::from(bytes))
-                    .unwrap())
+                let bytes = res
+                    .bytes()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+                let usage = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .and_then(|body| body.get("usage").cloned());
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(bytes))
+                        .unwrap(),
+                    prompt_tokens: usage
+                        .as_ref()
+                        .and_then(|u| u.get("input_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
+                    completion_tokens: usage
+                        .as_ref()
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
+                })
             }
         }
         "openai" | "openrouter" | "ollama" => {
@@ -326,7 +393,8 @@ async fn dispatch_anthropic_request(
                 url = format!("{}/chat/completions", url);
             }
 
-            let openai_req = anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
+            let openai_req =
+                anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
 
             let mut req_builder = client
                 .post(&url)
@@ -338,11 +406,15 @@ async fn dispatch_anthropic_request(
             }
 
             let res = req_builder.json(&openai_req).send().await.map_err(|e| {
-                (StatusCode::BAD_GATEWAY, format!("OpenAI upstream connection failed: {}", e))
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("OpenAI upstream connection failed: {}", e),
+                )
             })?;
 
             if !res.status().is_success() {
-                let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let text = res.text().await.unwrap_or_default();
                 return Err((status, text));
             }
@@ -382,18 +454,31 @@ async fn dispatch_anthropic_request(
                     }
                 };
 
-                Ok(Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .header("connection", "keep-alive")
-                    .body(Body::from_stream(sse_stream))
-                    .unwrap())
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(sse_stream))
+                        .unwrap(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                })
             } else {
                 let openai_resp: OpenAIChatResponse = res.json().await.map_err(|e| {
-                    (StatusCode::BAD_GATEWAY, format!("Failed to parse OpenAI response: {}", e))
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse OpenAI response: {}", e),
+                    )
                 })?;
-                let anthropic_resp = anthropic_to_openai::convert_openai_resp_to_anthropic(&openai_resp, &req.model);
-                Ok(Json(anthropic_resp).into_response())
+                let usage = openai_resp.usage.clone();
+                let anthropic_resp =
+                    anthropic_to_openai::convert_openai_resp_to_anthropic(&openai_resp, &req.model);
+                Ok(DispatchResult {
+                    response: Json(anthropic_resp).into_response(),
+                    prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                    completion_tokens: usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                })
             }
         }
         "gemini" => {
@@ -402,9 +487,15 @@ async fn dispatch_anthropic_request(
             let gemini_req = anthropic_to_gemini::convert_anthropic_req_to_gemini(req);
 
             let endpoint = if is_stream {
-                format!("{}/models/{}:streamGenerateContent?alt=sse&key={}", base, cand.target_model, api_key)
+                format!(
+                    "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                    base, cand.target_model, api_key
+                )
             } else {
-                format!("{}/models/{}:generateContent?key={}", base, cand.target_model, api_key)
+                format!(
+                    "{}/models/{}:generateContent?key={}",
+                    base, cand.target_model, api_key
+                )
             };
 
             let res = client
@@ -414,30 +505,108 @@ async fn dispatch_anthropic_request(
                 .json(&gemini_req)
                 .send()
                 .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Gemini connection error: {}", e)))?;
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Gemini connection error: {}", e),
+                    )
+                })?;
 
             if !res.status().is_success() {
-                let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let text = res.text().await.unwrap_or_default();
                 return Err((status, text));
             }
 
             if is_stream {
-                // Stream gemini responses
-                let stream_bytes = res.bytes_stream().map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
-                Ok(Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .body(Body::from_stream(stream_bytes))
-                    .unwrap())
+                // Gemini SSE is not Anthropic SSE. Translate each upstream data line
+                // so Claude Code receives the same event contract as other providers.
+                let req_id_str = req_id.to_string();
+                let model_str = req.model.clone();
+                let byte_stream = res.bytes_stream();
+
+                let sse_stream = stream! {
+                    let mut sse_state = SseState::new();
+                    let mut buffer = String::new();
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            if let Ok(s) = std::str::from_utf8(&bytes) {
+                                buffer.push_str(s);
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].trim().to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+                                    if !line.is_empty() {
+                                        let events = parse_gemini_chunk_to_anthropic_events(
+                                            &line,
+                                            &mut sse_state,
+                                            &req_id_str,
+                                            &model_str,
+                                        );
+                                        for event in events {
+                                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !buffer.trim().is_empty() {
+                        let events = parse_gemini_chunk_to_anthropic_events(
+                            buffer.trim(),
+                            &mut sse_state,
+                            &req_id_str,
+                            &model_str,
+                        );
+                        for event in events {
+                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
+                        }
+                    }
+
+                    for event in finish_gemini_stream(&mut sse_state, "end_turn") {
+                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
+                    }
+                };
+
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(sse_stream))
+                        .unwrap(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                })
             } else {
                 let gemini_resp: GeminiResponse = res.json().await.map_err(|e| {
-                    (StatusCode::BAD_GATEWAY, format!("Failed to parse Gemini response: {}", e))
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse Gemini response: {}", e),
+                    )
                 })?;
-                let anthropic_resp = anthropic_to_gemini::convert_gemini_resp_to_anthropic(&gemini_resp, &req.model);
-                Ok(Json(anthropic_resp).into_response())
+                let usage = gemini_resp.usage_metadata.clone();
+                let anthropic_resp =
+                    anthropic_to_gemini::convert_gemini_resp_to_anthropic(&gemini_resp, &req.model);
+                Ok(DispatchResult {
+                    response: Json(anthropic_resp).into_response(),
+                    prompt_tokens: usage
+                        .as_ref()
+                        .and_then(|u| u.prompt_token_count)
+                        .unwrap_or(0),
+                    completion_tokens: usage
+                        .as_ref()
+                        .and_then(|u| u.candidates_token_count)
+                        .unwrap_or(0),
+                })
             }
         }
-        _ => Err((StatusCode::BAD_GATEWAY, format!("Unsupported protocol: {}", cand.provider.protocol))),
+        _ => Err((
+            StatusCode::BAD_GATEWAY,
+            format!("Unsupported protocol: {}", cand.provider.protocol),
+        )),
     }
 }
 
@@ -457,14 +626,22 @@ async fn handle_chat_completions(
     let providers = state.db.get_providers().unwrap_or_default();
     let routes = state.db.get_routes().unwrap_or_default();
 
-    let route_match = match state.router.resolve_route(&req.model, session_id.as_deref(), &providers, &routes) {
-        Ok(rm) => rm,
-        Err(err) => {
-            state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
-            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
-            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": { "message": err, "type": "routing_error" } }))).into_response();
-        }
-    };
+    let route_match =
+        match state
+            .router
+            .resolve_route(&req.model, session_id.as_deref(), &providers, &routes)
+        {
+            Ok(rm) => rm,
+            Err(err) => {
+                state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": { "message": err, "type": "routing_error" } })),
+                )
+                    .into_response();
+            }
+        };
 
     let is_stream = req.stream.unwrap_or(false);
     let mut candidates = vec![route_match.primary];
@@ -477,7 +654,11 @@ async fn handle_chat_completions(
     for (cand_idx, cand) in candidates.iter().enumerate() {
         if cand_idx > 0 {
             fallback_used = true;
-            tracing::warn!("Failing over chat/completions to fallback candidate {} ({})", cand.provider.name, cand.target_model);
+            tracing::warn!(
+                "Failing over chat/completions to fallback candidate {} ({})",
+                cand.provider.name,
+                cand.target_model
+            );
         }
 
         let resp_result = dispatch_openai_request(
@@ -487,12 +668,21 @@ async fn handle_chat_completions(
             &req_id,
             is_stream,
             client_key.as_deref(),
-        ).await;
+        )
+        .await;
 
         match resp_result {
-            Ok(resp) => {
+            Ok(result) => {
                 let latency_ms = start_time.elapsed().as_millis() as i64;
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_prompt_tokens
+                    .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_completion_tokens
+                    .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
 
                 let log = RequestLog {
                     id: req_id.clone(),
@@ -506,8 +696,8 @@ async fn handle_chat_completions(
                     routed_model: cand.target_model.clone(),
                     status_code: 200,
                     latency_ms,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
+                    prompt_tokens: result.prompt_tokens as i32,
+                    completion_tokens: result.completion_tokens as i32,
                     error_message: None,
                     is_stream,
                     fallback_used,
@@ -515,7 +705,7 @@ async fn handle_chat_completions(
                 let _ = state.db.insert_log(&log);
                 emit_log_event(&state, &log);
 
-                return resp;
+                return result.response;
             }
             Err((status, err_msg)) => {
                 last_error = err_msg;
@@ -552,7 +742,11 @@ async fn handle_chat_completions(
     let _ = state.db.insert_log(&log);
     emit_log_event(&state, &log);
 
-    (last_status, Json(json!({ "error": { "message": last_error, "type": "upstream_error" } }))).into_response()
+    (
+        last_status,
+        Json(json!({ "error": { "message": last_error, "type": "upstream_error" } })),
+    )
+        .into_response()
 }
 
 async fn dispatch_openai_request(
@@ -562,7 +756,7 @@ async fn dispatch_openai_request(
     req_id: &str,
     is_stream: bool,
     client_key: Option<&str>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<DispatchResult, (StatusCode, String)> {
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let effective_key = cand.api_key.as_deref().or(client_key);
 
@@ -586,34 +780,63 @@ async fn dispatch_openai_request(
             }
 
             let res = req_builder.json(&req_body).send().await.map_err(|e| {
-                (StatusCode::BAD_GATEWAY, format!("Upstream connection failed: {}", e))
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Upstream connection failed: {}", e),
+                )
             })?;
 
             if !res.status().is_success() {
-                let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let text = res.text().await.unwrap_or_default();
                 return Err((status, text));
             }
 
             if is_stream {
-                let stream_bytes = res.bytes_stream().map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
-                Ok(Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .header("connection", "keep-alive")
-                    .body(Body::from_stream(stream_bytes))
-                    .unwrap())
+                let stream_bytes = res
+                    .bytes_stream()
+                    .map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(stream_bytes))
+                        .unwrap(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                })
             } else {
-                let bytes = res.bytes().await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-                Ok(Response::builder()
-                    .header("content-type", "application/json")
-                    .body(Body::from(bytes))
-                    .unwrap())
+                let bytes = res
+                    .bytes()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+                let usage = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .and_then(|body| body.get("usage").cloned());
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(bytes))
+                        .unwrap(),
+                    prompt_tokens: usage
+                        .as_ref()
+                        .and_then(|u| u.get("prompt_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
+                    completion_tokens: usage
+                        .as_ref()
+                        .and_then(|u| u.get("completion_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32,
+                })
             }
         }
         "anthropic" => {
             // Client called OpenAI endpoint, but upstream is Anthropic!
-            let anthropic_req = openai_to_anthropic::convert_openai_req_to_anthropic(req, &cand.target_model);
+            let anthropic_req =
+                openai_to_anthropic::convert_openai_req_to_anthropic(req, &cand.target_model);
             let mut url = cand.provider.base_url.trim_end_matches('/').to_string();
             if !url.ends_with("/messages") {
                 url = format!("{}/messages", url);
@@ -630,11 +853,15 @@ async fn dispatch_openai_request(
             }
 
             let res = req_builder.json(&anthropic_req).send().await.map_err(|e| {
-                (StatusCode::BAD_GATEWAY, format!("Anthropic upstream connection failed: {}", e))
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Anthropic upstream connection failed: {}", e),
+                )
             })?;
 
             if !res.status().is_success() {
-                let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let text = res.text().await.unwrap_or_default();
                 return Err((status, text));
             }
@@ -672,21 +899,43 @@ async fn dispatch_openai_request(
                     }
                 };
 
-                Ok(Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .header("connection", "keep-alive")
-                    .body(Body::from_stream(sse_stream))
-                    .unwrap())
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(sse_stream))
+                        .unwrap(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                })
             } else {
                 let anthropic_resp: AnthropicResponse = res.json().await.map_err(|e| {
-                    (StatusCode::BAD_GATEWAY, format!("Failed to parse Anthropic response: {}", e))
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse Anthropic response: {}", e),
+                    )
                 })?;
-                let openai_resp = openai_to_anthropic::convert_anthropic_resp_to_openai(&anthropic_resp, &req.model);
-                Ok(Json(openai_resp).into_response())
+                let prompt_tokens = anthropic_resp.usage.input_tokens;
+                let completion_tokens = anthropic_resp.usage.output_tokens;
+                let openai_resp = openai_to_anthropic::convert_anthropic_resp_to_openai(
+                    &anthropic_resp,
+                    &req.model,
+                );
+                Ok(DispatchResult {
+                    response: Json(openai_resp).into_response(),
+                    prompt_tokens,
+                    completion_tokens,
+                })
             }
         }
-        _ => Err((StatusCode::BAD_GATEWAY, format!("Unsupported protocol for chat completions: {}", cand.provider.protocol))),
+        _ => Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Unsupported protocol for chat completions: {}",
+                cand.provider.protocol
+            ),
+        )),
     }
 }
 

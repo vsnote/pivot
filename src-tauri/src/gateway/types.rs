@@ -35,7 +35,7 @@ pub struct AnthropicThinkingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicMessage {
-    pub role: String, // "user" or "assistant"
+    pub role: String,   // "user" or "assistant"
     pub content: Value, // String or Vec<AnthropicContentBlock>
 }
 

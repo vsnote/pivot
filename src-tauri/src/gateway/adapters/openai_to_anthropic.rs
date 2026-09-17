@@ -1,7 +1,10 @@
 use crate::gateway::types::*;
 use serde_json::{json, Value};
 
-pub fn convert_openai_req_to_anthropic(req: &OpenAIChatRequest, target_model: &str) -> AnthropicMessageRequest {
+pub fn convert_openai_req_to_anthropic(
+    req: &OpenAIChatRequest,
+    target_model: &str,
+) -> AnthropicMessageRequest {
     let mut system_text = String::new();
     let mut anthropic_messages = Vec::new();
 
@@ -35,7 +38,8 @@ pub fn convert_openai_req_to_anthropic(req: &OpenAIChatRequest, target_model: &s
                 }
                 if let Some(ref tcs) = msg.tool_calls {
                     for tc in tcs {
-                        let parsed_input: Value = serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| json!({}));
+                        let parsed_input: Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or_else(|_| json!({}));
                         blocks.push(json!({
                             "type": "tool_use",
                             "id": tc.id,
@@ -86,7 +90,11 @@ pub fn convert_openai_req_to_anthropic(req: &OpenAIChatRequest, target_model: &s
     AnthropicMessageRequest {
         model: target_model.to_string(),
         messages: anthropic_messages,
-        system: if system_text.is_empty() { None } else { Some(Value::String(system_text)) },
+        system: if system_text.is_empty() {
+            None
+        } else {
+            Some(Value::String(system_text))
+        },
         max_tokens: req.max_completion_tokens.or(req.max_tokens).or(Some(4096)),
         temperature: req.temperature,
         tools: anthropic_tools,
@@ -97,7 +105,10 @@ pub fn convert_openai_req_to_anthropic(req: &OpenAIChatRequest, target_model: &s
     }
 }
 
-pub fn convert_anthropic_resp_to_openai(resp: &AnthropicResponse, req_model: &str) -> OpenAIChatResponse {
+pub fn convert_anthropic_resp_to_openai(
+    resp: &AnthropicResponse,
+    req_model: &str,
+) -> OpenAIChatResponse {
     let mut text_content = String::new();
     let mut tool_calls = Vec::new();
 
@@ -110,8 +121,16 @@ pub fn convert_anthropic_resp_to_openai(resp: &AnthropicResponse, req_model: &st
                 }
             }
             "tool_use" => {
-                let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("call_1").to_string();
-                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("call_1")
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let input = block.get("input").cloned().unwrap_or(json!({}));
                 let args_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
 
@@ -138,8 +157,16 @@ pub fn convert_anthropic_resp_to_openai(resp: &AnthropicResponse, req_model: &st
 
     let message = OpenAIMessage {
         role: "assistant".to_string(),
-        content: if text_content.is_empty() { None } else { Some(Value::String(text_content)) },
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        content: if text_content.is_empty() {
+            None
+        } else {
+            Some(Value::String(text_content))
+        },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
         tool_call_id: None,
         reasoning_content: None,
         name: None,

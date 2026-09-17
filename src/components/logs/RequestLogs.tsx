@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { Select } from '@/components/common/Select';
 import {
   FileText,
   Trash2,
@@ -43,40 +44,40 @@ export const RequestLogs: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-8">
       {/* 筛选与操作栏 */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
             <Filter className="w-3.5 h-3.5" />
-            <span>筛选:</span>
+            <span>筛选</span>
           </div>
 
-          <select
+          <Select
             value={selectedClient}
             onChange={(e) => setSelectedClient(e.target.value)}
-            className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+            containerClassName="w-36"
           >
             <option value="all">全部客户端</option>
             <option value="claude_code">Claude Code</option>
             <option value="codex_cli">Codex CLI</option>
             <option value="gemini_cli">Gemini CLI</option>
-          </select>
+          </Select>
 
-          <select
+          <Select
             value={selectedStatus}
             onChange={(e) => setSelectedStatus(e.target.value)}
-            className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+            containerClassName="w-32"
           >
             <option value="all">全部状态</option>
             <option value="success">2xx 正常</option>
             <option value="error">4xx / 5xx 异常</option>
-          </select>
+          </Select>
         </div>
 
         <button
           onClick={clearLogs}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-400 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-400 bg-white dark:bg-[#1a1b1e] border border-gray-200/90 dark:border-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800/80 transition-colors shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
         >
           <Trash2 className="w-3.5 h-3.5" />
           <span>清空日志</span>
@@ -85,27 +86,27 @@ export const RequestLogs: React.FC = () => {
 
       {/* 日志记录表格 */}
       {filteredLogs.length === 0 ? (
-        <div className="text-center py-16 border-2 border-dashed border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-900/20">
+        <div className="text-center py-16 border border-dashed border-gray-200 dark:border-gray-800 rounded-xl bg-white/50 dark:bg-[#1a1b1e]/50">
           <FileText className="w-10 h-10 text-gray-400 mx-auto mb-2" />
           <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-            暂无请求活动记录
+            暂无请求日志
           </h3>
           <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 max-w-sm mx-auto">
-            当 Claude Code、Codex CLI 或第三方工具向 http://127.0.0.1:16888 发起请求时，调用详情、响应延迟与路由轨迹将实时显示在此处。
+            客户端发起请求后，这里会显示状态、耗时和路由结果。
           </p>
         </div>
       ) : (
-        <div className="border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden bg-white dark:bg-gray-900 shadow-xs">
+        <div className="border border-gray-200/80 dark:border-gray-800/80 rounded-xl overflow-hidden bg-white dark:bg-[#1a1b1e] shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="border-b border-gray-200 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-800/50 text-[11px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                <th className="py-2.5 px-4">请求时间</th>
-                <th className="py-2.5 px-4">状态码</th>
+              <tr className="border-b border-gray-200/80 dark:border-gray-800/80 bg-gray-50/80 dark:bg-[#151619] text-[11px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                <th className="py-2.5 px-4">时间</th>
+                <th className="py-2.5 px-4">状态</th>
                 <th className="py-2.5 px-4">客户端</th>
-                <th className="py-2.5 px-4">接口路径</th>
+                <th className="py-2.5 px-4">路径</th>
                 <th className="py-2.5 px-4">请求模型</th>
-                <th className="py-2.5 px-4">实际路由服务商 &amp; 模型</th>
-                <th className="py-2.5 px-4 text-right">延迟</th>
+                <th className="py-2.5 px-4">路由结果</th>
+                <th className="py-2.5 px-4 text-right">耗时</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-xs">
@@ -161,7 +162,7 @@ export const RequestLogs: React.FC = () => {
                         <span className="text-gray-500">{log.routedModel}</span>
                       </div>
                     ) : (
-                      <span className="text-red-500 truncate">{log.errorMessage || 'Failed'}</span>
+                      <span className="text-red-500 truncate">{log.errorMessage || '请求失败'}</span>
                     )}
                   </td>
 

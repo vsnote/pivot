@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { Switch } from '@/components/common/Switch';
 import {
   Terminal,
   ShieldCheck,
@@ -11,10 +12,36 @@ import {
   Sparkles,
 } from 'lucide-react';
 
+const DEFAULT_INTERCEPTORS: any[] = [
+  {
+    id: 'claude_code',
+    name: 'Claude Code',
+    installed: true,
+    configPath: '~/.claude.json',
+    isIntercepted: false,
+  },
+  {
+    id: 'codex_cli',
+    name: 'Codex CLI',
+    installed: true,
+    configPath: '~/.codex/config.json',
+    isIntercepted: false,
+  },
+  {
+    id: 'gemini_cli',
+    name: 'Gemini CLI',
+    installed: false,
+    configPath: '~/.gemini/config.json',
+    isIntercepted: false,
+  },
+];
+
 export const InterceptorPanel: React.FC = () => {
   const { interceptors, toggleInterceptor, stats } = useAppStore();
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const displayList = interceptors.length > 0 ? interceptors : DEFAULT_INTERCEPTORS;
 
   const handleToggle = async (id: string, enable: boolean) => {
     setTogglingId(id);
@@ -35,80 +62,54 @@ export const InterceptorPanel: React.FC = () => {
   const openaiExport = `export OPENAI_BASE_URL=http://127.0.0.1:${stats.port}/v1`;
 
   return (
-    <div className="space-y-6">
-      {/* 概览说明横幅 */}
-      <div className="p-5 rounded-2xl border border-indigo-200/80 dark:border-indigo-900/60 bg-gradient-to-r from-indigo-50/50 via-white to-violet-50/40 dark:from-indigo-950/20 dark:via-gray-900 dark:to-violet-950/20 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">
-              一键客户端接管 (Client Interceptor)
-            </h2>
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 font-semibold">
-              零配置无感接入
-            </span>
-          </div>
-          <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 max-w-xl">
-            一键修改本地 AI 编程客户端配置文件，将请求智能重定向至 OmniSwitch 本地聚合网关。关闭开关时自动原子级还原备份。
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <div className="text-right hidden sm:block font-mono text-xs">
-            <span className="text-gray-400">本地网关目标: </span>
-            <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-              127.0.0.1:{stats.port}
-            </span>
-          </div>
-        </div>
-      </div>
-
+    <div className="space-y-4 pb-8 animate-in fade-in duration-150">
       {/* 客户端卡片列表 */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-        {interceptors.map((tool) => {
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+        {displayList.map((tool) => {
           const isToggling = togglingId === tool.id;
 
           return (
             <div
               key={tool.id}
-              className={`border rounded-2xl p-5 flex flex-col justify-between transition-all duration-200 shadow-xs ${
+              className={`rounded-2xl p-4.5 flex flex-col justify-between transition-all duration-150 bg-white dark:bg-[#1a1b1e] border shadow-xs ${
                 tool.isIntercepted
-                  ? 'border-indigo-500/60 dark:border-indigo-500/60 bg-white dark:bg-gray-900 ring-1 ring-indigo-500/20'
-                  : 'border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 hover:border-gray-300 dark:hover:border-gray-700'
+                  ? 'border-indigo-500/50 dark:border-indigo-500/50 ring-1 ring-indigo-500/20'
+                  : 'border-gray-200/80 dark:border-white/10 hover:border-gray-300 dark:hover:border-white/20'
               }`}
             >
               <div>
                 {/* Header */}
-                <div className="flex items-start justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-3">
+                <div className="flex items-start justify-between gap-2 mb-3.5">
+                  <div className="flex items-center gap-2.5">
                     <div
-                      className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                      className={`w-9 h-9 rounded-xl flex items-center justify-center ${
                         tool.isIntercepted
-                          ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/20'
-                          : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'
+                          ? 'bg-indigo-600 text-white shadow-xs shadow-indigo-500/30'
+                          : 'bg-gray-100 dark:bg-white/[0.06] text-gray-600 dark:text-zinc-300'
                       }`}
                     >
                       {tool.id === 'claude_code' ? (
-                        <Terminal className="w-5 h-5" />
+                        <Terminal className="w-4.5 h-4.5" />
                       ) : tool.id === 'codex_cli' ? (
-                        <ShieldCheck className="w-5 h-5" />
+                        <ShieldCheck className="w-4.5 h-4.5" />
                       ) : (
-                        <Sparkles className="w-5 h-5" />
+                        <Sparkles className="w-4.5 h-4.5" />
                       )}
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
+                      <h3 className="text-sm font-semibold text-gray-950 dark:text-white">
                         {tool.name}
                       </h3>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         {tool.installed ? (
                           <span className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
                             <CheckCircle2 className="w-3 h-3" />
-                            已检测到配置
+                            已检测到客户端
                           </span>
                         ) : (
                           <span className="flex items-center gap-1 text-[11px] text-gray-400">
                             <AlertCircle className="w-3 h-3" />
-                            未检测到文件
+                            未安装或未初始化
                           </span>
                         )}
                       </div>
@@ -116,55 +117,52 @@ export const InterceptorPanel: React.FC = () => {
                   </div>
 
                   {/* Switch */}
-                  <label className="relative inline-flex items-center cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={tool.isIntercepted}
-                      disabled={isToggling}
-                      onChange={(e) => handleToggle(tool.id, e.target.checked)}
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600"></div>
-                  </label>
+                  <Switch
+                    checked={tool.isIntercepted}
+                    disabled={isToggling}
+                    onCheckedChange={(checked) => handleToggle(tool.id, checked)}
+                    ariaLabel={`${tool.isIntercepted ? '关闭' : '开启'} ${tool.name} 代理`}
+                    size="md"
+                  />
                 </div>
 
                 {/* 接管状态指示 */}
-                <div className="mb-4">
+                <div className="mb-3">
                   <div
-                    className={`p-2.5 rounded-xl border text-xs font-mono flex items-center justify-between ${
+                    className={`p-2 rounded-lg border text-xs font-mono flex items-center justify-between ${
                       tool.isIntercepted
-                        ? 'bg-indigo-50/60 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800/60 text-indigo-700 dark:text-indigo-300'
-                        : 'bg-gray-50 dark:bg-gray-800/50 border-gray-100 dark:border-gray-800 text-gray-500 dark:text-gray-400'
+                        ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200/60 dark:border-indigo-800/60 text-indigo-700 dark:text-indigo-300'
+                        : 'bg-gray-50/70 dark:bg-white/[0.02] border-gray-100 dark:border-white/5 text-gray-500 dark:text-zinc-400'
                     }`}
                   >
-                    <span>接管状态:</span>
+                    <span>路由状态</span>
                     <span className="font-semibold">
-                      {tool.isIntercepted ? `已接管 (: ${stats.port})` : '未接管 (官方直连)'}
+                      {tool.isIntercepted ? `已代理至端口 ${stats.port}` : '官方直连'}
                     </span>
                   </div>
                 </div>
 
                 {/* 配置文件路径 */}
-                <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1.5 font-mono mb-4">
-                  <div className="text-[11px] uppercase tracking-wider text-gray-400 font-semibold">
-                    配置文件路径:
+                <div className="text-[11px] text-gray-500 dark:text-zinc-400 space-y-1 font-mono mb-3">
+                  <div className="text-[10.5px] uppercase tracking-wider text-gray-400 dark:text-zinc-500 font-medium">
+                    配置文件：
                   </div>
-                  <div className="p-2 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-100 dark:border-gray-800 break-all text-[11px]">
+                  <div className="p-2 bg-gray-50/80 dark:bg-white/[0.03] rounded-lg border border-gray-100 dark:border-white/5 break-all text-[11px] select-all">
                     {tool.configPath}
                   </div>
                 </div>
               </div>
 
-              {/* 备份状态 */}
-              <div className="pt-3 border-t border-gray-100 dark:border-gray-800/80 flex items-center justify-between text-[11px] text-gray-400">
+              {/* 备份提示 */}
+              <div className="pt-2.5 border-t border-gray-100 dark:border-white/5 flex items-center justify-between text-[11px] text-gray-400 dark:text-zinc-500">
                 <div className="flex items-center gap-1">
                   <RotateCcw className="w-3 h-3 text-emerald-500" />
-                  <span>原子级备份还原保障</span>
+                  <span>关闭时自动恢复</span>
                 </div>
 
                 {isToggling && (
                   <span className="text-indigo-600 dark:text-indigo-400 animate-pulse font-medium">
-                    正在写入...
+                    写入中...
                   </span>
                 )}
               </div>
@@ -173,26 +171,27 @@ export const InterceptorPanel: React.FC = () => {
         })}
       </div>
 
-      {/* 终端手动命令备选 */}
-      <div className="p-5 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs space-y-3">
+      {/* 终端环境变量 */}
+      <div className="p-4.5 rounded-2xl border border-gray-200/80 dark:border-white/10 bg-white dark:bg-[#1a1b1e] shadow-xs space-y-2.5">
         <div className="flex items-center gap-2">
           <Terminal className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-            终端临时环境变量（备选方案）
+          <h3 className="text-xs font-semibold text-gray-950 dark:text-white">
+            终端临时环境变量
           </h3>
         </div>
-        <p className="text-xs text-gray-500 dark:text-gray-400">
-          如需在特定 Shell 窗口临时使用，可直接复制并执行以下命令：
+        <p className="text-xs text-gray-500 dark:text-zinc-400">
+          如需在特定 Shell 窗口临时指向 OmniSwitch，可直接复制运行以下命令：
         </p>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-0.5">
           {/* Claude Code snippet */}
-          <div className="flex items-center justify-between bg-gray-900 text-gray-100 p-3 rounded-xl font-mono text-xs border border-gray-800">
+          <div className="flex items-center justify-between bg-gray-950 text-gray-100 p-2.5 px-3 rounded-xl font-mono text-xs border border-gray-800/90">
             <span className="truncate">{claudeExport}</span>
             <button
               onClick={() => copyToClipboard('claude', claudeExport)}
-              className="ml-2 p-1.5 rounded hover:bg-gray-800 text-gray-400 hover:text-white transition-colors"
-              title="复制环境变量命令"
+              aria-label="复制 Anthropic 环境变量命令"
+              className="ml-2 p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white transition-colors cursor-pointer"
+              title="复制命令"
             >
               {copiedKey === 'claude' ? (
                 <Check className="w-3.5 h-3.5 text-emerald-400" />
@@ -203,12 +202,13 @@ export const InterceptorPanel: React.FC = () => {
           </div>
 
           {/* OpenAI snippet */}
-          <div className="flex items-center justify-between bg-gray-900 text-gray-100 p-3 rounded-xl font-mono text-xs border border-gray-800">
+          <div className="flex items-center justify-between bg-gray-950 text-gray-100 p-2.5 px-3 rounded-xl font-mono text-xs border border-gray-800/90">
             <span className="truncate">{openaiExport}</span>
             <button
               onClick={() => copyToClipboard('openai', openaiExport)}
-              className="ml-2 p-1.5 rounded hover:bg-gray-800 text-gray-400 hover:text-white transition-colors"
-              title="复制环境变量命令"
+              aria-label="复制 OpenAI 环境变量命令"
+              className="ml-2 p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white transition-colors cursor-pointer"
+              title="复制命令"
             >
               {copiedKey === 'openai' ? (
                 <Check className="w-3.5 h-3.5 text-emerald-400" />

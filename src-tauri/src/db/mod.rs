@@ -12,6 +12,7 @@ pub struct Provider {
     pub name: String,
     pub protocol: String,
     pub base_url: String,
+    pub preset_id: Option<String>,
     pub api_keys: Vec<String>,
     pub models: Vec<String>,
     pub enabled: bool,
@@ -144,12 +145,23 @@ impl Database {
                 updated_at TEXT NOT NULL
             );",
         )?;
+        let has_preset_id = conn.prepare("PRAGMA table_info(providers)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?.iter().any(|name| name == "preset_id");
+        if !has_preset_id {
+            conn.execute("ALTER TABLE providers ADD COLUMN preset_id TEXT", [])?;
+            for preset in presets::get_default_presets() {
+                conn.execute("UPDATE providers SET preset_id = ?1 WHERE id = ?1 AND protocol = ?2 AND rtrim(base_url, '/') = rtrim(?3, '/')",
+                    params![preset.id, preset.protocol, preset.base_url])?;
+            }
+        }
         Ok(())
     }
 
     fn seed_defaults_if_empty(&self) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let provider_count: i64 = conn.query_row("SELECT count(*) FROM providers", [], |r| r.get(0))?;
+        let provider_count: i64 =
+            conn.query_row("SELECT count(*) FROM providers", [], |r| r.get(0))?;
 
         if provider_count == 0 {
             let now = chrono::Utc::now().to_rfc3339();
@@ -158,11 +170,15 @@ impl Database {
             for preset in presets.iter().take(6) {
                 let api_keys_json = serde_json::to_string(&Vec::<String>::new()).unwrap();
                 let models_json = serde_json::to_string(&preset.default_models).unwrap();
-                let enabled = if preset.id == "anthropic" || preset.id == "openai" { 1 } else { 0 };
+                let enabled = if preset.id == "anthropic" || preset.id == "openai" {
+                    1
+                } else {
+                    0
+                };
 
                 conn.execute(
-                    "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12)",
+                    "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?1)",
                     params![
                         preset.id,
                         preset.name,
@@ -190,7 +206,9 @@ impl Database {
                     fallback_provider_ids: vec!["openrouter".to_string(), "deepseek".to_string()],
                     enabled: true,
                     priority: 100,
-                    description: Some("Dispatch Claude models to Anthropic with OpenRouter fallback".to_string()),
+                    description: Some(
+                        "Dispatch Claude models to Anthropic with OpenRouter fallback".to_string(),
+                    ),
                 },
                 RouteRule {
                     id: "route_gpt".to_string(),
@@ -220,7 +238,9 @@ impl Database {
                     fallback_provider_ids: vec!["openrouter".to_string()],
                     enabled: true,
                     priority: 80,
-                    description: Some("Dispatch DeepSeek requests to DeepSeek official".to_string()),
+                    description: Some(
+                        "Dispatch DeepSeek requests to DeepSeek official".to_string(),
+                    ),
                 },
                 RouteRule {
                     id: "route_gemini".to_string(),
@@ -268,7 +288,7 @@ impl Database {
     pub fn get_providers(&self) -> Result<Vec<Provider>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at
+            "SELECT id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id
              FROM providers ORDER BY priority DESC, name ASC",
         )?;
 
@@ -293,6 +313,7 @@ impl Database {
                 latency_ms: row.get(10)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
+                preset_id: row.get(13)?,
             })
         })?;
 
@@ -305,13 +326,15 @@ impl Database {
 
     pub fn save_provider(&self, provider: &Provider) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let api_keys_json = serde_json::to_string(&provider.api_keys).unwrap_or_else(|_| "[]".to_string());
-        let models_json = serde_json::to_string(&provider.models).unwrap_or_else(|_| "[]".to_string());
+        let api_keys_json =
+            serde_json::to_string(&provider.api_keys).unwrap_or_else(|_| "[]".to_string());
+        let models_json =
+            serde_json::to_string(&provider.models).unwrap_or_else(|_| "[]".to_string());
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 protocol = excluded.protocol,
@@ -323,7 +346,8 @@ impl Database {
                 weight = excluded.weight,
                 timeout_secs = excluded.timeout_secs,
                 latency_ms = excluded.latency_ms,
-                updated_at = excluded.updated_at;",
+                updated_at = excluded.updated_at,
+                preset_id = excluded.preset_id;",
             params![
                 provider.id,
                 provider.name,
@@ -338,8 +362,17 @@ impl Database {
                 provider.latency_ms,
                 provider.created_at.clone().unwrap_or_else(|| now.clone()),
                 now,
+                provider.preset_id,
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn set_provider_enabled(&self, id: &str, enabled: bool) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute("UPDATE providers SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+            params![enabled, chrono::Utc::now().to_rfc3339(), id])?;
+        if updated == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
         Ok(())
     }
 
@@ -349,7 +382,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_provider_latency(&self, id: &str, latency_ms: i64) -> Result<(), rusqlite::Error> {
+    pub fn update_provider_latency(
+        &self,
+        id: &str,
+        latency_ms: i64,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE providers SET latency_ms = ?1 WHERE id = ?2",
@@ -367,7 +404,8 @@ impl Database {
 
         let rows = stmt.query_map([], |row| {
             let fallbacks_str: String = row.get(4)?;
-            let fallback_provider_ids: Vec<String> = serde_json::from_str(&fallbacks_str).unwrap_or_default();
+            let fallback_provider_ids: Vec<String> =
+                serde_json::from_str(&fallbacks_str).unwrap_or_default();
             let enabled_int: i32 = row.get(5)?;
 
             Ok(RouteRule {
@@ -395,7 +433,8 @@ impl Database {
         tx.execute("DELETE FROM routes", [])?;
 
         for route in routes {
-            let fallbacks_json = serde_json::to_string(&route.fallback_provider_ids).unwrap_or_else(|_| "[]".to_string());
+            let fallbacks_json = serde_json::to_string(&route.fallback_provider_ids)
+                .unwrap_or_else(|_| "[]".to_string());
             tx.execute(
                 "INSERT INTO routes (id, pattern, target_provider_id, target_model, fallback_provider_ids, enabled, priority, description)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -442,7 +481,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_logs(&self, limit: usize, offset: usize) -> Result<Vec<RequestLog>, rusqlite::Error> {
+    pub fn get_logs(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<RequestLog>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used
@@ -486,7 +529,13 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_interceptor_state(&self, client_id: &str, is_intercepted: bool, backup: Option<&str>, original_endpoint: Option<&str>) -> Result<(), rusqlite::Error> {
+    pub fn save_interceptor_state(
+        &self,
+        client_id: &str,
+        is_intercepted: bool,
+        backup: Option<&str>,
+        original_endpoint: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -508,7 +557,10 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_interceptor_state(&self, client_id: &str) -> Result<Option<(bool, Option<String>, Option<String>)>, rusqlite::Error> {
+    pub fn get_interceptor_state(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<(bool, Option<String>, Option<String>)>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT is_intercepted, backup_config, original_endpoint FROM interceptor_state WHERE client_id = ?1")?;
         let mut rows = stmt.query(params![client_id])?;
@@ -521,5 +573,42 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    #[test]
+    fn preset_migration_and_roundtrip_preserve_existing_configuration() {
+        let path = std::env::temp_dir().join(format!("omni-provider-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::new(path.clone()).unwrap();
+        let mut existing = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
+        existing.api_keys = vec!["keep-test-key".into()];
+        existing.priority = 72;
+        existing.timeout_secs = 180;
+        existing.enabled = false;
+        db.save_provider(&existing).unwrap();
+        // Simulate the previous schema, then run the additive migration twice.
+        db.conn.lock().unwrap().execute("ALTER TABLE providers DROP COLUMN preset_id", []).unwrap();
+        db.init_tables().unwrap();
+        db.init_tables().unwrap();
+        let migrated = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
+        assert_eq!(migrated.preset_id.as_deref(), Some("openai"));
+        assert_eq!(migrated.api_keys, existing.api_keys);
+        assert_eq!(migrated.timeout_secs, 180);
+        assert_eq!(migrated.priority, 72);
+        assert!(!migrated.enabled);
+        let mut copy = migrated.clone();
+        copy.id = format!("prov_{}", uuid::Uuid::new_v4());
+        copy.api_keys.clear();
+        db.save_provider(&copy).unwrap();
+        db.set_provider_enabled(&copy.id, true).unwrap();
+        let original = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
+        assert_eq!(original.api_keys, existing.api_keys);
+        assert!(!original.enabled);
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -7,9 +7,9 @@ import { CopyButton } from '@/components/common/CopyButton';
 import { Library, Trash2, Pencil, Zap, KeyRound, Server, Network, LoaderCircle } from 'lucide-react';
 
 function ProviderRow({ provider }: { provider: Provider }) {
-  const { openProviderModal, deleteProvider, toggleProvider, testProviderLatency } = useAppStore(
+  const { openProviderEditor, deleteProvider, toggleProvider, testProviderLatency } = useAppStore(
     useShallow((state) => ({
-      openProviderModal: state.openProviderModal,
+      openProviderEditor: state.openProviderEditor,
       deleteProvider: state.deleteProvider,
       toggleProvider: state.toggleProvider,
       testProviderLatency: state.testProviderLatency,
@@ -58,7 +58,7 @@ function ProviderRow({ provider }: { provider: Provider }) {
         </button>
       ) : <span className="latency-button mono" aria-label="无网络延迟数据">—</span>}
       <div className="provider-actions">
-        <button type="button" className="icon-button" disabled={pending !== null} onClick={() => openProviderModal(provider)} aria-label={`编辑服务商 ${provider.name}`} title="编辑服务商"><Pencil size={14} /></button>
+        <button type="button" className="icon-button" disabled={pending !== null} onClick={() => openProviderEditor(provider)} aria-label={`编辑服务商 ${provider.name}`} title="编辑服务商"><Pencil size={14} /></button>
         <button type="button" className="icon-button danger" disabled={pending !== null} onClick={() => runAction('delete')} aria-label={`删除服务商 ${provider.name}`} title="删除服务商"><Trash2 size={14} /></button>
         <span className="w-px h-4 bg-[var(--border-color)] mx-1" aria-hidden="true" />
         <Switch checked={provider.enabled} disabled={pending !== null} onCheckedChange={() => runAction('toggle')} ariaLabel={`${provider.enabled ? '停用' : '启用'}服务商 ${provider.name}`} />
@@ -68,18 +68,25 @@ function ProviderRow({ provider }: { provider: Provider }) {
 }
 
 export function ProviderList() {
-  const { providers, openPresetDrawer } = useAppStore(
-    useShallow((state) => ({ providers: state.providers, openPresetDrawer: state.openPresetDrawer })),
+  const { providers, initialLoaded, isLoading, openProviderEditor } = useAppStore(
+    useShallow((state) => ({ providers: state.providers, initialLoaded: state.initialLoaded, isLoading: state.isLoading, openProviderEditor: state.openProviderEditor })),
   );
+  const dataReady = initialLoaded && !isLoading;
 
   return (
     <div className="page-stack pt-3.5">
-      {providers.length === 0 ? (
+      {!dataReady ? (
+        <section className="surface empty-state" aria-label="正在加载服务商">
+          <div className="empty-icon"><Network size={22} /></div>
+          <h2>正在加载服务商…</h2>
+          <p>真实配置尚未就绪，暂时不能编辑或新增，避免覆盖已有密钥。</p>
+        </section>
+      ) : providers.length === 0 ? (
         <section className="surface empty-state">
           <div className="empty-icon"><Network size={22} /></div>
           <h2>连接第一个模型服务</h2>
-          <p>从预设库选择服务商，再填入密钥。也可以手动添加兼容接口或本地模型。</p>
-          <button type="button" className="button button-primary mt-2" onClick={openPresetDrawer}><Library size={14} />浏览预设库</button>
+          <p>选择服务商、填写密钥并选择模型，也支持自定义接口或本地模型。</p>
+          <button type="button" className="button button-primary mt-2" onClick={() => openProviderEditor()}><Library size={14} />添加服务商</button>
         </section>
       ) : (
         <>
