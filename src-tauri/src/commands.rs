@@ -42,9 +42,18 @@ pub async fn save_provider(state: State<'_, AppState>, mut provider: Provider) -
     state.db.save_provider(&provider).map_err(|e| e.to_string())
 }
 
+/// Deletes a provider and returns the routing rules that survive it, because a
+/// provider can be the target or a fallback of a rule the caller is showing.
 #[tauri::command]
-pub async fn delete_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_provider(&id).map_err(|e| e.to_string())
+pub async fn delete_provider(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<RouteRule>, String> {
+    state
+        .db
+        .delete_provider(&id)
+        .map_err(|_| format!("服务商 {} 不存在或已被删除", id))?;
+    state.db.get_routes().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

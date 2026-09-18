@@ -164,17 +164,12 @@ impl Drop for TempDatabase {
     }
 }
 
-/// A database that only holds what the test declares. The seeded presets are
-/// removed on purpose: they ship enabled with the preset model list, which would
-/// otherwise win the exact-match step (and call the real Anthropic API).
+/// A database that only holds what the test declares: providers are user
+/// configuration, so a fresh database is empty in both tables.
 fn temp_db(label: &str) -> Database {
     let temp = TempDatabase::new(label);
     let db = Database::new(temp.path.clone()).unwrap();
-    for preset in db.get_providers().unwrap() {
-        db.delete_provider(&preset.id).unwrap();
-    }
     assert!(db.get_providers().unwrap().is_empty());
-    // Routing rules are not seeded any more; these tests add none.
     assert!(db.get_routes().unwrap().is_empty());
     db
 }

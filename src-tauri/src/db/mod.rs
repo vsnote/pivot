@@ -118,7 +118,14 @@ impl Database {
         };
 
         db.init_tables()?;
-        db.seed_defaults_if_empty()?;
+        let removed = db.remove_untouched_seeded_providers()?;
+        if !removed.is_empty() {
+            tracing::info!(
+                "Removed {} unused provider entries that earlier versions inserted: {}",
+                removed.len(),
+                removed.join(", ")
+            );
+        }
 
         Ok(db)
     }
@@ -211,47 +218,81 @@ impl Database {
         Ok(())
     }
 
-    fn seed_defaults_if_empty(&self) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
-        let provider_count: i64 =
-            conn.query_row("SELECT count(*) FROM providers", [], |r| r.get(0))?;
+    /// Removes the provider entries an earlier release had inserted on first run.
+    ///
+    /// Providers are user configuration now: a fresh database starts empty and the
+    /// presets are only a catalogue to add from. A row is removed only when it is
+    /// still the seeded default apart from being disabled: no key, preset protocol,
+    /// endpoint and model list, and an id that equals the preset id. Only rows the
+    /// old seeding created can match, because providers added through the UI always
+    /// get a generated id. Such a row cannot serve a request, and the preset list
+    /// recreates it in one click. The display name is deliberately not compared —
+    /// preset labels change between releases, while the seeded configuration does
+    /// not. Returns the ids that were removed.
+    fn remove_untouched_seeded_providers(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut removed = Vec::new();
 
-        if provider_count == 0 {
-            let now = chrono::Utc::now().to_rfc3339();
-            // Seed default Anthropic, OpenAI, DeepSeek, OpenRouter, and Ollama providers
-            let presets = presets::get_default_presets();
-            for preset in presets.iter().take(6) {
-                let api_keys_json = serde_json::to_string(&Vec::<String>::new()).unwrap();
-                let models_json = serde_json::to_string(&preset.default_models).unwrap();
-                let enabled = if preset.id == "anthropic" || preset.id == "openai" {
-                    1
-                } else {
-                    0
-                };
-
-                conn.execute(
-                    "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?1)",
-                    params![
-                        preset.id,
-                        preset.name,
-                        preset.protocol,
-                        preset.base_url,
-                        api_keys_json,
-                        models_json,
-                        enabled,
-                        10,
-                        1,
-                        60,
-                        now,
-                        now,
-                    ],
-                )?;
+        for preset in presets::get_default_presets() {
+            let models_json = serde_json::to_string(&preset.default_models).unwrap_or_default();
+            let changed = tx.execute(
+                "DELETE FROM providers
+                 WHERE id = ?1
+                   AND preset_id = ?1
+                   AND protocol = ?2
+                   AND rtrim(base_url, '/') = rtrim(?3, '/')
+                   AND models = ?4
+                   AND api_keys = '[]'
+                   AND enabled = 0",
+                params![
+                    preset.id,
+                    preset.protocol,
+                    preset.base_url,
+                    models_json,
+                ],
+            )?;
+            if changed > 0 {
+                Self::drop_routes_referencing(&tx, &preset.id)?;
+                removed.push(preset.id);
             }
+        }
 
-            // Routing rules are intentionally not seeded: model resolution, aliases
-            // and the fallback chain are derived from the provider configuration.
-            // The routes table stays available for advanced overrides.
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Keeps the rules table honest when a provider disappears: rules targeting it
+    /// can never fire again, and rules listing it as a fallback drop that entry.
+    fn drop_routes_referencing(tx: &rusqlite::Transaction, id: &str) -> Result<(), rusqlite::Error> {
+        tx.execute(
+            "DELETE FROM routes WHERE target_provider_id = ?1",
+            params![id],
+        )?;
+
+        let affected: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, fallback_provider_ids FROM routes")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (route_id, fallbacks_json) in affected {
+            let mut fallbacks: Vec<String> =
+                serde_json::from_str(&fallbacks_json).unwrap_or_default();
+            if !fallbacks.iter().any(|fallback| fallback == id) {
+                continue;
+            }
+            fallbacks.retain(|fallback| fallback != id);
+            tx.execute(
+                "UPDATE routes SET fallback_provider_ids = ?1 WHERE id = ?2",
+                params![
+                    serde_json::to_string(&fallbacks).unwrap_or_else(|_| "[]".to_string()),
+                    route_id
+                ],
+            )?;
         }
         Ok(())
     }
@@ -370,9 +411,18 @@ impl Database {
         Ok(())
     }
 
+    /// Deletes a provider and everything that pointed at it.
     pub fn delete_provider(&self, id: &str) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM providers WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let removed = tx.execute("DELETE FROM providers WHERE id = ?1", params![id])?;
+        if removed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Self::drop_routes_referencing(&tx, id)?;
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -586,15 +636,47 @@ mod provider_tests {
         std::env::temp_dir().join(format!("omni-{}-{}.db", label, uuid::Uuid::new_v4()))
     }
 
+    fn provider_fixture(id: &str, name: &str, preset_id: Option<&str>) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            preset_id: preset_id.map(str::to_string),
+            api_keys: vec!["keep-test-key".to_string()],
+            models: vec!["model-a".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 72,
+            weight: 1,
+            timeout_secs: 180,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn a_fresh_database_starts_without_providers_or_rules() {
+        let path = temp_db_path("empty");
+        let db = Database::new(path.clone()).unwrap();
+        assert!(db.get_providers().unwrap().is_empty());
+        assert!(db.get_routes().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn preset_migration_and_roundtrip_preserve_existing_configuration() {
         let path = temp_db_path("provider");
         let db = Database::new(path.clone()).unwrap();
-        let mut existing = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
-        existing.api_keys = vec!["keep-test-key".into()];
-        existing.priority = 72;
-        existing.timeout_secs = 180;
-        existing.enabled = false;
+        // Configured exactly like the OpenAI preset, so the preset backfill has to
+        // recognise it again after the column is dropped and re-added.
+        let mut existing = provider_fixture("openai", "OpenAI", None);
+        existing.protocol = "openai".to_string();
+        existing.base_url = "https://api.openai.com/v1".to_string();
+        existing.models = vec!["gpt-4o".to_string()];
         db.save_provider(&existing).unwrap();
         // Simulate the schema of the previous release, then run the additive
         // migration twice to prove it is repeatable.
@@ -614,7 +696,7 @@ mod provider_tests {
         assert_eq!(migrated.api_keys, existing.api_keys);
         assert_eq!(migrated.timeout_secs, 180);
         assert_eq!(migrated.priority, 72);
-        assert!(!migrated.enabled);
+        assert!(migrated.enabled);
         assert!(db.get_logs(10, 0).unwrap().is_empty());
         let mut copy = migrated.clone();
         copy.id = format!("prov_{}", uuid::Uuid::new_v4());
@@ -623,7 +705,146 @@ mod provider_tests {
         db.set_provider_enabled(&copy.id, true).unwrap();
         let original = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
         assert_eq!(original.api_keys, existing.api_keys);
-        assert!(!original.enabled);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn first_run_cleanup_removes_only_unconfigured_preset_entries() {
+        let path = temp_db_path("cleanup");
+        let db = Database::new(path.clone()).unwrap();
+        let openai = presets::get_default_presets()
+            .into_iter()
+            .find(|preset| preset.id == "openai")
+            .unwrap();
+        let seeded_models = serde_json::to_string(&openai.default_models).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let insert = |id: &str, name: &str, keys: &str, models: &str, enabled: i32, base_url: &str| {
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, default_model, is_default, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0, ?7, 10, 1, 60, NULL, ?8, ?8, ?1)",
+                params![id, name, openai.protocol, base_url, keys, models, enabled, now],
+            ).unwrap();
+        };
+
+        // Left behind by an older release and never configured.
+        insert("openai", &openai.name, "[]", &seeded_models, 0, &openai.base_url);
+        // Configured by the user in some way: every one of these must survive.
+        insert("prov_with_key", "OpenAI", r#"[\"sk-user\"]"#, &seeded_models, 0, &openai.base_url);
+        insert("prov_custom_url", "OpenAI", "[]", &seeded_models, 0, "https://proxy.example/v1");
+        insert("prov_custom_models", "OpenAI", "[]", r#"["my-model"]"#, 0, &openai.base_url);
+        // Client-supplied keys keep a keyless provider useful, so an enabled one stays.
+        insert("prov_enabled", "OpenAI", "[]", &seeded_models, 1, &openai.base_url);
+
+        // Rules that point at the leftover entries, exactly like the seeded rules.
+        db.save_routes(&[
+            RouteRule {
+                id: "rule_to_openai".into(),
+                pattern: "gpt*".into(),
+                target_provider_id: "openai".into(),
+                target_model: None,
+                fallback_provider_ids: vec!["prov_with_key".into()],
+                enabled: true,
+                priority: 90,
+                description: None,
+            },
+            RouteRule {
+                id: "rule_with_fallback".into(),
+                pattern: "o[13]*".into(),
+                target_provider_id: "prov_enabled".into(),
+                target_model: None,
+                fallback_provider_ids: vec!["openai".into(), "prov_with_key".into()],
+                enabled: true,
+                priority: 80,
+                description: None,
+            },
+        ])
+        .unwrap();
+
+        let removed = db.remove_untouched_seeded_providers().unwrap();
+        assert_eq!(removed, vec!["openai".to_string()]);
+
+        let routes = db.get_routes().unwrap();
+        assert_eq!(routes.len(), 1, "a rule targeting a removed provider cannot fire");
+        assert_eq!(routes[0].id, "rule_with_fallback");
+        assert_eq!(
+            routes[0].fallback_provider_ids,
+            vec!["prov_with_key".to_string()],
+            "the removed provider must not stay in a fallback list"
+        );
+
+        let remaining: Vec<String> = db.get_providers().unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(remaining.len(), 4);
+        for kept in ["prov_with_key", "prov_custom_url", "prov_custom_models", "prov_enabled"] {
+            assert!(remaining.contains(&kept.to_string()), "{} was removed", kept);
+        }
+        // Running it again finds nothing left to remove.
+        assert!(db.remove_untouched_seeded_providers().unwrap().is_empty());
+
+        // A renamed row is still an unconfigured leftover: preset labels change
+        // between releases, so the name is not part of the identity.
+        let deepseek = presets::get_default_presets()
+            .into_iter()
+            .find(|preset| preset.id == "deepseek")
+            .unwrap();
+        insert(
+            "deepseek",
+            "Renamed by hand",
+            "[]",
+            &serde_json::to_string(&deepseek.default_models).unwrap(),
+            0,
+            &deepseek.base_url,
+        );
+        assert_eq!(
+            db.remove_untouched_seeded_providers().unwrap(),
+            vec!["deepseek".to_string()]
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn deleting_a_provider_drops_the_rules_that_referenced_it() {
+        let path = temp_db_path("delete");
+        let db = Database::new(path.clone()).unwrap();
+        db.save_provider(&provider_fixture("p1", "Primary", None)).unwrap();
+        db.save_provider(&provider_fixture("p2", "Secondary", None)).unwrap();
+        db.save_routes(&[
+            RouteRule {
+                id: "rule_to_p1".into(),
+                pattern: "claude-*".into(),
+                target_provider_id: "p1".into(),
+                target_model: None,
+                fallback_provider_ids: vec!["p2".into()],
+                enabled: true,
+                priority: 100,
+                description: None,
+            },
+            RouteRule {
+                id: "rule_to_p2".into(),
+                pattern: "gpt-*".into(),
+                target_provider_id: "p2".into(),
+                target_model: None,
+                fallback_provider_ids: vec!["p1".into()],
+                enabled: true,
+                priority: 90,
+                description: None,
+            },
+        ])
+        .unwrap();
+
+        db.delete_provider("p1").unwrap();
+
+        let routes = db.get_routes().unwrap();
+        assert_eq!(routes.len(), 1, "rules targeting the removed provider cannot fire");
+        assert_eq!(routes[0].id, "rule_to_p2");
+        assert!(
+            routes[0].fallback_provider_ids.is_empty(),
+            "the removed provider must not stay in a fallback list"
+        );
+        assert_eq!(db.get_providers().unwrap().len(), 1);
+        // Deleting a provider that is already gone is reported instead of ignored.
+        assert!(db.delete_provider("p1").is_err());
         drop(db);
         let _ = std::fs::remove_file(path);
     }
@@ -632,12 +853,12 @@ mod provider_tests {
     fn only_one_provider_can_be_the_default_one() {
         let path = temp_db_path("defaults");
         let db = Database::new(path.clone()).unwrap();
-        let mut first = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
+        let mut first = provider_fixture("first", "First", None);
         first.default_model = Some("  gpt-4o  ".into());
         first.is_default = true;
         db.save_provider(&first).unwrap();
 
-        let mut second = db.get_providers().unwrap().into_iter().find(|p| p.id == "anthropic").unwrap();
+        let mut second = provider_fixture("second", "Second", None);
         second.is_default = true;
         db.save_provider(&second).unwrap();
 
@@ -647,8 +868,8 @@ mod provider_tests {
             .filter(|p| p.is_default)
             .map(|p| p.id.as_str())
             .collect();
-        assert_eq!(default_models, vec!["anthropic"]);
-        let openai = providers.iter().find(|p| p.id == "openai").unwrap();
+        assert_eq!(default_models, vec!["second"]);
+        let openai = providers.iter().find(|p| p.id == "first").unwrap();
         // Whitespace is trimmed on the way in and the rewrite target is kept.
         assert_eq!(openai.default_model.as_deref(), Some("gpt-4o"));
         assert!(!openai.is_default);

@@ -4,36 +4,45 @@ import { useAppStore } from '@/store/useAppStore';
 import { Provider } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { CopyButton } from '@/components/common/CopyButton';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Library, Trash2, Pencil, Zap, KeyRound, Server, Network, LoaderCircle } from 'lucide-react';
 
 function ProviderRow({ provider }: { provider: Provider }) {
-  const { openProviderEditor, deleteProvider, toggleProvider, testProviderLatency } = useAppStore(
+  const { openProviderEditor, deleteProvider, toggleProvider, testProviderLatency, routes } = useAppStore(
     useShallow((state) => ({
       openProviderEditor: state.openProviderEditor,
       deleteProvider: state.deleteProvider,
       toggleProvider: state.toggleProvider,
       testProviderLatency: state.testProviderLatency,
+      routes: state.routes,
     })),
   );
   const [pending, setPending] = useState<'test' | 'toggle' | 'delete' | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const targetRules = routes.filter((route) => route.targetProviderId === provider.id);
+  const fallbackRules = routes.filter((route) => route.fallbackProviderIds.includes(provider.id));
   const { latencyMs } = provider;
   const latencyStatus = latencyMs == null ? 'idle' : latencyMs < 0 ? 'error' : latencyMs < 300 ? 'good' : 'slow';
   const latencyLabel = latencyMs == null ? '测试延迟' : latencyMs < 0 ? '连接失败' : `${latencyMs} ms`;
 
   const runAction = async (action: NonNullable<typeof pending>) => {
     if (pending) return;
-    if (action === 'delete' && !window.confirm(`确定删除服务商“${provider.name}”吗？此操作无法撤销。`)) return;
     setPending(action);
     try {
       if (action === 'test') await testProviderLatency(provider.id);
       if (action === 'toggle') await toggleProvider(provider.id, !provider.enabled);
-      if (action === 'delete') await deleteProvider(provider.id);
+      if (action === 'delete') {
+        await deleteProvider(provider.id);
+        setConfirmingDelete(false);
+      }
     } catch {
       // Store 将失败原因显示在全局错误提示中，列表保持原状态。
     } finally {
       setPending(null);
     }
   };
+
+  const removeProvider = () => runAction('delete');
 
   return (
     <article className="provider-row" aria-label={provider.name} aria-busy={pending !== null}>
@@ -64,10 +73,24 @@ function ProviderRow({ provider }: { provider: Provider }) {
       ) : <span className="latency-button mono" aria-label="无网络延迟数据">—</span>}
       <div className="provider-actions">
         <button type="button" className="icon-button" disabled={pending !== null} onClick={() => openProviderEditor(provider)} aria-label={`编辑服务商 ${provider.name}`} title="编辑服务商"><Pencil size={14} /></button>
-        <button type="button" className="icon-button danger" disabled={pending !== null} onClick={() => runAction('delete')} aria-label={`删除服务商 ${provider.name}`} title="删除服务商"><Trash2 size={14} /></button>
+        <button type="button" className="icon-button danger" disabled={pending !== null} onClick={() => setConfirmingDelete(true)} aria-label={`删除服务商 ${provider.name}`} title="删除服务商"><Trash2 size={14} /></button>
         <span className="w-px h-4 bg-[var(--border-color)] mx-1" aria-hidden="true" />
         <Switch checked={provider.enabled} disabled={pending !== null} onCheckedChange={() => runAction('toggle')} ariaLabel={`${provider.enabled ? '停用' : '启用'}服务商 ${provider.name}`} />
       </div>
+      <ConfirmDialog
+        open={confirmingDelete}
+        title={`删除服务商“${provider.name}”？`}
+        details={[
+          '删除后需要重新从预设或手动添加才能使用，已有的请求日志不受影响。',
+          ...(provider.isDefault ? ['它当前是默认服务商，删除后没有服务商接管未知模型名。'] : []),
+          ...(targetRules.length ? [`同时删除 ${targetRules.length} 条以它为目标的覆盖规则：${targetRules.map((rule) => rule.pattern).join('、')}。`] : []),
+          ...(fallbackRules.length ? [`${fallbackRules.length} 条覆盖规则的备用列表会移除它。`] : []),
+        ]}
+        confirmLabel="删除服务商"
+        busy={pending === 'delete'}
+        onConfirm={removeProvider}
+        onCancel={() => setConfirmingDelete(false)}
+      />
     </article>
   );
 }

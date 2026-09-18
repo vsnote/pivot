@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Switch } from '@/components/common/Switch';
-import type { RoutePlan } from '@/types';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import type { RoutePlan, RouteRule } from '@/types';
 import {
   Plus,
   ArrowRight,
@@ -19,15 +20,24 @@ const RESOLUTION_ORDER = ['provider/model 前缀', '命中的规则', '精确模
 export const RouteMatrix: React.FC = () => {
   const { routes, providers, openRouteModal, saveRoutes, previewRoute } = useAppStore();
 
+  const [pendingDelete, setPendingDelete] = useState<RouteRule | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [testModelInput, setTestModelInput] = useState('claude-3-7-sonnet-20250219');
   const [preview, setPreview] = useState<RoutePlan | null>(null);
   const [previewError, setPreviewError] = useState('');
   const [previewing, setPreviewing] = useState(false);
 
-  const handleDelete = async (id: string) => {
-    const route = routes.find((item) => item.id === id);
-    if (!window.confirm(`确定删除覆盖规则“${route?.pattern ?? id}”吗？此操作无法撤销。`)) return;
-    await saveRoutes(routes.filter((r) => r.id !== id));
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await saveRoutes(routes.filter((r) => r.id !== pendingDelete.id));
+      setPendingDelete(null);
+    } catch {
+      // 失败原因由全局错误提示展示，规则列表保持原状态。
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleToggle = async (id: string, enabled: boolean) => {
@@ -242,7 +252,11 @@ export const RouteMatrix: React.FC = () => {
                     )}
                   </div>
 
-                  {!providerEnabled && (
+                  {!primaryProv ? (
+                    <p className="text-[11px] text-red-600 dark:text-red-400">
+                      目标服务商已删除，这条规则不会生效，请改为其他服务商或删除它。
+                    </p>
+                  ) : !providerEnabled && (
                     <p className="text-[11px] text-amber-600 dark:text-amber-400">
                       目标服务商未启用，这条规则当前不会生效，请求会继续按自动解析处理。
                     </p>
@@ -261,7 +275,7 @@ export const RouteMatrix: React.FC = () => {
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
                     <button
-                      onClick={() => handleDelete(route.id)}
+                      onClick={() => setPendingDelete(route)}
                       aria-label={`删除覆盖规则 ${route.pattern}`}
                       className="p-1 rounded-md text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
                       title="删除覆盖规则"
@@ -280,6 +294,18 @@ export const RouteMatrix: React.FC = () => {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={`删除覆盖规则“${pendingDelete?.pattern ?? ''}”？`}
+        details={[
+          '删除后这类请求会回到自动解析：精确模型名匹配，否则交给默认服务商的默认模型。',
+        ]}
+        confirmLabel="删除覆盖规则"
+        busy={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 };

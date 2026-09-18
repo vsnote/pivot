@@ -30,7 +30,7 @@ export const RouteModal: React.FC = () => {
       setEnabled(editingRoute.enabled);
     } else {
       setPattern('claude-*');
-      setTargetProviderId(providers[0]?.id || 'anthropic');
+      setTargetProviderId(providers[0]?.id || '');
       setTargetModel('');
       setFallbackProviderIds([]);
       setPriority(50);
@@ -58,6 +58,10 @@ export const RouteModal: React.FC = () => {
     }
     if (!targetProviderId) {
       setError('请选择目标服务商');
+      return;
+    }
+    if (!providers.some((provider) => provider.id === targetProviderId)) {
+      setError('目标服务商已删除，请重新选择');
       return;
     }
 
@@ -143,6 +147,9 @@ export const RouteModal: React.FC = () => {
                 value={targetProviderId}
                 onChange={(e) => setTargetProviderId(e.target.value)}
               >
+                {!providers.some((p) => p.id === targetProviderId) && targetProviderId && (
+                  <option value={targetProviderId}>（服务商已删除）</option>
+                )}
                 {providers.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name} ({p.protocol})

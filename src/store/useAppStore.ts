@@ -34,6 +34,7 @@ interface AppStore {
   isLoading: boolean;
   initialLoaded: boolean;
   error: string | null;
+  clearError: () => void;
 
   // Modals
   isProviderEditorOpen: boolean;
@@ -137,6 +138,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   isLoading: false,
   initialLoaded: false,
   error: null,
+  clearError: () => set({ error: null }),
 
   isProviderEditorOpen: false,
   editingProvider: null,
@@ -202,7 +204,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await invoke('save_provider', { provider });
       // A successful write must not be reported as failed if a subsequent list request fails.
-      set((state) => ({ providers: [...state.providers.filter((p) => p.id !== provider.id), provider]
+      set((state) => ({ providers: [...state.providers
+        // 后端保证默认服务商唯一，本地列表立即跟上，避免出现两个默认标记。
+        .filter((p) => p.id !== provider.id)
+        .map((p) => (provider.isDefault ? { ...p, isDefault: false } : p)), provider]
         .sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)) }));
     } catch (err: unknown) {
       set({ error: String(err) });
@@ -212,12 +217,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   deleteProvider: async (id: string) => {
     try {
-      await invoke('delete_provider', { id });
+      // The backend reports which rules survive the deletion, so the page never
+      // shows rules that point at a provider that is already gone.
+      const routes = await invoke<RouteRule[]>('delete_provider', { id });
       set((state) => ({
         providers: state.providers.filter((p) => p.id !== id),
+        routes,
+        error: null,
       }));
     } catch (err: unknown) {
-      set({ error: String(err) });
+      set({ error: `删除服务商失败：${String(err)}` });
+      throw err;
     }
   },
 

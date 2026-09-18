@@ -138,3 +138,52 @@ test('日志事件保留每次尝试，尝试链在前端不被裁剪', async ()
   assert.equal(store.getState().logs[0].attempts[1].providerName, 'Antigravity');
   stop();
 });
+
+test('删除服务商后列表移除它，并用后端返回的规则覆盖本地规则', async () => {
+  const calls = [];
+  const provider = { id: 'provider-a', name: 'Provider A', enabled: true, priority: 1 };
+  const remaining = [{ id: 'rule-b', pattern: 'gpt-*', targetProviderId: 'provider-b', fallbackProviderIds: [], enabled: true, priority: 1 }];
+  const store = await createStore({ native: false, invoke: async (command, args) => {
+    calls.push([command, args]);
+    if (command === 'get_providers') return [provider];
+    if (command === 'get_routes') return [{ id: 'rule-a', pattern: 'claude-*', targetProviderId: provider.id, fallbackProviderIds: [], enabled: true, priority: 1 }];
+    if (command === 'delete_provider') return remaining;
+    return undefined;
+  } });
+  await store.getState().fetchInitialData();
+  calls.length = 0;
+  await store.getState().deleteProvider(provider.id);
+  assert.deepEqual(calls, [['delete_provider', { id: provider.id }]]);
+  assert.deepEqual(store.getState().providers, []);
+  // 指向已删除服务商的规则不再留在页面上。
+  assert.deepEqual(store.getState().routes.map((route) => route.id), ['rule-b']);
+  assert.equal(store.getState().error, null);
+});
+
+test('删除失败会把原因写进全局错误并且不静默改列表', async () => {
+  const provider = { id: 'provider-a', name: 'Provider A', enabled: true, priority: 1 };
+  const store = await createStore({ native: false, invoke: async (command) => {
+    if (command === 'get_providers') return [provider];
+    if (command === 'get_routes') return [];
+    if (command === 'delete_provider') throw new Error('服务商 provider-a 不存在或已被删除');
+  } });
+  await store.getState().fetchInitialData();
+  await assert.rejects(() => store.getState().deleteProvider(provider.id));
+  assert.match(store.getState().error, /删除服务商失败/);
+  assert.equal(store.getState().providers.length, 1);
+  store.getState().clearError();
+  assert.equal(store.getState().error, null);
+});
+
+test('保存默认服务商后本地列表只有一个默认标记', async () => {
+  const first = { id: 'provider-a', name: 'A', priority: 2, isDefault: true };
+  const second = { id: 'provider-b', name: 'B', priority: 1 };
+  const store = await createStore({ native: false, invoke: async (command) => {
+    if (command === 'get_providers') return [first, second];
+    if (command === 'get_routes') return [];
+  } });
+  await store.getState().fetchInitialData();
+  await store.getState().saveProvider({ ...second, isDefault: true });
+  const defaults = store.getState().providers.filter((provider) => provider.isDefault).map((provider) => provider.id);
+  assert.deepEqual(defaults, ['provider-b']);
+});

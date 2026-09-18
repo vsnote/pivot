@@ -108,9 +108,7 @@ async fn live_acceptance_with_providers_only() {
 
     let temp = TempDatabase::new("omni-live");
     let db = Database::new(temp.path.clone()).unwrap();
-    for preset in db.get_providers().unwrap() {
-        db.delete_provider(&preset.id).unwrap();
-    }
+    assert!(db.get_providers().unwrap().is_empty(), "nothing is installed for the user");
 
     let mut proxy = live_provider(PROXY_ID, "Antigravity (cli-proxy)", &proxy_url, &proxy_key, &[proxy_model.clone()], 10);
     proxy.is_default = true;
