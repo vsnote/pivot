@@ -101,7 +101,7 @@ export const RouteModal: React.FC = () => {
           <button
             type="button"
             onClick={closeRouteModal}
-            aria-label="关闭路由窗口"
+            aria-label="关闭覆盖规则窗口"
             className="p-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -249,7 +249,7 @@ export const RouteModal: React.FC = () => {
               type="submit"
               className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-xs"
             >
-              {editingRoute ? '保存修改' : '创建路由'}
+              {editingRoute ? '保存修改' : '创建覆盖规则'}
             </button>
           </div>
         </form>

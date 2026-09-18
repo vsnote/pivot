@@ -26,7 +26,7 @@ export const RouteMatrix: React.FC = () => {
 
   const handleDelete = async (id: string) => {
     const route = routes.find((item) => item.id === id);
-    if (!window.confirm(`确定删除路由“${route?.pattern ?? id}”吗？此操作无法撤销。`)) return;
+    if (!window.confirm(`确定删除覆盖规则“${route?.pattern ?? id}”吗？此操作无法撤销。`)) return;
     await saveRoutes(routes.filter((r) => r.id !== id));
   };
 
@@ -272,7 +272,7 @@ export const RouteMatrix: React.FC = () => {
                   <Switch
                     checked={route.enabled}
                     onCheckedChange={(checked) => handleToggle(route.id, checked)}
-                    ariaLabel={`${route.enabled ? '停用' : '启用'}路由 ${route.pattern}`}
+                    ariaLabel={`${route.enabled ? '停用' : '启用'}覆盖规则 ${route.pattern}`}
                   />
                 </div>
               </div>
