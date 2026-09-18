@@ -1,4 +1,5 @@
 use crate::db::presets::{self, Preset};
+use crate::gateway::router as gateway_router;
 use crate::db::{Provider, RequestLog, RouteRule};
 use crate::interceptor::{InterceptorInfo, InterceptorManager};
 use crate::state::AppState;
@@ -132,6 +133,18 @@ pub async fn toggle_interceptor(
 ) -> Result<InterceptorInfo, String> {
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     mgr.toggle_tool(&id, enable)
+}
+
+/// Explain what the gateway would do with a model name, using the very same
+/// resolver the proxy runs, so the advanced page cannot drift from reality.
+#[tauri::command]
+pub async fn preview_route(
+    state: State<'_, AppState>,
+    model: String,
+) -> Result<gateway_router::RoutePlan, String> {
+    let providers = state.db.get_providers().map_err(|e| e.to_string())?;
+    let routes = state.db.get_routes().map_err(|e| e.to_string())?;
+    gateway_router::plan_route(&model, &providers, &routes)
 }
 
 #[tauri::command]

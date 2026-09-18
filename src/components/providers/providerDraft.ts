@@ -12,16 +12,20 @@ export function createProviderDraft(provider: Provider | null, presets: Preset[]
     const preset = provider.presetId === undefined ? presets.find((p) => p.id === provider.id &&
       p.protocol === provider.protocol && p.baseUrl.replace(/\/+$/, '') === provider.baseUrl.replace(/\/+$/, '')) : undefined;
     return { ...provider, presetId: provider.presetId ?? preset?.id ?? null,
-      apiKeys: [...provider.apiKeys], models: uniqueValues(provider.models) };
+      apiKeys: [...provider.apiKeys], models: uniqueValues(provider.models),
+      defaultModel: provider.defaultModel ?? null, isDefault: provider.isDefault ?? false };
   }
   return { id: `prov_${crypto.randomUUID()}`, name: '', protocol: 'openai', baseUrl: '',
-    presetId: null, apiKeys: [], models: [], enabled: true, priority: 10, weight: 1, timeoutSecs: 60 };
+    presetId: null, apiKeys: [], models: [], defaultModel: null, isDefault: false,
+    enabled: true, priority: 10, weight: 1, timeoutSecs: 60 };
 }
 
 export function applyProviderPreset(draft: Provider, preset?: Preset): Provider {
+  // Changing the service clears everything that belonged to the previous one,
+  // including the default model and the catch-all role.
   return { ...draft, presetId: preset?.id ?? null, name: preset?.name ?? '',
     protocol: preset?.protocol ?? 'openai', baseUrl: preset?.baseUrl ?? '',
-    apiKeys: [], models: [], latencyMs: undefined };
+    apiKeys: [], models: [], defaultModel: null, isDefault: false, latencyMs: undefined };
 }
 
 export function validateBaseUrl(value: string): string | null {
@@ -39,5 +43,7 @@ export function validateBaseUrl(value: string): string | null {
 
 export function prepareProvider(draft: Provider): Provider {
   return { ...draft, name: draft.name.trim(), baseUrl: draft.baseUrl.trim().replace(/\/+$/, ''),
-    apiKeys: uniqueValues(draft.apiKeys), models: uniqueValues(draft.models), updatedAt: new Date().toISOString() };
+    apiKeys: uniqueValues(draft.apiKeys), models: uniqueValues(draft.models),
+    defaultModel: draft.defaultModel?.trim() || null, isDefault: !!draft.isDefault,
+    updatedAt: new Date().toISOString() };
 }

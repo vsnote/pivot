@@ -110,3 +110,31 @@ test('初始数据未就绪时不能打开编辑页，真实数据到达后旧�
   assert.equal(store.getState().isProviderEditorOpen, false);
   assert.ok(!calls.some(([command]) => command === 'save_provider'));
 });
+
+test('路由预览使用网关照常解析，结果原样返回', async () => {
+  const calls = [];
+  const plan = { primary: { providerId: 'antigravity', model: 'gemini-3.8-flash-high' }, fallbacks: [] };
+  const store = await createStore({ invoke: async (...args) => {
+    calls.push(args);
+    if (args[0] === 'preview_route') return plan;
+  } });
+  assert.deepEqual(await store.getState().previewRoute('claude-3-7-sonnet'), plan);
+  assert.deepEqual(calls, [['preview_route', { model: 'claude-3-7-sonnet' }]]);
+});
+
+test('日志事件保留每次尝试，尝试链在前端不被裁剪', async () => {
+  let onLog;
+  const store = await createStore({ listen: async (event, handler) => {
+    if (event === 'gw-log') onLog = handler;
+    return () => {};
+  } });
+  const stop = await store.getState().initEventListeners();
+  onLog({ payload: { id: 'req-1', statusCode: 200, fallbackUsed: true, attempts: [
+    { providerId: 'flaky', providerName: 'Flaky', model: 'gemini-3.8-flash-high', status: 503, error: 'not running', latencyMs: 8 },
+    { providerId: 'antigravity', providerName: 'Antigravity', model: 'gemini-3.8-flash-high', status: 200, error: null, latencyMs: 120 },
+  ] } });
+  assert.equal(store.getState().logs[0].attempts.length, 2);
+  assert.equal(store.getState().logs[0].attempts[0].status, 503);
+  assert.equal(store.getState().logs[0].attempts[1].providerName, 'Antigravity');
+  stop();
+});

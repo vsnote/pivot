@@ -26,7 +26,7 @@ export const Header: React.FC = () => {
 
   const settingsTabs: { id: SettingsSection; label: string }[] = [
     { id: 'clients', label: '客户端' },
-    { id: 'routes', label: '路由' },
+    { id: 'routes', label: '高级设置' },
     { id: 'gateway', label: '监控' },
     { id: 'logs', label: '日志' },
     { id: 'about', label: '关于' },

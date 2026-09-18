@@ -96,7 +96,7 @@ export const RouteModal: React.FC = () => {
         {/* 弹窗头部 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-800">
           <h2 id="route-modal-title" className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            {editingRoute ? '编辑路由' : '添加路由'}
+            {editingRoute ? '编辑覆盖规则' : '添加覆盖规则'}
           </h2>
           <button
             type="button"
@@ -191,6 +191,9 @@ export const RouteModal: React.FC = () => {
                   );
                 })}
             </div>
+            <p className="text-[11px] text-gray-400 mt-1">
+              按勾选顺序尝试；每个候选使用它自己声明的模型名，无法提供该模型的服务商会自动跳过。
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">

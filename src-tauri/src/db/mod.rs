@@ -15,6 +15,15 @@ pub struct Provider {
     pub preset_id: Option<String>,
     pub api_keys: Vec<String>,
     pub models: Vec<String>,
+    /// Model this provider is asked for when it cannot serve the requested name.
+    /// The provider marked as default also receives every model name no enabled
+    /// provider declares, rewritten to this value.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Catch-all provider for model names no enabled provider declares.
+    /// At most one provider carries this flag; [`Database::save_provider`] enforces it.
+    #[serde(default)]
+    pub is_default: bool,
     pub enabled: bool,
     pub priority: i32,
     pub weight: i32,
@@ -56,6 +65,34 @@ pub struct RequestLog {
     pub error_message: Option<String>,
     pub is_stream: bool,
     pub fallback_used: bool,
+    /// Every upstream attempt in order, so a failure keeps the reasons the
+    /// earlier candidates reported instead of only the last one.
+    #[serde(default)]
+    pub attempts: Vec<LogAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogAttempt {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub status: i32,
+    pub error: Option<String>,
+    pub latency_ms: i64,
+}
+
+/// True when `table` already has `column`; used to keep schema upgrades additive
+/// and repeatable on databases created by earlier versions.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone)]
@@ -96,6 +133,8 @@ impl Database {
                 base_url TEXT NOT NULL,
                 api_keys TEXT NOT NULL,
                 models TEXT NOT NULL,
+                default_model TEXT,
+                is_default INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 priority INTEGER NOT NULL DEFAULT 0,
                 weight INTEGER NOT NULL DEFAULT 1,
@@ -132,7 +171,8 @@ impl Database {
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 error_message TEXT,
                 is_stream INTEGER NOT NULL DEFAULT 0,
-                fallback_used INTEGER NOT NULL DEFAULT 0
+                fallback_used INTEGER NOT NULL DEFAULT 0,
+                attempts TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
@@ -145,15 +185,28 @@ impl Database {
                 updated_at TEXT NOT NULL
             );",
         )?;
-        let has_preset_id = conn.prepare("PRAGMA table_info(providers)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?.iter().any(|name| name == "preset_id");
-        if !has_preset_id {
+
+        // Databases created by earlier versions miss the columns added since.
+        // Every upgrade below is additive and keyed on the column actually being
+        // absent, so running the whole block again is a no-op.
+        if !has_column(&conn, "providers", "preset_id")? {
             conn.execute("ALTER TABLE providers ADD COLUMN preset_id TEXT", [])?;
             for preset in presets::get_default_presets() {
                 conn.execute("UPDATE providers SET preset_id = ?1 WHERE id = ?1 AND protocol = ?2 AND rtrim(base_url, '/') = rtrim(?3, '/')",
                     params![preset.id, preset.protocol, preset.base_url])?;
             }
+        }
+        if !has_column(&conn, "providers", "default_model")? {
+            conn.execute("ALTER TABLE providers ADD COLUMN default_model TEXT", [])?;
+        }
+        if !has_column(&conn, "providers", "is_default")? {
+            conn.execute(
+                "ALTER TABLE providers ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_column(&conn, "request_logs", "attempts")? {
+            conn.execute("ALTER TABLE request_logs ADD COLUMN attempts TEXT", [])?;
         }
         Ok(())
     }
@@ -196,91 +249,9 @@ impl Database {
                 )?;
             }
 
-            // Seed default routing rules
-            let default_routes = vec![
-                RouteRule {
-                    id: "route_claude".to_string(),
-                    pattern: "claude*".to_string(),
-                    target_provider_id: "anthropic".to_string(),
-                    target_model: None,
-                    fallback_provider_ids: vec!["openrouter".to_string(), "deepseek".to_string()],
-                    enabled: true,
-                    priority: 100,
-                    description: Some(
-                        "Dispatch Claude models to Anthropic with OpenRouter fallback".to_string(),
-                    ),
-                },
-                RouteRule {
-                    id: "route_gpt".to_string(),
-                    pattern: "gpt*".to_string(),
-                    target_provider_id: "openai".to_string(),
-                    target_model: None,
-                    fallback_provider_ids: vec!["openrouter".to_string()],
-                    enabled: true,
-                    priority: 90,
-                    description: Some("Dispatch GPT models to OpenAI".to_string()),
-                },
-                RouteRule {
-                    id: "route_o_series".to_string(),
-                    pattern: "o[13]*".to_string(),
-                    target_provider_id: "openai".to_string(),
-                    target_model: None,
-                    fallback_provider_ids: vec!["openrouter".to_string()],
-                    enabled: true,
-                    priority: 90,
-                    description: Some("Dispatch o1 and o3 models to OpenAI".to_string()),
-                },
-                RouteRule {
-                    id: "route_deepseek".to_string(),
-                    pattern: "deepseek*".to_string(),
-                    target_provider_id: "deepseek".to_string(),
-                    target_model: None,
-                    fallback_provider_ids: vec!["openrouter".to_string()],
-                    enabled: true,
-                    priority: 80,
-                    description: Some(
-                        "Dispatch DeepSeek requests to DeepSeek official".to_string(),
-                    ),
-                },
-                RouteRule {
-                    id: "route_gemini".to_string(),
-                    pattern: "gemini*".to_string(),
-                    target_provider_id: "gemini".to_string(),
-                    target_model: None,
-                    fallback_provider_ids: vec!["openrouter".to_string()],
-                    enabled: true,
-                    priority: 70,
-                    description: Some("Dispatch Gemini requests to Google Gemini".to_string()),
-                },
-                RouteRule {
-                    id: "route_fallback".to_string(),
-                    pattern: "*".to_string(),
-                    target_provider_id: "anthropic".to_string(),
-                    target_model: None,
-                    fallback_provider_ids: vec!["openai".to_string(), "openrouter".to_string()],
-                    enabled: true,
-                    priority: 0,
-                    description: Some("Catch-all default route".to_string()),
-                },
-            ];
-
-            for route in default_routes {
-                let fallbacks_json = serde_json::to_string(&route.fallback_provider_ids).unwrap();
-                conn.execute(
-                    "INSERT INTO routes (id, pattern, target_provider_id, target_model, fallback_provider_ids, enabled, priority, description)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        route.id,
-                        route.pattern,
-                        route.target_provider_id,
-                        route.target_model,
-                        fallbacks_json,
-                        if route.enabled { 1 } else { 0 },
-                        route.priority,
-                        route.description,
-                    ],
-                )?;
-            }
+            // Routing rules are intentionally not seeded: model resolution, aliases
+            // and the fallback chain are derived from the provider configuration.
+            // The routes table stays available for advanced overrides.
         }
         Ok(())
     }
@@ -288,7 +259,7 @@ impl Database {
     pub fn get_providers(&self) -> Result<Vec<Provider>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id
+            "SELECT id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default
              FROM providers ORDER BY priority DESC, name ASC",
         )?;
 
@@ -298,6 +269,7 @@ impl Database {
             let api_keys: Vec<String> = serde_json::from_str(&api_keys_str).unwrap_or_default();
             let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
             let enabled_int: i32 = row.get(6)?;
+            let is_default_int: i32 = row.get(15)?;
 
             Ok(Provider {
                 id: row.get(0)?,
@@ -314,6 +286,8 @@ impl Database {
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
                 preset_id: row.get(13)?,
+                default_model: row.get(14)?,
+                is_default: is_default_int == 1,
             })
         })?;
 
@@ -325,16 +299,31 @@ impl Database {
     }
 
     pub fn save_provider(&self, provider: &Provider) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         let api_keys_json =
             serde_json::to_string(&provider.api_keys).unwrap_or_else(|_| "[]".to_string());
         let models_json =
             serde_json::to_string(&provider.models).unwrap_or_else(|_| "[]".to_string());
         let now = chrono::Utc::now().to_rfc3339();
+        let default_model = provider
+            .default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string);
 
-        conn.execute(
-            "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        let tx = conn.transaction()?;
+        // The default provider is a single catch-all slot, so claiming it here
+        // releases it from whichever provider held it before.
+        if provider.is_default {
+            tx.execute(
+                "UPDATE providers SET is_default = 0 WHERE id <> ?1",
+                params![provider.id],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 protocol = excluded.protocol,
@@ -347,7 +336,9 @@ impl Database {
                 timeout_secs = excluded.timeout_secs,
                 latency_ms = excluded.latency_ms,
                 updated_at = excluded.updated_at,
-                preset_id = excluded.preset_id;",
+                preset_id = excluded.preset_id,
+                default_model = excluded.default_model,
+                is_default = excluded.is_default;",
             params![
                 provider.id,
                 provider.name,
@@ -363,8 +354,11 @@ impl Database {
                 provider.created_at.clone().unwrap_or_else(|| now.clone()),
                 now,
                 provider.preset_id,
+                default_model,
+                if provider.is_default { 1 } else { 0 },
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -456,9 +450,10 @@ impl Database {
 
     pub fn insert_log(&self, log: &RequestLog) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
+        let attempts_json = serde_json::to_string(&log.attempts).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO request_logs (id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO request_logs (id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used, attempts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 log.id,
                 log.timestamp,
@@ -476,6 +471,7 @@ impl Database {
                 log.error_message,
                 if log.is_stream { 1 } else { 0 },
                 if log.fallback_used { 1 } else { 0 },
+                attempts_json,
             ],
         )?;
         Ok(())
@@ -488,13 +484,18 @@ impl Database {
     ) -> Result<Vec<RequestLog>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used
+            "SELECT id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used, attempts
              FROM request_logs ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2",
         )?;
 
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
             let is_stream_int: i32 = row.get(14)?;
             let fallback_int: i32 = row.get(15)?;
+            // Logs written before the attempts column existed have no chain.
+            let attempts_json: Option<String> = row.get(16)?;
+            let attempts = attempts_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
 
             Ok(RequestLog {
                 id: row.get(0)?,
@@ -513,6 +514,7 @@ impl Database {
                 error_message: row.get(13)?,
                 is_stream: is_stream_int == 1,
                 fallback_used: fallback_int == 1,
+                attempts,
             })
         })?;
 
@@ -580,9 +582,13 @@ impl Database {
 mod provider_tests {
     use super::*;
 
+    fn temp_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("omni-{}-{}.db", label, uuid::Uuid::new_v4()))
+    }
+
     #[test]
     fn preset_migration_and_roundtrip_preserve_existing_configuration() {
-        let path = std::env::temp_dir().join(format!("omni-provider-{}.db", uuid::Uuid::new_v4()));
+        let path = temp_db_path("provider");
         let db = Database::new(path.clone()).unwrap();
         let mut existing = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
         existing.api_keys = vec!["keep-test-key".into()];
@@ -590,16 +596,26 @@ mod provider_tests {
         existing.timeout_secs = 180;
         existing.enabled = false;
         db.save_provider(&existing).unwrap();
-        // Simulate the previous schema, then run the additive migration twice.
-        db.conn.lock().unwrap().execute("ALTER TABLE providers DROP COLUMN preset_id", []).unwrap();
+        // Simulate the schema of the previous release, then run the additive
+        // migration twice to prove it is repeatable.
+        {
+            let conn = db.conn.lock().unwrap();
+            for column in ["preset_id", "default_model", "is_default"] {
+                conn.execute(&format!("ALTER TABLE providers DROP COLUMN {}", column), []).unwrap();
+            }
+            conn.execute("ALTER TABLE request_logs DROP COLUMN attempts", []).unwrap();
+        }
         db.init_tables().unwrap();
         db.init_tables().unwrap();
         let migrated = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
         assert_eq!(migrated.preset_id.as_deref(), Some("openai"));
+        assert_eq!(migrated.default_model, None);
+        assert!(!migrated.is_default);
         assert_eq!(migrated.api_keys, existing.api_keys);
         assert_eq!(migrated.timeout_secs, 180);
         assert_eq!(migrated.priority, 72);
         assert!(!migrated.enabled);
+        assert!(db.get_logs(10, 0).unwrap().is_empty());
         let mut copy = migrated.clone();
         copy.id = format!("prov_{}", uuid::Uuid::new_v4());
         copy.api_keys.clear();
@@ -608,6 +624,92 @@ mod provider_tests {
         let original = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
         assert_eq!(original.api_keys, existing.api_keys);
         assert!(!original.enabled);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_one_provider_can_be_the_default_one() {
+        let path = temp_db_path("defaults");
+        let db = Database::new(path.clone()).unwrap();
+        let mut first = db.get_providers().unwrap().into_iter().find(|p| p.id == "openai").unwrap();
+        first.default_model = Some("  gpt-4o  ".into());
+        first.is_default = true;
+        db.save_provider(&first).unwrap();
+
+        let mut second = db.get_providers().unwrap().into_iter().find(|p| p.id == "anthropic").unwrap();
+        second.is_default = true;
+        db.save_provider(&second).unwrap();
+
+        let providers = db.get_providers().unwrap();
+        let default_models: Vec<&str> = providers
+            .iter()
+            .filter(|p| p.is_default)
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(default_models, vec!["anthropic"]);
+        let openai = providers.iter().find(|p| p.id == "openai").unwrap();
+        // Whitespace is trimmed on the way in and the rewrite target is kept.
+        assert_eq!(openai.default_model.as_deref(), Some("gpt-4o"));
+        assert!(!openai.is_default);
+        // Clearing the flag leaves no default provider behind.
+        let mut second = second.clone();
+        second.is_default = false;
+        db.save_provider(&second).unwrap();
+        assert!(db.get_providers().unwrap().iter().all(|p| !p.is_default));
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn request_logs_round_trip_the_attempt_chain() {
+        let path = temp_db_path("attempts");
+        let db = Database::new(path.clone()).unwrap();
+        let log = RequestLog {
+            id: "req-1".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            client_type: "claude_code".into(),
+            incoming_model: "claude-3-7-sonnet".into(),
+            routed_provider_id: "none".into(),
+            routed_provider_name: None,
+            routed_model: "".into(),
+            status_code: 502,
+            latency_ms: 42,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some("second candidate also failed".into()),
+            is_stream: false,
+            fallback_used: true,
+            attempts: vec![
+                LogAttempt {
+                    provider_id: "primary".into(),
+                    provider_name: "Primary".into(),
+                    model: "gemini-3.8-flash-high".into(),
+                    status: 500,
+                    error: Some("upstream exploded".into()),
+                    latency_ms: 11,
+                },
+                LogAttempt {
+                    provider_id: "secondary".into(),
+                    provider_name: "Secondary".into(),
+                    model: "gemini-3.8-flash-high".into(),
+                    status: 429,
+                    error: None,
+                    latency_ms: 31,
+                },
+            ],
+        };
+        db.insert_log(&log).unwrap();
+        let stored = db.get_logs(10, 0).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].error_message.as_deref(), Some("second candidate also failed"));
+        assert_eq!(stored[0].attempts.len(), 2);
+        assert_eq!(stored[0].attempts[0].provider_id, "primary");
+        assert_eq!(stored[0].attempts[0].status, 500);
+        assert_eq!(stored[0].attempts[0].error.as_deref(), Some("upstream exploded"));
+        assert_eq!(stored[0].attempts[1].latency_ms, 31);
         drop(db);
         let _ = std::fs::remove_file(path);
     }

@@ -87,6 +87,17 @@ pub fn validate_provider(provider: &mut Provider) -> Result<(), String> {
     }) {
         return Err("模型 ID 不能包含空格或逗号，请分别添加模型".into());
     }
+    provider.default_model = provider
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+    if let Some(model) = &provider.default_model {
+        if model.chars().any(|c| c.is_whitespace() || c == ',' || c == '，') {
+            return Err("默认模型 ID 不能包含空格或逗号".into());
+        }
+    }
     Ok(())
 }
 

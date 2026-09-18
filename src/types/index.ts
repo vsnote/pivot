@@ -8,6 +8,10 @@ export interface Provider {
   presetId?: string | null;
   apiKeys: string[];
   models: string[];
+  /** Model to ask for when this provider does not declare the requested one. */
+  defaultModel?: string | null;
+  /** Catch-all provider for model names no enabled provider declares. */
+  isDefault?: boolean;
   enabled: boolean;
   priority: number;
   weight: number;
@@ -30,6 +34,15 @@ export interface RouteRule {
 
 export type ClientType = 'claude_code' | 'codex_cli' | 'gemini_cli' | 'openai_api' | 'anthropic_api' | 'generic';
 
+export interface LogAttempt {
+  providerId: string;
+  providerName: string;
+  model: string;
+  status: number;
+  error?: string | null;
+  latencyMs: number;
+}
+
 export interface RequestLog {
   id: string;
   timestamp: string;
@@ -47,6 +60,19 @@ export interface RequestLog {
   errorMessage?: string;
   isStream: boolean;
   fallbackUsed?: boolean;
+  /** Every upstream attempt in order, oldest first. */
+  attempts?: LogAttempt[];
+}
+
+/** One provider/model decision taken by the gateway resolver. */
+export interface PlannedCandidate {
+  providerId: string;
+  model: string;
+}
+
+export interface RoutePlan {
+  primary: PlannedCandidate;
+  fallbacks: PlannedCandidate[];
 }
 
 export interface GatewayStats {

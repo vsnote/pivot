@@ -90,6 +90,7 @@ pub fn run() {
             get_interceptor_status,
             toggle_interceptor,
             get_presets,
+            preview_route,
             fetch_provider_models,
             sync_native_tab,
             set_native_toolbar_enabled,

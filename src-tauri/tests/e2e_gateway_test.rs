@@ -156,6 +156,8 @@ async fn test_e2e_gateway_routing_and_failover() {
         preset_id: None,
         api_keys: vec!["sk-test-key-a".to_string()],
         models: vec!["gpt-4o".to_string(), "claude-3-7-sonnet".to_string()],
+        default_model: None,
+        is_default: false,
         enabled: true,
         priority: 10,
         weight: 1,
@@ -173,6 +175,10 @@ async fn test_e2e_gateway_routing_and_failover() {
         preset_id: None,
         api_keys: vec!["sk-test-key-b".to_string()],
         models: vec!["deepseek-chat".to_string()],
+        // The primary is asked for "gpt-4o"; this provider only knows deepseek-chat,
+        // so it is reached through its own default model instead of a 400.
+        default_model: Some("deepseek-chat".to_string()),
+        is_default: false,
         enabled: true,
         priority: 5,
         weight: 1,
@@ -270,6 +276,21 @@ async fn test_e2e_gateway_routing_and_failover() {
     assert_eq!(logs[0].routed_provider_id, "provider_fallback");
     assert_eq!(logs[0].prompt_tokens, 20);
     assert_eq!(logs[0].completion_tokens, 12);
+
+    // Both hops show up in the attempt chain, each with the model name its
+    // provider was actually asked for, and the primary keeps its own error.
+    assert_eq!(logs[0].attempts.len(), 2);
+    assert_eq!(logs[0].attempts[0].provider_id, "provider_primary");
+    assert_eq!(logs[0].attempts[0].model, "gpt-4o");
+    assert_eq!(logs[0].attempts[0].status, 429);
+    assert!(logs[0].attempts[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Rate limit reached on Primary"));
+    assert_eq!(logs[0].attempts[1].provider_id, "provider_fallback");
+    assert_eq!(logs[0].attempts[1].model, "deepseek-chat");
+    assert_eq!(logs[0].attempts[1].status, 200);
 
     // 6. Send an OpenAI-compatible request to `/v1/chat/completions`.
     // The model is listed by the fallback provider, so it should route there

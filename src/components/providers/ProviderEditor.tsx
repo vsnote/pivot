@@ -4,6 +4,7 @@ import { ArrowLeft, Check, Eye, EyeOff, LoaderCircle, Plus, RefreshCw, Search, X
 import { useAppStore } from '@/store/useAppStore';
 import type { Preset, Protocol, Provider } from '@/types';
 import { Select } from '@/components/common/Select';
+import { Switch } from '@/components/common/Switch';
 import { applyProviderPreset, createProviderDraft, editablePresetUrl, prepareProvider, uniqueValues, validateBaseUrl } from './providerDraft';
 
 const protocols: Record<Protocol, string> = {
@@ -148,6 +149,8 @@ export function ProviderEditor() {
     if (urlError) nextErrors.baseUrl = urlError;
     if (!draft.models.length) nextErrors.models = '请至少选择或手动添加一个模型';
     if (manualModel.trim()) nextErrors.models = '请先添加正在输入的模型，或清空输入框';
+    const defaultModel = draft.defaultModel?.trim() ?? '';
+    if (/[\s,，]/u.test(defaultModel)) nextErrors.defaultModel = '请输入一个完整的模型 ID，不要包含空格或逗号';
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) {
       requestAnimationFrame(() => formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus());
@@ -240,12 +243,31 @@ export function ProviderEditor() {
               </div> : <button type="button" className="editor-secondary-action self-start" onClick={() => setShowManual(true)}>手动添加模型</button>}
 
             </section>
+            <section className="editor-section" aria-label="默认路由">
+              <div className="editor-section-heading"><h2>默认路由</h2></div>
+              <div>
+                <label className="field-label" htmlFor="provider-default-model">默认模型</label>
+                <input id="provider-default-model" className="field font-mono" placeholder="例如 gemini-3.8-flash-high" value={draft.defaultModel ?? ''} onChange={(e) => update({ defaultModel: e.target.value })} aria-invalid={!!errors.defaultModel} aria-describedby={errors.defaultModel ? 'default-model-error' : 'default-model-help'} autoComplete="off" autoCapitalize="none" spellCheck={false} />
+                <p id="default-model-help" className="editor-help">请求的模型名不属于这家服务商时改用它，备用切换不会再沿用原模型名。留空时按原模型名转发。</p>
+                {errors.defaultModel && <p id="default-model-error" className="editor-error">{errors.defaultModel}</p>}
+              </div>
+              <div className="flex items-start justify-between gap-4">
+                <span>
+                  <span className="field-label !mb-0">设为默认服务商</span>
+                  <p className="editor-help !mt-0">没有服务商声明的模型名（例如 Claude Code 的模型名）交给这家处理；同时只能有一家。</p>
+                </span>
+                <Switch checked={!!draft.isDefault} onCheckedChange={(checked) => update({ isDefault: checked })} ariaLabel="设为默认服务商" />
+              </div>
+              {draft.isDefault && !(draft.defaultModel ?? '').trim() && (
+                <p className="editor-help">建议同时填写默认模型：否则没有服务商声明的模型名会被原样转发，容易被上游拒绝。</p>
+              )}
+            </section>
           </>}
         </fieldset>
       </div>
       <div className="editor-footer">
         {confirmation ? <>
-          <p className="editor-help !mt-0 mr-auto" role="alert">{confirmation.kind === 'leave' ? '放弃尚未保存的修改？' : '更换服务商将清除密钥和已选模型。'}</p>
+          <p className="editor-help !mt-0 mr-auto" role="alert">{confirmation.kind === 'leave' ? '放弃尚未保存的修改？' : '更换服务商将清除密钥、已选模型和默认路由设置。'}</p>
           <button autoFocus type="button" className="button" onClick={() => setConfirmation(null)}>继续编辑</button>
           <button type="button" className="button button-primary" onClick={() => confirmation.kind === 'leave' ? closeProviderEditor() : choosePreset(confirmation.preset, true)}>{confirmation.kind === 'leave' ? '放弃修改' : '确认更换'}</button>
         </> : <>

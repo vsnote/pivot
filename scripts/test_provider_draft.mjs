@@ -38,3 +38,24 @@ test('显式自定义配置不会被重新锁成预设，本地与账号专属�
   for (const address of ['file:///tmp', 'https://u:p@example.com', 'https://example.com?key=secret', 'https://example.com/v1/messages']) assert.ok(validateBaseUrl(address));
   assert.equal(validateBaseUrl('http://localhost:11434/v1'), null);
 });
+
+test('默认模型随服务商保存，留空或切换服务商时清空', () => {
+  const existing = { ...createProviderDraft(null, []), defaultModel: ' gemini-3.8-flash-high ', isDefault: true };
+  assert.equal(prepareProvider(createProviderDraft(existing, [])).defaultModel, 'gemini-3.8-flash-high');
+  assert.equal(prepareProvider({ ...existing, defaultModel: '   ' }).defaultModel, null);
+  assert.equal(prepareProvider({ ...existing, defaultModel: undefined }).defaultModel, null);
+  const switched = applyProviderPreset(existing, preset);
+  assert.equal(switched.defaultModel, null);
+  assert.equal(switched.isDefault, false);
+});
+
+test('缺少默认路由字段的旧记录按未设置处理', () => {
+  const legacy = createProviderDraft({ id: 'anthropic', name: 'Anthropic', protocol: 'anthropic',
+    baseUrl: 'https://api.anthropic.com/v1', apiKeys: ['key'], models: ['claude-3-7-sonnet'] }, []);
+  assert.equal(legacy.defaultModel, null);
+  assert.equal(legacy.isDefault, false);
+  const saved = prepareProvider(legacy);
+  assert.equal(saved.defaultModel, null);
+  assert.equal(saved.isDefault, false);
+  assert.deepEqual(saved.models, ['claude-3-7-sonnet']);
+});

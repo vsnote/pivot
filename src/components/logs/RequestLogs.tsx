@@ -1,18 +1,21 @@
-import React, { useState } from 'react';
+import React, { Fragment, useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Select } from '@/components/common/Select';
+import type { RequestLog } from '@/types';
 import {
   FileText,
   Trash2,
   Filter,
   ArrowRight,
   RotateCcw,
+  ChevronDown,
 } from 'lucide-react';
 
 export const RequestLogs: React.FC = () => {
   const { logs, clearLogs } = useAppStore();
   const [selectedClient, setSelectedClient] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
 
   const filteredLogs = logs.filter((log) => {
     const matchesClient = selectedClient === 'all' || log.clientType === selectedClient;
@@ -32,6 +35,23 @@ export const RequestLogs: React.FC = () => {
       return 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-300/40';
     }
     return 'bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300 border-red-300/40';
+  };
+
+  const attemptBadge = (code: number) => {
+    if (code >= 200 && code < 300) {
+      return 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-300/40';
+    }
+    if (code >= 400 && code < 500) {
+      return 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-300/40';
+    }
+    return 'bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300 border-red-300/40';
+  };
+
+  // The chain matters when more than one upstream was tried, or when the only
+  // attempt failed.
+  const hasChain = (log: RequestLog) => {
+    const attempts = log.attempts ?? [];
+    return attempts.length > 1 || (attempts.length === 1 && log.statusCode >= 400);
   };
 
   const formatTimestamp = (ts: string) => {
@@ -111,8 +131,8 @@ export const RequestLogs: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-xs">
               {filteredLogs.map((log) => (
+                <Fragment key={log.id}>
                 <tr
-                  key={log.id}
                   className="hover:bg-gray-50/80 dark:hover:bg-gray-800/40 transition-colors font-mono"
                 >
                   <td className="py-2.5 px-4 text-gray-400 whitespace-nowrap">
@@ -162,7 +182,18 @@ export const RequestLogs: React.FC = () => {
                         <span className="text-gray-500">{log.routedModel}</span>
                       </div>
                     ) : (
-                      <span className="text-red-500 truncate">{log.errorMessage || '请求失败'}</span>
+                      <span className="text-red-500 truncate" title={log.errorMessage}>{log.errorMessage || '请求失败'}</span>
+                    )}
+                    {hasChain(log) && (
+                      <button
+                        type="button"
+                        aria-expanded={expandedLogId === log.id}
+                        onClick={() => setExpandedLogId(expandedLogId === log.id ? null : log.id)}
+                        className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+                      >
+                        <ChevronDown className={`w-3 h-3 transition-transform ${expandedLogId === log.id ? 'rotate-180' : ''}`} />
+                        <span>{log.attempts?.length} 次尝试</span>
+                      </button>
                     )}
                   </td>
 
@@ -170,6 +201,32 @@ export const RequestLogs: React.FC = () => {
                     {log.latencyMs}ms
                   </td>
                 </tr>
+                {expandedLogId === log.id && (
+                  <tr className="bg-gray-50/70 dark:bg-white/[0.02]">
+                    <td colSpan={7} className="px-4 pb-3 pt-1">
+                      <ol className="space-y-1 border-l border-gray-200 dark:border-gray-800 pl-3">
+                        {(log.attempts ?? []).map((attempt, index) => (
+                          <li key={`${log.id}-${index}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px]">
+                            <span className="text-gray-400 w-3 shrink-0">{index + 1}</span>
+                            <span className={`px-1.5 rounded border font-semibold shrink-0 ${attemptBadge(attempt.status)}`}>
+                              {attempt.status}
+                            </span>
+                            <span className="font-medium text-gray-700 dark:text-gray-200">{attempt.providerName}</span>
+                            <ArrowRight className="w-3 h-3 text-gray-400 self-center shrink-0" />
+                            <span className="text-gray-500 dark:text-gray-400">{attempt.model}</span>
+                            <span className="text-gray-400">{attempt.latencyMs}ms</span>
+                            {attempt.error && (
+                              <span className="text-red-500 dark:text-red-400 truncate max-w-[420px]" title={attempt.error}>
+                                {attempt.error}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

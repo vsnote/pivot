@@ -134,7 +134,7 @@ pub mod imp {
                 return nil;
             }
 
-            let titles: Vec<id> = ["服务商", "客户端", "路由", "监控", "日志", "关于"]
+            let titles: Vec<id> = ["服务商", "客户端", "高级设置", "监控", "日志", "关于"]
                 .iter()
                 .map(|&title| NSString::alloc(nil).init_str(title))
                 .collect();
@@ -149,7 +149,7 @@ pub mod imp {
             let _: () = msg_send![segmented, setSegmentStyle:5isize];
             let _: () = msg_send![segmented, setControlSize:3usize];
             let _: () = msg_send![segmented, setSelectedSegment:0isize];
-            let control_size = NSSize::new(360.0, 32.0);
+            let control_size = NSSize::new(392.0, 32.0);
             let _: () = msg_send![segmented, setFrameSize:control_size];
 
             let item: id = msg_send![class!(NSToolbarItem), alloc];

@@ -43,6 +43,11 @@ function ProviderRow({ provider }: { provider: Provider }) {
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="provider-name">{provider.name}</h2>
             <span className="badge mono uppercase">{provider.protocol}</span>
+            {provider.isDefault && (
+              <span className="badge" title={provider.defaultModel ? `默认服务商，默认模型 ${provider.defaultModel}` : '默认服务商，未设置默认模型'}>
+                {provider.defaultModel ? `默认 · ${provider.defaultModel}` : '默认'}
+              </span>
+            )}
           </div>
           <div className="provider-endpoint">
             <code className="mono" title={provider.baseUrl}>{provider.baseUrl}</code>

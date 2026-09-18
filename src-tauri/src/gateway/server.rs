@@ -1,4 +1,4 @@
-use crate::db::{Database, RequestLog};
+use crate::db::{Database, LogAttempt, RequestLog};
 use crate::gateway::adapters::{
     anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, openai_to_anthropic,
     parse_anthropic_event_to_openai_chunks, parse_gemini_chunk_to_anthropic_events,
@@ -175,6 +175,7 @@ async fn handle_messages(
     let providers = state.db.get_providers().unwrap_or_default();
     let routes = state.db.get_routes().unwrap_or_default();
 
+    let is_stream = req.stream.unwrap_or(false);
     let route_match =
         match state
             .router
@@ -184,6 +185,30 @@ async fn handle_messages(
             Err(err) => {
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
                 state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+                // A routing failure is the first thing users look for in the log
+                // table, so record it even though no upstream was contacted.
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id.clone(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: "/v1/messages".to_string(),
+                        client_type: "claude_code".to_string(),
+                        incoming_model: req.model.clone(),
+                        routed_provider_id: "none".to_string(),
+                        routed_provider_name: None,
+                        routed_model: String::new(),
+                        status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
+                        latency_ms: start_time.elapsed().as_millis() as i64,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        error_message: Some(err.clone()),
+                        is_stream,
+                        fallback_used: false,
+                        attempts: Vec::new(),
+                    },
+                );
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": { "message": err, "type": "routing_error" } })),
@@ -192,10 +217,10 @@ async fn handle_messages(
             }
         };
 
-    let is_stream = req.stream.unwrap_or(false);
     let mut candidates = vec![route_match.primary];
     candidates.extend(route_match.fallbacks);
 
+    let mut attempts: Vec<LogAttempt> = Vec::new();
     let mut last_error = String::new();
     let mut last_status = StatusCode::BAD_GATEWAY;
     let mut fallback_used = false;
@@ -210,6 +235,7 @@ async fn handle_messages(
             );
         }
 
+        let attempt_started = Instant::now();
         let resp_result = dispatch_anthropic_request(
             &state.http_client,
             &req,
@@ -223,6 +249,12 @@ async fn handle_messages(
         match resp_result {
             Ok(result) => {
                 let latency_ms = start_time.elapsed().as_millis() as i64;
+                attempts.push(attempt(
+                    cand,
+                    StatusCode::OK,
+                    None,
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
                 state
                     .stats
@@ -234,30 +266,38 @@ async fn handle_messages(
                     .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
 
                 // Log the successful request
-                let log = RequestLog {
-                    id: req_id.clone(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    method: "POST".to_string(),
-                    path: "/v1/messages".to_string(),
-                    client_type: "claude_code".to_string(),
-                    incoming_model: req.model.clone(),
-                    routed_provider_id: cand.provider.id.clone(),
-                    routed_provider_name: Some(cand.provider.name.clone()),
-                    routed_model: cand.target_model.clone(),
-                    status_code: 200,
-                    latency_ms,
-                    prompt_tokens: result.prompt_tokens as i32,
-                    completion_tokens: result.completion_tokens as i32,
-                    error_message: None,
-                    is_stream,
-                    fallback_used,
-                };
-                let _ = state.db.insert_log(&log);
-                emit_log_event(&state, &log);
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id.clone(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: "/v1/messages".to_string(),
+                        client_type: "claude_code".to_string(),
+                        incoming_model: req.model.clone(),
+                        routed_provider_id: cand.provider.id.clone(),
+                        routed_provider_name: Some(cand.provider.name.clone()),
+                        routed_model: cand.target_model.clone(),
+                        status_code: 200,
+                        latency_ms,
+                        prompt_tokens: result.prompt_tokens as i32,
+                        completion_tokens: result.completion_tokens as i32,
+                        error_message: None,
+                        is_stream,
+                        fallback_used,
+                        attempts,
+                    },
+                );
 
                 return result.response;
             }
             Err((status, err_msg)) => {
+                attempts.push(attempt(
+                    cand,
+                    status,
+                    Some(summarize_error(&err_msg)),
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
                 last_error = err_msg;
                 last_status = status;
                 // If 4xx client errors (except 429), don't fallback
@@ -272,26 +312,28 @@ async fn handle_messages(
     state.stats.error_count.fetch_add(1, Ordering::Relaxed);
     let latency_ms = start_time.elapsed().as_millis() as i64;
 
-    let log = RequestLog {
-        id: req_id,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        method: "POST".to_string(),
-        path: "/v1/messages".to_string(),
-        client_type: "claude_code".to_string(),
-        incoming_model: req.model.clone(),
-        routed_provider_id: "none".to_string(),
-        routed_provider_name: None,
-        routed_model: "".to_string(),
-        status_code: last_status.as_u16() as i32,
-        latency_ms,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        error_message: Some(last_error.clone()),
-        is_stream,
-        fallback_used,
-    };
-    let _ = state.db.insert_log(&log);
-    emit_log_event(&state, &log);
+    log_request(
+        &state,
+        RequestLog {
+            id: req_id,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            client_type: "claude_code".to_string(),
+            incoming_model: req.model.clone(),
+            routed_provider_id: "none".to_string(),
+            routed_provider_name: None,
+            routed_model: "".to_string(),
+            status_code: last_status.as_u16() as i32,
+            latency_ms,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some(last_error.clone()),
+            is_stream,
+            fallback_used,
+            attempts,
+        },
+    );
 
     (
         last_status,
@@ -626,6 +668,7 @@ async fn handle_chat_completions(
     let providers = state.db.get_providers().unwrap_or_default();
     let routes = state.db.get_routes().unwrap_or_default();
 
+    let is_stream = req.stream.unwrap_or(false);
     let route_match =
         match state
             .router
@@ -635,6 +678,28 @@ async fn handle_chat_completions(
             Err(err) => {
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
                 state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id.clone(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: "/v1/chat/completions".to_string(),
+                        client_type: "codex_cli".to_string(),
+                        incoming_model: req.model.clone(),
+                        routed_provider_id: "none".to_string(),
+                        routed_provider_name: None,
+                        routed_model: String::new(),
+                        status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
+                        latency_ms: start_time.elapsed().as_millis() as i64,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        error_message: Some(err.clone()),
+                        is_stream,
+                        fallback_used: false,
+                        attempts: Vec::new(),
+                    },
+                );
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": { "message": err, "type": "routing_error" } })),
@@ -643,10 +708,10 @@ async fn handle_chat_completions(
             }
         };
 
-    let is_stream = req.stream.unwrap_or(false);
     let mut candidates = vec![route_match.primary];
     candidates.extend(route_match.fallbacks);
 
+    let mut attempts: Vec<LogAttempt> = Vec::new();
     let mut last_error = String::new();
     let mut last_status = StatusCode::BAD_GATEWAY;
     let mut fallback_used = false;
@@ -661,6 +726,7 @@ async fn handle_chat_completions(
             );
         }
 
+        let attempt_started = Instant::now();
         let resp_result = dispatch_openai_request(
             &state.http_client,
             &req,
@@ -674,6 +740,12 @@ async fn handle_chat_completions(
         match resp_result {
             Ok(result) => {
                 let latency_ms = start_time.elapsed().as_millis() as i64;
+                attempts.push(attempt(
+                    cand,
+                    StatusCode::OK,
+                    None,
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
                 state
                     .stats
@@ -684,30 +756,38 @@ async fn handle_chat_completions(
                     .total_completion_tokens
                     .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
 
-                let log = RequestLog {
-                    id: req_id.clone(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    method: "POST".to_string(),
-                    path: "/v1/chat/completions".to_string(),
-                    client_type: "codex_cli".to_string(),
-                    incoming_model: req.model.clone(),
-                    routed_provider_id: cand.provider.id.clone(),
-                    routed_provider_name: Some(cand.provider.name.clone()),
-                    routed_model: cand.target_model.clone(),
-                    status_code: 200,
-                    latency_ms,
-                    prompt_tokens: result.prompt_tokens as i32,
-                    completion_tokens: result.completion_tokens as i32,
-                    error_message: None,
-                    is_stream,
-                    fallback_used,
-                };
-                let _ = state.db.insert_log(&log);
-                emit_log_event(&state, &log);
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id.clone(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: "/v1/chat/completions".to_string(),
+                        client_type: "codex_cli".to_string(),
+                        incoming_model: req.model.clone(),
+                        routed_provider_id: cand.provider.id.clone(),
+                        routed_provider_name: Some(cand.provider.name.clone()),
+                        routed_model: cand.target_model.clone(),
+                        status_code: 200,
+                        latency_ms,
+                        prompt_tokens: result.prompt_tokens as i32,
+                        completion_tokens: result.completion_tokens as i32,
+                        error_message: None,
+                        is_stream,
+                        fallback_used,
+                        attempts,
+                    },
+                );
 
                 return result.response;
             }
             Err((status, err_msg)) => {
+                attempts.push(attempt(
+                    cand,
+                    status,
+                    Some(summarize_error(&err_msg)),
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
                 last_error = err_msg;
                 last_status = status;
                 if status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED {
@@ -721,26 +801,28 @@ async fn handle_chat_completions(
     state.stats.error_count.fetch_add(1, Ordering::Relaxed);
     let latency_ms = start_time.elapsed().as_millis() as i64;
 
-    let log = RequestLog {
-        id: req_id,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        method: "POST".to_string(),
-        path: "/v1/chat/completions".to_string(),
-        client_type: "codex_cli".to_string(),
-        incoming_model: req.model.clone(),
-        routed_provider_id: "none".to_string(),
-        routed_provider_name: None,
-        routed_model: "".to_string(),
-        status_code: last_status.as_u16() as i32,
-        latency_ms,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        error_message: Some(last_error.clone()),
-        is_stream,
-        fallback_used,
-    };
-    let _ = state.db.insert_log(&log);
-    emit_log_event(&state, &log);
+    log_request(
+        &state,
+        RequestLog {
+            id: req_id,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            client_type: "codex_cli".to_string(),
+            incoming_model: req.model.clone(),
+            routed_provider_id: "none".to_string(),
+            routed_provider_name: None,
+            routed_model: "".to_string(),
+            status_code: last_status.as_u16() as i32,
+            latency_ms,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some(last_error.clone()),
+            is_stream,
+            fallback_used,
+            attempts,
+        },
+    );
 
     (
         last_status,
@@ -942,5 +1024,79 @@ async fn dispatch_openai_request(
 fn emit_log_event(state: &GatewayState, log: &RequestLog) {
     if let Some(ref handle) = state.app_handle {
         let _ = handle.emit("gw-log", log);
+    }
+}
+
+fn log_request(state: &GatewayState, log: RequestLog) {
+    let _ = state.db.insert_log(&log);
+    emit_log_event(state, &log);
+}
+
+fn attempt(candidate: &RouteCandidate, status: StatusCode, error: Option<String>, latency_ms: i64) -> LogAttempt {
+    LogAttempt {
+        provider_id: candidate.provider.id.clone(),
+        provider_name: candidate.provider.name.clone(),
+        model: candidate.target_model.clone(),
+        status: status.as_u16() as i32,
+        error,
+        latency_ms,
+    }
+}
+
+/// Upstream error bodies are often verbose envelopes (or whole HTML pages when a
+/// proxy challenges the request). Keep the readable reason and cap the length so
+/// the attempt chain stays scannable in the log table.
+fn summarize_error(body: &str) -> String {
+    const LIMIT: usize = 240;
+
+    let text = serde_json::from_str::<Value>(body)
+        .ok()
+        .map(|value| {
+            value
+                .get("error")
+                .and_then(|error| {
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .or_else(|| error.as_str())
+                })
+                .or_else(|| value.get("message").and_then(Value::as_str))
+                .unwrap_or(body)
+                .to_string()
+        })
+        .unwrap_or_else(|| body.to_string());
+
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return "Upstream returned an error without a body".to_string();
+    }
+    if collapsed.chars().count() <= LIMIT {
+        collapsed
+    } else {
+        let mut truncated: String = collapsed.chars().take(LIMIT).collect();
+        truncated.push('…');
+        truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attempt_summaries_keep_the_readable_reason() {
+        let body = r#"{"error":{"message":"Rate limit reached on Primary","type":"rate_limit_error"}}"#;
+        assert_eq!(summarize_error(body), "Rate limit reached on Primary");
+        assert_eq!(summarize_error(r#"{"error":"plain failure"}"#), "plain failure");
+        assert_eq!(summarize_error(r#"{"message":"bad request"}"#), "bad request");
+        // Proxies answering with HTML must not flood the log entry.
+        let page = format!("<html>\n  <body>{}</body>\n</html>", "challenge ".repeat(80));
+        let summary = summarize_error(&page);
+        assert_eq!(summary.chars().count(), 241);
+        assert!(summary.ends_with('…'));
+        assert_eq!(
+            summarize_error("   "),
+            "Upstream returned an error without a body"
+        );
     }
 }

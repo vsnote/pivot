@@ -10,6 +10,7 @@ import {
   Preset,
   Provider,
   RequestLog,
+  RoutePlan,
   RouteRule,
 } from '@/types';
 
@@ -53,6 +54,7 @@ interface AppStore {
   testProviderLatency: (id: string) => Promise<number>;
   toggleProvider: (id: string, enabled: boolean) => Promise<void>;
   saveRoutes: (routes: RouteRule[]) => Promise<void>;
+  previewRoute: (model: string) => Promise<RoutePlan>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
   clearLogs: () => Promise<void>;
   initEventListeners: () => Promise<() => void>;
@@ -250,6 +252,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       throw err;
     }
   },
+
+  // The gateway owns model resolution, so the advanced page asks it instead of
+  // guessing in the browser.
+  previewRoute: (model: string) => invoke<RoutePlan>('preview_route', { model }),
 
   toggleInterceptor: async (id: string, enable: boolean) => {
     try {
