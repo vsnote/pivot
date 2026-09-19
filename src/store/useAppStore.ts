@@ -42,11 +42,6 @@ interface AppStore {
   openProviderEditor: (p?: Provider | null) => void;
   closeProviderEditor: () => void;
 
-  isRouteModalOpen: boolean;
-  editingRoute: RouteRule | null;
-  openRouteModal: (r?: RouteRule | null) => void;
-  closeRouteModal: () => void;
-
   // Actions
   fetchInitialData: () => Promise<void>;
   refreshStats: () => Promise<void>;
@@ -94,15 +89,15 @@ export const applyAppTheme = (theme: 'dark' | 'light' | 'system') => {
 export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'providers',
   setActiveTab: (tab) => {
-    const section = LEGACY_TABS[tab] ?? get().settingsSection;
-    const activeTab = tab === 'providers' ? 'providers' : 'settings';
+    const section = LEGACY_TABS[tab] ?? (tab === 'logs' ? 'logs' : get().settingsSection);
+    const activeTab = tab === 'logs' ? 'logs' : tab === 'providers' ? 'providers' : 'settings';
     set({ activeTab, settingsSection: section });
     if (isNativeRuntime()) {
       invoke('sync_native_tab', { tab: activeTab === 'providers' ? 'providers' : section })
         .catch((error) => console.warn('无法同步原生导航', error));
     }
   },
-  settingsSection: 'clients',
+  settingsSection: 'about',
   setSettingsSection: (section) => {
     set({ activeTab: 'settings', settingsSection: section });
     if (isNativeRuntime()) {
@@ -154,11 +149,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ isProviderEditorOpen: true, editingProvider: p });
   },
   closeProviderEditor: () => set({ isProviderEditorOpen: false, editingProvider: null }),
-
-  isRouteModalOpen: false,
-  editingRoute: null,
-  openRouteModal: (r = null) => set({ isRouteModalOpen: true, editingRoute: r }),
-  closeRouteModal: () => set({ isRouteModalOpen: false, editingRoute: null }),
 
   fetchInitialData: async () => {
     set({ isLoading: true, error: null });
@@ -256,7 +246,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   saveRoutes: async (routes: RouteRule[]) => {
     try {
       await invoke('save_routes', { routes });
-      set({ routes, isRouteModalOpen: false, editingRoute: null });
+      set({ routes });
     } catch (err: unknown) {
       set({ error: String(err) });
       throw err;

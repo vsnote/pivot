@@ -14,6 +14,7 @@ pub struct InterceptorInfo {
     pub is_intercepted: bool,
     pub backup_path: Option<String>,
     pub original_endpoint: Option<String>,
+    pub conflict: Option<String>,
 }
 
 pub struct InterceptorManager {
@@ -53,6 +54,37 @@ impl InterceptorManager {
             self.get_codex_status(),
             self.get_gemini_cli_status(),
         ]
+    }
+
+    /// Detect whether CC Switch is actively managing Claude Code.
+    ///
+    /// CC Switch holds a Unix domain socket at `/tmp/com_ccswitch_desktop_si.sock`
+    /// while running.  If that socket exists AND `~/.cc-switch/settings.json`
+    /// contains a `currentProviderClaude` value, we consider it a conflict
+    /// because cc-switch may overwrite `~/.claude.json` on provider switch.
+    fn detect_cc_switch_conflict() -> Option<String> {
+        let socket = Path::new("/tmp/com_ccswitch_desktop_si.sock");
+        if !socket.exists() {
+            return None;
+        }
+
+        let settings_path = Self::home_dir()?.join(".cc-switch").join("settings.json");
+        if let Ok(content) = fs::read_to_string(&settings_path) {
+            if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                if v.get("currentProviderClaude")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    return Some(
+                        "CC Switch 正在管理 Claude Code，切换 provider 时可能覆盖 OmniSwitch 的拦截配置。\
+                         建议先在 CC Switch 中关闭 Claude 管理，或将其 endpoint 设为 OmniSwitch 网关地址。"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        None
     }
 
     // ================= Claude Code =================
@@ -107,6 +139,7 @@ impl InterceptorManager {
                 None
             },
             original_endpoint,
+            conflict: Self::detect_cc_switch_conflict(),
         }
     }
 
@@ -252,6 +285,7 @@ impl InterceptorManager {
                 None
             },
             original_endpoint,
+            conflict: None,
         }
     }
 
@@ -371,6 +405,7 @@ impl InterceptorManager {
                 None
             },
             original_endpoint,
+            conflict: None,
         }
     }
 

@@ -95,6 +95,7 @@ export interface InterceptorStatus {
   isIntercepted: boolean;
   backupPath?: string;
   originalEndpoint?: string;
+  conflict?: string;
 }
 
 export interface Preset {

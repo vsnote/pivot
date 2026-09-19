@@ -3,7 +3,7 @@ import { applyAppTheme, useAppStore } from '@/store/useAppStore';
 import { Header } from '@/components/layout/Header';
 import { ProviderList } from '@/components/providers/ProviderList';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
-import { RouteModal } from '@/components/routes/RouteModal';
+import { RequestLogs } from '@/components/logs/RequestLogs';
 import { SettingsView } from '@/components/settings/SettingsView';
 import { X, AlertCircle } from 'lucide-react';
 import './App.css';
@@ -16,8 +16,15 @@ const subscribeColorScheme = (onChange: () => void) => {
 const getSystemIsDark = () => colorScheme.matches;
 
 export const App: React.FC = () => {
-  const { activeTab, fetchInitialData, theme, isProviderEditorOpen, error, clearError } =
-    useAppStore();
+  const {
+    activeTab,
+    settingsSection,
+    fetchInitialData,
+    theme,
+    isProviderEditorOpen,
+    error,
+    clearError,
+  } = useAppStore();
   const systemIsDark = useSyncExternalStore(subscribeColorScheme, getSystemIsDark);
   const isDark = theme === 'dark' || (theme === 'system' && systemIsDark);
 
@@ -56,18 +63,20 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* 主视图内容区域：统一定宽与内边距，切换时不抖动 */}
+      {/* 主视图内容区域：统一定宽与内边距 */}
       <main className="flex-1 min-h-0 w-full overflow-y-auto px-4 sm:px-6 py-4">
         <div className="max-w-5xl mx-auto w-full">
-          {activeTab === 'providers' ? <ProviderList /> : <SettingsView />}
+          {activeTab === 'providers' && (
+            isProviderEditorOpen ? <ProviderEditor /> : <ProviderList />
+          )}
+          {(activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')) && (
+            <RequestLogs />
+          )}
+          {activeTab === 'settings' && settingsSection !== 'logs' && (
+            <SettingsView />
+          )}
         </div>
       </main>
-
-      {/* 服务商编辑抽屉 Slide-over Drawer */}
-      {isProviderEditorOpen && <ProviderEditor />}
-
-      {/* 弹窗与对话框 */}
-      <RouteModal />
     </div>
   );
 };

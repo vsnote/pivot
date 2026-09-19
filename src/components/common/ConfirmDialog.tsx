@@ -8,6 +8,7 @@ interface ConfirmDialogProps {
   /** Lines that spell out what the action removes. */
   details: string[];
   confirmLabel: string;
+  variant?: 'danger' | 'warning' | 'primary';
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -23,6 +24,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   title,
   details,
   confirmLabel,
+  variant = 'danger',
   busy = false,
   onConfirm,
   onCancel,
@@ -64,7 +66,13 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button
             type="button"
             data-autofocus
-            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg text-white disabled:opacity-50 transition-colors ${
+              variant === 'warning'
+                ? 'bg-amber-600 hover:bg-amber-700'
+                : variant === 'primary'
+                  ? 'bg-indigo-600 hover:bg-indigo-700'
+                  : 'bg-red-600 hover:bg-red-700'
+            }`}
             disabled={busy}
             onClick={onConfirm}
           >

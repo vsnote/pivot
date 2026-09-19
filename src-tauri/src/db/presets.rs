@@ -17,7 +17,7 @@ pub fn get_default_presets() -> Vec<Preset> {
     vec![
         Preset {
             id: "anthropic".to_string(),
-            name: "Anthropic Claude (官方)".to_string(),
+            name: "Anthropic".to_string(),
             protocol: "anthropic".to_string(),
             base_url: "https://api.anthropic.com/v1".to_string(),
             default_models: vec![
@@ -33,7 +33,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "openai".to_string(),
-            name: "OpenAI (官方)".to_string(),
+            name: "OpenAI".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             default_models: vec![
@@ -49,7 +49,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "gemini".to_string(),
-            name: "Google Gemini (官方)".to_string(),
+            name: "Google Gemini".to_string(),
             protocol: "gemini".to_string(),
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
             default_models: vec![
@@ -64,7 +64,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "deepseek".to_string(),
-            name: "DeepSeek (深度求索)".to_string(),
+            name: "DeepSeek".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             default_models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
@@ -74,7 +74,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "openrouter".to_string(),
-            name: "OpenRouter (全球聚合)".to_string(),
+            name: "OpenRouter".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
             default_models: vec![
@@ -90,7 +90,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "ollama".to_string(),
-            name: "Ollama (本地离线运行)".to_string(),
+            name: "Ollama".to_string(),
             protocol: "openai".to_string(),
             base_url: "http://localhost:11434/v1".to_string(),
             default_models: vec![
@@ -105,7 +105,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "groq".to_string(),
-            name: "Groq (LPU 极速推理)".to_string(),
+            name: "Groq".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.groq.com/openai/v1".to_string(),
             default_models: vec![
@@ -119,7 +119,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "mistral".to_string(),
-            name: "Mistral AI (欧洲旗舰)".to_string(),
+            name: "Mistral AI".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.mistral.ai/v1".to_string(),
             default_models: vec![
@@ -133,7 +133,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "siliconflow".to_string(),
-            name: "SiliconFlow (硅基流动)".to_string(),
+            name: "SiliconFlow".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.siliconflow.cn/v1".to_string(),
             default_models: vec![
@@ -148,7 +148,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "moonshot".to_string(),
-            name: "Moonshot AI (月之暗面 Kimi)".to_string(),
+            name: "Moonshot AI".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.moonshot.cn/v1".to_string(),
             default_models: vec![
@@ -162,7 +162,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "zhipu".to_string(),
-            name: "智谱 AI (GLM / CodeGeeX)".to_string(),
+            name: "智谱 AI".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             default_models: vec![
@@ -176,7 +176,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "qwen".to_string(),
-            name: "阿里阿里云百炼 (通义千问)".to_string(),
+            name: "通义千问".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             default_models: vec![
@@ -187,11 +187,11 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "阿里云百炼大模型平台，Qwen 2.5 Coder 达到开源代码模型顶尖水平"
                 .to_string(),
             category: "商业大模型".to_string(),
-            icon: Some("alibaba".to_string()),
+            icon: Some("qwen".to_string()),
         },
         Preset {
             id: "minimax".to_string(),
-            name: "MiniMax (名之梦)".to_string(),
+            name: "MiniMax".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.minimax.chat/v1".to_string(),
             default_models: vec!["MiniMax-Text-01".to_string(), "abab6.5s-chat".to_string()],
@@ -201,7 +201,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "stepfun".to_string(),
-            name: "StepFun (阶跃星辰)".to_string(),
+            name: "StepFun".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.stepfun.com/v1".to_string(),
             default_models: vec!["step-1-8k".to_string(), "step-2-16k".to_string()],
@@ -211,7 +211,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "baichuan".to_string(),
-            name: "百川智能 (Baichuan)".to_string(),
+            name: "百川智能".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.baichuan-ai.com/v1".to_string(),
             default_models: vec!["Baichuan4".to_string(), "Baichuan3-Turbo".to_string()],
@@ -221,7 +221,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "lingyiwanwu".to_string(),
-            name: "零一万物 (01.AI)".to_string(),
+            name: "零一万物".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.lingyiwanwu.com/v1".to_string(),
             default_models: vec![
@@ -249,7 +249,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "cerebras".to_string(),
-            name: "Cerebras (晶圆级极速加速)".to_string(),
+            name: "Cerebras".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.cerebras.ai/v1".to_string(),
             default_models: vec!["llama3.1-8b".to_string(), "llama3.3-70b".to_string()],
@@ -259,7 +259,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "perplexity".to_string(),
-            name: "Perplexity AI (联网搜索增强)".to_string(),
+            name: "Perplexity".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.perplexity.ai".to_string(),
             default_models: vec![
@@ -273,7 +273,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "cohere".to_string(),
-            name: "Cohere (企业级模型)".to_string(),
+            name: "Cohere".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.cohere.ai/v2".to_string(),
             default_models: vec!["command-r-plus".to_string(), "command-r".to_string()],
@@ -283,7 +283,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "github_models".to_string(),
-            name: "GitHub Models (开发者试用)".to_string(),
+            name: "GitHub Models".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://models.inference.ai.azure.com".to_string(),
             default_models: vec![
@@ -310,7 +310,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "xai".to_string(),
-            name: "xAI (Grok 系列)".to_string(),
+            name: "xAI".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             default_models: vec![
@@ -375,7 +375,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "tencent_hunyuan".to_string(),
-            name: "腾讯混元 (Tencent Hunyuan)".to_string(),
+            name: "腾讯混元".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://api.hunyuan.cloud.tencent.com/v1".to_string(),
             default_models: vec!["hunyuan-standard".to_string(), "hunyuan-pro".to_string()],
@@ -385,7 +385,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "baidu_qianfan".to_string(),
-            name: "百度千帆 (文心一言 ERNIE)".to_string(),
+            name: "百度千帆".to_string(),
             protocol: "openai".to_string(),
             base_url: "https://qianfan.baidubce.com/v2".to_string(),
             default_models: vec![
@@ -398,7 +398,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "lmstudio".to_string(),
-            name: "LM Studio (本地离线服务)".to_string(),
+            name: "LM Studio".to_string(),
             protocol: "openai".to_string(),
             base_url: "http://localhost:1234/v1".to_string(),
             default_models: vec!["local-model".to_string()],
@@ -408,7 +408,7 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "vllm".to_string(),
-            name: "vLLM / 本地自建推理服务".to_string(),
+            name: "vLLM".to_string(),
             protocol: "openai".to_string(),
             base_url: "http://localhost:8000/v1".to_string(),
             default_models: vec!["default".to_string()],

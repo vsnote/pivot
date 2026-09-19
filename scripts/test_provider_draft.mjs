@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 const source = await readFile(new URL('../src/components/providers/providerDraft.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-const { createProviderDraft, applyProviderPreset, prepareProvider, validateBaseUrl, editablePresetUrl } = await import(`data:text/javascript,${encodeURIComponent(compiled)}`);
+const { createProviderDraft, applyProviderPreset, prepareProvider, validateBaseUrl, editablePresetUrl, hasActualUserChanges } = await import(`data:text/javascript,${encodeURIComponent(compiled)}`);
 const preset = { id: 'test', name: 'Test', protocol: 'openai', baseUrl: 'https://example.com/v1', category: '商业大模型', defaultModels: ['model-a'] };
 
 test('重复使用预设创建独立草稿，切换服务商不带入旧密钥和模型', () => {
@@ -59,3 +59,27 @@ test('缺少默认路由字段的旧记录按未设置处理', () => {
   assert.equal(saved.isDefault, false);
   assert.deepEqual(saved.models, ['claude-3-7-sonnet']);
 });
+
+test('选定预设但未输入任何内容时，不应视为实质改动', () => {
+  const initial = createProviderDraft(null, [preset]);
+  const chosen = applyProviderPreset(initial, preset);
+
+  // 刚应用预设，未填 key、未选模型、未修改名称与地址 -> 无实质修改
+  assert.equal(hasActualUserChanges(chosen, initial, null, preset, ''), false);
+
+  // 输入了 key -> 有实质修改
+  assert.equal(hasActualUserChanges({ ...chosen, apiKeys: ['sk-test'] }, initial, null, preset, ''), true);
+
+  // 勾选了模型 -> 有实质修改
+  assert.equal(hasActualUserChanges({ ...chosen, models: ['model-a'] }, initial, null, preset, ''), true);
+
+  // 正在手动输入模型框中有文字 -> 有实质修改
+  assert.equal(hasActualUserChanges(chosen, initial, null, preset, 'gpt-4o'), true);
+
+  // 修改了名称 -> 有实质修改
+  assert.equal(hasActualUserChanges({ ...chosen, name: 'My Custom Name' }, initial, null, preset, ''), true);
+
+  // 修改了 Base URL -> 有实质修改
+  assert.equal(hasActualUserChanges({ ...chosen, baseUrl: 'https://other.com/v1' }, initial, null, preset, ''), true);
+});
+

@@ -47,3 +47,25 @@ export function prepareProvider(draft: Provider): Provider {
     defaultModel: draft.defaultModel?.trim() || null, isDefault: !!draft.isDefault,
     updatedAt: new Date().toISOString() };
 }
+
+export function hasActualUserChanges(
+  draft: Provider,
+  initial: Provider,
+  editingProvider: Provider | null,
+  preset?: Preset,
+  manualModel = '',
+): boolean {
+  if (editingProvider) {
+    return JSON.stringify(draft) !== JSON.stringify(initial) || !!manualModel.trim();
+  }
+  const hasKey = draft.apiKeys.some((k) => k.trim().length > 0);
+  const hasModels = draft.models.length > 0;
+  const isTypingModel = !!manualModel.trim();
+  if (hasKey || hasModels || isTypingModel) return true;
+
+  if (preset) {
+    return draft.baseUrl !== preset.baseUrl || draft.name !== preset.name;
+  }
+  return !!draft.name.trim() || !!draft.baseUrl.trim();
+}
+

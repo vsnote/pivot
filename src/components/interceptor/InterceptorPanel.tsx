@@ -1,17 +1,19 @@
 import React, { useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import {
   Terminal,
   ShieldCheck,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Copy,
   Check,
   Sparkles,
 } from 'lucide-react';
 
-const DEFAULT_INTERCEPTORS = [
+const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
   {
     id: 'claude_code',
     name: 'Claude Code',
@@ -186,6 +188,16 @@ export const InterceptorPanel: React.FC = () => {
                     size="md"
                   />
                 </div>
+
+                {/* 冲突警告 */}
+                {tool.conflict && (
+                  <div className="mb-2.5 p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 flex items-start gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                    <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                      {tool.conflict}
+                    </p>
+                  </div>
+                )}
 
                 {/* 状态行 */}
                 <div className="py-2 px-3 rounded-xl bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">

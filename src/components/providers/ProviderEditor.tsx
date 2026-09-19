@@ -13,14 +13,17 @@ import {
   AlertCircle,
   HelpCircle,
 } from 'lucide-react';
+import {
+  ProviderAvatar,
+} from '@/components/common/BrandIcons';
 import { useAppStore } from '@/store/useAppStore';
 import type { Preset, Protocol, Provider } from '@/types';
 import { Select } from '@/components/common/Select';
-import { Switch } from '@/components/common/Switch';
 import {
   applyProviderPreset,
   createProviderDraft,
   editablePresetUrl,
+  hasActualUserChanges,
   prepareProvider,
   uniqueValues,
   validateBaseUrl,
@@ -58,16 +61,66 @@ export function ProviderEditor() {
 
   const preset = presets.find((p) => p.id === draft.presetId);
   const urlEditable = !preset || editablePresetUrl(preset);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(initial) || !!manualModel.trim();
+  const hasUserChanges = hasActualUserChanges(
+    draft,
+    initial,
+    editingProvider,
+    preset,
+    manualModel,
+  );
+
   const keyInputs = draft.apiKeys.length ? draft.apiKeys : [''];
+
+  const handleBack = () => {
+    if (saving) return;
+    if (confirmation) {
+      setConfirmation(null);
+      return;
+    }
+    // 1. 若在预设网格页面，返回即关闭编辑器退回主页
+    if (choosing) {
+      closeProviderEditor();
+      return;
+    }
+    // 2. 若是新增服务商且已进入配置页：返回应该是重选预设
+    if (!editingProvider) {
+      if (!hasUserChanges) {
+        setChoosing(true);
+        return;
+      }
+      setConfirmation({ kind: 'preset' });
+      return;
+    }
+    // 3. 若是编辑已有服务商
+    if (!hasUserChanges) {
+      closeProviderEditor();
+      return;
+    }
+    setConfirmation({ kind: 'leave' });
+  };
 
   const handleClose = () => {
     if (saving) return;
-    if (dirty) {
-      setConfirmation({ kind: 'leave' });
+    if (confirmation) {
+      setConfirmation(null);
       return;
     }
-    closeProviderEditor();
+    if (!hasUserChanges) {
+      closeProviderEditor();
+      return;
+    }
+    setConfirmation({ kind: 'leave' });
+  };
+
+  const handleConfirmAbandon = () => {
+    if (!confirmation) return;
+    if (confirmation.kind === 'preset') {
+      setConfirmation(null);
+      setChoosing(true);
+    } else {
+      setConfirmation(null);
+      closeProviderEditor();
+    }
   };
 
   useEffect(() => () => {
@@ -79,7 +132,7 @@ export function ProviderEditor() {
       if (event.key !== 'Escape' || event.defaultPrevented || event.target instanceof HTMLSelectElement) return;
       event.preventDefault();
       if (confirmation) setConfirmation(null);
-      else handleClose();
+      else handleBack();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -220,59 +273,80 @@ export function ProviderEditor() {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-xs animate-fade-in">
-      {/* 遮罩背景点击关闭 */}
-      <div className="flex-1 cursor-pointer" onClick={handleClose} />
-
-      {/* 抽屉面板主体 */}
-      <div
-        ref={drawerRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={editingProvider ? '编辑服务商' : '添加服务商'}
-        className="w-full max-w-xl h-full bg-white dark:bg-zinc-900 border-l border-zinc-200 dark:border-zinc-800 shadow-2xl flex flex-col animate-drawer-in"
-      >
-        {/* 抽屉头部 */}
-        <div className="px-6 py-4 border-b border-zinc-200/80 dark:border-zinc-800 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            {!choosing && !editingProvider && (
+    <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
+      {/* 顶部纯粹的「返回」栏与快捷操作 */}
+      <div className="flex items-center justify-between pb-1">
+        <div className="flex items-center gap-2">
+          {confirmation ? (
+            <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
+              <span className="text-xs font-medium text-rose-700 dark:text-rose-300">
+                {confirmation.kind === 'preset'
+                  ? '放弃已填内容并重选预设？'
+                  : '存在未保存的修改，确认放弃？'}
+              </span>
               <button
                 type="button"
-                onClick={() => setChoosing(true)}
-                className="p-1 rounded-lg text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors mr-1 cursor-pointer"
-                title="重新选择预设"
+                onClick={handleConfirmAbandon}
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
               >
-                <ArrowLeft className="w-4 h-4" />
+                确认放弃
               </button>
-            )}
-            <div>
-              <h2 className="text-sm font-bold text-zinc-950 dark:text-zinc-50">
-                {editingProvider
-                  ? `编辑服务商：${draft.name}`
-                  : choosing
-                    ? '选择模型服务商'
-                    : `配置 ${draft.name || '服务商'}`}
-              </h2>
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                {choosing
-                  ? '从预设快速添加或配置自定义服务商'
-                  : '配置 API Key、接入点及声明的模型池'}
-              </p>
+              <button
+                type="button"
+                onClick={() => setConfirmation(null)}
+                className="px-2.5 py-1 rounded-lg text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-white dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                继续编辑
+              </button>
             </div>
-          </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleBack}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 -ml-2.5 rounded-lg text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>返回</span>
+            </button>
+          )}
+        </div>
 
+        <div className="flex items-center gap-2">
+          {!choosing && (
+            <button
+              type="submit"
+              form="provider-drawer-form"
+              disabled={saving || fetching || draft.models.length === 0}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 shadow-2xs transition-all active:scale-[0.98] cursor-pointer"
+            >
+              {saving ? (
+                <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Check className="w-3.5 h-3.5" />
+              )}
+              <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '添加并启用'}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            aria-label="关闭抽屉"
+            className="p-1 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            title="关闭"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
+      </div>
 
-        {/* 抽屉内容滚动区域 */}
-        <div ref={contentRef} className="flex-1 overflow-y-auto px-6 py-5">
+      {/* 页面主卡片 */}
+      <div
+        ref={drawerRef}
+        role="region"
+        aria-label={editingProvider ? '编辑服务商' : '添加服务商'}
+        className="p-6 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-6"
+      >
+        {/* 表单内容 */}
+        <div ref={contentRef} className="space-y-6">
           {choosing ? (
             /* 选择服务商预设 */
             <div className="space-y-4">
@@ -288,46 +362,42 @@ export function ProviderEditor() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                 {/* 自定义连接 */}
                 <button
                   type="button"
                   onClick={() => choosePreset()}
-                  className="p-3.5 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-indigo-500 dark:hover:border-indigo-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
+                  className="flex items-center gap-2.5 p-3 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-indigo-500 dark:hover:border-indigo-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
                 >
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
-                      <Plus className="w-4 h-4" />
-                    </div>
-                    <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
-                      自定义服务商
-                    </span>
+                  <div className="w-7 h-7 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200/60 dark:border-indigo-800/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                    <Plus className="w-4 h-4" />
                   </div>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
-                    私有中转、代理网关或任何兼容接口
-                  </p>
+                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
+                    自定义服务商
+                  </span>
                 </button>
 
-                {matchingPresets.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => choosePreset(p)}
-                    className="p-3.5 rounded-xl border border-zinc-200/90 dark:border-zinc-800 hover:border-indigo-500 dark:hover:border-indigo-500 bg-white dark:bg-zinc-900 text-left shadow-xs transition-all group cursor-pointer"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
-                        {p.name}
+                {matchingPresets.map((p) => {
+                  const cleanName = p.name.replace(/[\(（][^\)）]+[\)）]/g, '').trim();
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => choosePreset(p)}
+                      className="flex items-center gap-2.5 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800 hover:border-indigo-500/80 dark:hover:border-indigo-500/80 bg-white dark:bg-zinc-900/90 hover:bg-indigo-50/20 dark:hover:bg-indigo-950/20 text-left shadow-2xs hover:shadow-xs transition-all duration-150 group cursor-pointer"
+                    >
+                      <ProviderAvatar
+                        name={cleanName}
+                        protocol={p.protocol}
+                        iconKey={p.icon || p.id}
+                        sizeClass="w-7 h-7"
+                      />
+                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
+                        {cleanName}
                       </span>
-                      <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">
-                        {p.protocol}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1.5 truncate">
-                      {p.category}
-                    </p>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (
@@ -485,17 +555,12 @@ export function ProviderEditor() {
               {/* 模型选择与声明 */}
               <div className="space-y-3.5 pt-4 border-t border-zinc-100 dark:border-zinc-800">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider flex items-center gap-1.5">
-                      可用模型池
-                      <span className="text-[11px] font-normal font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
-                        已选 {draft.models.length}
-                      </span>
-                    </h3>
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                      网关在路由时只分发给声明了对应模型的服务商
-                    </p>
-                  </div>
+                  <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider flex items-center gap-1.5">
+                    可用模型池
+                    <span className="text-[11px] font-normal font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
+                      已选 {draft.models.length}
+                    </span>
+                  </h3>
 
                   <button
                     type="button"
@@ -513,21 +578,15 @@ export function ProviderEditor() {
                 </div>
 
                 {fetchError && (
-                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-semibold">上游模型获取失败</div>
-                      <div className="text-[11px] mt-0.5 break-all">{fetchError}</div>
-                    </div>
+                  <div className="px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-500" />
+                    <span className="truncate">{fetchError}</span>
                   </div>
                 )}
 
                 {/* 已选模型 Chips */}
                 {draft.models.length > 0 && (
                   <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/80 dark:border-zinc-800/80">
-                    <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-2">
-                      已添加的模型（点击 × 移除）：
-                    </div>
                     <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
                       {draft.models.map((model) => (
                         <span
@@ -627,120 +686,13 @@ export function ProviderEditor() {
                   </button>
                 </div>
                 {errors.models && <p className="text-[11px] text-rose-500 mt-1">{errors.models}</p>}
-              </div>
-
-              {/* 默认路由与兜底机制 */}
-              <div className="space-y-3.5 pt-4 border-t border-zinc-100 dark:border-zinc-800">
-                <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-                  默认路由与接管机制
-                </h3>
-
-                {/* 默认模型 */}
-                <div>
-                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                    默认改写模型 (Default Model)
-                  </label>
-                  <input
-                    type="text"
-                    value={draft.defaultModel ?? ''}
-                    onChange={(e) => update({ defaultModel: e.target.value })}
-                    placeholder="例如 claude-3-7-sonnet 或 gpt-4o"
-                    className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                  />
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1">
-                    当请求的模型名不属于该服务商时，自动重写为此模型转发。
-                  </p>
-                  {errors.defaultModel && (
-                    <p className="text-[11px] text-rose-500 mt-1">{errors.defaultModel}</p>
-                  )}
-                </div>
-
-                {/* 设为默认服务商 */}
-                <div className="flex items-center justify-between p-3.5 rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-850/50">
-                  <div className="pr-4">
-                    <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 block">
-                      设为全网关默认服务商
-                    </span>
-                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400 block mt-0.5">
-                      所有未明确匹配的客户端请求（例如 Claude Code 默认请求），均由该服务商接管。
-                    </span>
+                {errors.save && (
+                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300">
+                    保存失败：{errors.save}
                   </div>
-                  <Switch
-                    checked={!!draft.isDefault}
-                    onCheckedChange={(checked) => update({ isDefault: checked })}
-                    ariaLabel="设为默认服务商"
-                  />
-                </div>
+                )}
               </div>
             </form>
-          )}
-        </div>
-
-        {/* 抽屉底部保存操作 */}
-        <div className="px-6 py-3.5 border-t border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 flex items-center justify-between shrink-0">
-          {confirmation ? (
-            <div className="flex items-center justify-between w-full">
-              <span className="text-xs text-zinc-600 dark:text-zinc-400">
-                {confirmation.kind === 'leave'
-                  ? '存在未保存的修改，确认放弃？'
-                  : '更换服务商将重置已有配置，确认更换？'}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setConfirmation(null)}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
-                >
-                  继续编辑
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    confirmation.kind === 'leave'
-                      ? closeProviderEditor()
-                      : choosePreset(confirmation.preset, true)
-                  }
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-rose-600 hover:bg-rose-700 cursor-pointer"
-                >
-                  确认放弃
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div>
-                {errors.save && (
-                  <p className="text-xs text-rose-500 font-medium">保存失败：{errors.save}</p>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 ml-auto">
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  disabled={saving}
-                  className="px-3.5 py-1.5 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                >
-                  取消
-                </button>
-
-                {!choosing && (
-                  <button
-                    type="submit"
-                    form="provider-drawer-form"
-                    disabled={saving || fetching || draft.models.length === 0}
-                    className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 shadow-xs transition-all active:scale-[0.98] cursor-pointer"
-                  >
-                    {saving ? (
-                      <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Check className="w-3.5 h-3.5" />
-                    )}
-                    <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '添加并启用'}</span>
-                  </button>
-                )}
-              </div>
-            </>
           )}
         </div>
       </div>
