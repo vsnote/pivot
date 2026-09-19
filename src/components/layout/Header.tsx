@@ -1,8 +1,12 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { isTauri } from '@tauri-apps/api/core';
+import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { SettingsSection } from '@/types';
 import { Moon, Sun, Plus } from 'lucide-react';
+
+interface NavItem {
+  id: 'providers' | SettingsSection;
+  label: string;
+}
 
 export const Header: React.FC = () => {
   const {
@@ -15,169 +19,97 @@ export const Header: React.FC = () => {
     openProviderEditor,
   } = useAppStore();
 
-  const isSettings = activeTab === 'settings';
+  const currentTabId: 'providers' | SettingsSection =
+    activeTab === 'providers' ? 'providers' : settingsSection;
 
-  const navRef = useRef<HTMLElement>(null);
-  const [indicatorStyle, setIndicatorStyle] = useState<{ left: number; width: number; opacity: number }>({
-    left: 0,
-    width: 0,
-    opacity: 0,
-  });
-
-  const settingsTabs: { id: SettingsSection; label: string }[] = [
-    { id: 'clients', label: '客户端' },
-    { id: 'routes', label: '高级设置' },
-    { id: 'gateway', label: '监控' },
+  const navTabs: NavItem[] = [
+    { id: 'providers', label: '首页' },
+    { id: 'routes', label: '路由' },
     { id: 'logs', label: '日志' },
-    { id: 'about', label: '关于' },
+    { id: 'gateway', label: '监控' },
+    { id: 'about', label: '设置' },
   ];
 
-  // 动态测量设置二级 Tab 项，驱动 Apple 物理级 Spring 滑块平滑无级跟随
-  useEffect(() => {
-    const updateIndicator = () => {
-      if (!isSettings || !navRef.current) {
-        setIndicatorStyle((prev) => ({ ...prev, opacity: 0 }));
-        return;
-      }
-      const activeEl = navRef.current.querySelector<HTMLButtonElement>(`[data-tab-id="${settingsSection}"]`);
-      if (activeEl) {
-        setIndicatorStyle({
-          left: activeEl.offsetLeft,
-          width: activeEl.offsetWidth,
-          opacity: 1,
-        });
-      }
-    };
-
-    updateIndicator();
-    const raf = requestAnimationFrame(updateIndicator);
-    window.addEventListener('resize', updateIndicator);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener('resize', updateIndicator);
-    };
-  }, [isSettings, settingsSection]);
-
-  const isNative = isTauri() || window.location.protocol === 'tauri:';
+  const handleSelectTab = (id: 'providers' | SettingsSection) => {
+    if (id === 'providers') {
+      setActiveTab('providers');
+    } else {
+      setSettingsSection(id);
+    }
+  };
 
   return (
     <header
       data-tauri-drag-region
-      className="relative h-11 w-full px-6 sm:px-8 select-none shrink-0 z-30 bg-transparent"
+      className="relative h-13 sm:h-14 w-full px-5 sm:px-7 select-none shrink-0 z-40 bg-white/80 dark:bg-zinc-950/80 border-b border-zinc-200/80 dark:border-zinc-800/80 backdrop-blur-xl flex items-center justify-between"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
-      {/* 左翼：为原生 macOS 红黄绿交通灯预留舒适呼吸空间与拖拽区域 */}
-      <div
-        data-tauri-drag-region
-        className="flex items-center pl-18 sm:pl-20 shrink-0 h-full"
-      />
-
-      {/* 中央：当处于 Web 调试环境时显示 Web 灵动岛；原生环境下由 AppKit NSSegmentedControl 接管 */}
-      {!isNative && (
-        <div
-          className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 flex items-center justify-center transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]"
+      {/* 左侧：macOS 交通灯预留安全区（~80px）与纯净应用名称 */}
+      <div className="flex items-center pl-20 sm:pl-22" data-tauri-drag-region>
+        <button
+          type="button"
+          onClick={() => setActiveTab('providers')}
+          className="text-[14px] font-bold tracking-tight text-zinc-900 dark:text-zinc-100 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors select-none cursor-pointer"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          title="返回首页"
         >
-        {/* 灵动岛主体：全圆角胶囊形态，彻底杜绝耳片接缝与漏白 */}
-        <div
-          className={`relative h-[32px] bg-white/90 dark:bg-zinc-900/90 text-gray-900 dark:text-white rounded-full shadow-[0_2px_10px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.02)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.08)] border border-gray-200/80 dark:border-white/10 flex items-center backdrop-blur-xl transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
-            isSettings ? 'pl-2.5 pr-1.5 gap-1.5' : 'px-3.5 gap-2'
-          }`}
-        >
-          {/* Logo 区域：首页为状态胶囊，设置页为可点击返回按钮 */}
-          {isSettings ? (
-            <button
-              onClick={() => setActiveTab('providers')}
-              className="flex items-center gap-1.5 select-none shrink-0 whitespace-nowrap rounded-full px-2 py-1 text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-all duration-150 cursor-pointer"
-              title="返回服务商"
-            >
-              <div className="relative flex items-center justify-center">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                </div>
-              </div>
-              <span className="text-[11.5px] font-semibold tracking-tight font-sans">
-                OmniSwitch
-              </span>
-            </button>
-          ) : (
-            <div className="flex items-center gap-2 select-none shrink-0 whitespace-nowrap cursor-default">
-              <div className="relative flex items-center justify-center">
-                <div className="w-3.5 h-3.5 rounded-full border-[1.5px] border-emerald-500/80 dark:border-emerald-400 bg-emerald-500/10 dark:bg-emerald-400/10 flex items-center justify-center shadow-[0_0_8px_rgba(16,185,129,0.25)]">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse" />
-                </div>
-              </div>
-              <span className="text-[12px] font-semibold tracking-tight font-sans text-gray-800 dark:text-zinc-100">
-                OmniSwitch
-              </span>
-            </div>
-          )}
-
-          {/* 设置模式下展开的细微分割线与二级 Tab 导航 */}
-          {isSettings && (
-            <>
-              {/* 细腻微分割线 */}
-              <div className="w-[1px] h-3 bg-gray-200 dark:bg-white/15 shrink-0" />
-
-              {/* 二级 Tab 导航 */}
-              <nav
-                ref={navRef}
-                className="relative flex items-center gap-0.5 h-6 shrink-0 animate-in fade-in duration-200"
-              >
-                {/* 动态平滑滑动的流体胶囊 (Apple Fluid Spring Indicator) */}
-                <div
-                  className="absolute left-0 top-0 bottom-0 rounded-full pointer-events-none transition-all duration-260 ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[transform,width] bg-black/[0.06] dark:bg-white/[0.16] shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(0,0,0,0.4)]"
-                  style={{
-                    transform: `translateX(${indicatorStyle.left}px)`,
-                    width: `${indicatorStyle.width}px`,
-                    opacity: indicatorStyle.opacity,
-                  }}
-                />
-
-                {settingsTabs.map((tab) => {
-                  const isActive = settingsSection === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      data-tab-id={tab.id}
-                      onClick={() => setSettingsSection(tab.id)}
-                      className={`relative z-10 px-2.5 h-6 text-[11px] flex items-center justify-center rounded-full transition-colors duration-150 cursor-pointer active:scale-95 whitespace-nowrap shrink-0 ${
-                        isActive
-                          ? 'text-gray-950 dark:text-white font-semibold'
-                          : 'text-gray-500 dark:text-white/60 hover:text-gray-900 dark:hover:text-white font-medium'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  );
-                })}
-              </nav>
-            </>
-          )}
-        </div>
+          OmniSwitch
+        </button>
       </div>
-      )}
 
-      {/* Web 调试环境保留同等功能，原生窗口交由 NSToolbar 渲染 */}
-      {!isNative && (
-        <div
-          className="absolute right-6 sm:right-8 top-1/2 -translate-y-1/2 flex h-8 items-center gap-0.5 rounded-full border border-gray-200/80 bg-white/90 p-0.5 shadow-[0_2px_10px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.02)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-900/90 dark:shadow-[0_4px_20px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.08)]"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      {/* 中央：舒展对称的 Tab 导航分段器 */}
+      <div
+        className="flex items-center justify-center"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        <nav
+          className="flex items-center gap-1 p-1 bg-zinc-100/90 dark:bg-zinc-900/90 border border-zinc-200/80 dark:border-zinc-800/80 rounded-xl shadow-2xs"
         >
-          <button
-            onClick={() => openProviderEditor(null)}
-            aria-label="添加服务商"
-            title="添加服务商"
-            className="inline-flex size-7 items-center justify-center rounded-full bg-indigo-600 text-white shadow-xs shadow-indigo-600/20 transition-[background-color,transform,box-shadow] duration-150 hover:bg-indigo-700 active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white cursor-pointer dark:focus-visible:ring-indigo-400 dark:focus-visible:ring-offset-zinc-900"
-          >
-            <Plus className="size-3.5" />
-          </button>
+          {navTabs.map((tab) => {
+            const isActive = currentTabId === tab.id;
+            return (
+              <button
+                key={tab.id}
+                data-nav-id={tab.id}
+                onClick={() => handleSelectTab(tab.id)}
+                className={`px-3.5 sm:px-4 h-7 text-xs sm:text-[13px] flex items-center justify-center rounded-lg transition-all duration-150 cursor-pointer whitespace-nowrap shrink-0 ${
+                  isActive
+                    ? 'bg-white dark:bg-zinc-800 text-zinc-950 dark:text-white shadow-xs font-semibold'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 font-medium'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </nav>
+      </div>
 
-          <button className="inline-flex size-7 items-center justify-center rounded-full" aria-label="切换外观" title="切换外观" onClick={() => setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark')}>
-            {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-          </button>
-        </div>
-      )}
+      {/* 右侧：极简快捷操作 */}
+      <div
+        className="flex items-center gap-2"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        {/* 添加服务商快捷按钮 */}
+        <button
+          onClick={() => openProviderEditor(null)}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-600 dark:text-zinc-300 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-850 border border-zinc-200/70 dark:border-zinc-800 transition-colors cursor-pointer"
+          aria-label="添加服务商"
+          title="添加服务商"
+        >
+          <Plus className="w-4 h-4" />
+        </button>
+
+        {/* 外观切换 */}
+        <button
+          onClick={() => setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark')}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-850 border border-zinc-200/70 dark:border-zinc-800 transition-colors cursor-pointer"
+          aria-label="切换明暗主题"
+          title="切换明暗主题"
+        >
+          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        </button>
+      </div>
     </header>
   );
 };

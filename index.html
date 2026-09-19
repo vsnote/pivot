@@ -7,8 +7,22 @@
     <title>OmniSwitch</title>
   </head>
 
-  <body oncontextmenu="return event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA';">
+  <body oncontextmenu="return true;">
     <div id="root"></div>
+    <script>
+      window.addEventListener('error', function(e) {
+        var el = document.createElement('pre');
+        el.style.cssText = 'color:red;background:white;padding:20px;font-size:14px;z-index:999999;position:fixed;top:0;left:0;right:0;max-height:80vh;overflow:auto;border:2px solid red;';
+        el.innerText = 'Global Error: ' + e.message + '\n' + e.filename + ':' + e.lineno + ':' + e.colno + '\n' + (e.error ? e.error.stack : '');
+        document.body.appendChild(el);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var el = document.createElement('pre');
+        el.style.cssText = 'color:red;background:white;padding:20px;font-size:14px;z-index:999999;position:fixed;top:0;left:0;right:0;max-height:80vh;overflow:auto;border:2px solid red;';
+        el.innerText = 'Unhandled Rejection: ' + e.reason + '\n' + (e.reason && e.reason.stack ? e.reason.stack : '');
+        document.body.appendChild(el);
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
