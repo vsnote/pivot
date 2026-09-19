@@ -35,7 +35,7 @@ export const SettingsView: React.FC = () => {
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
               面向开发者的下一代本地 AI 智能网关与模型路由器
             </p>
-            <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5">
+            <p className="text-[11px] text-zinc-400 dark:text-zinc-400 mt-1.5">
               纯本地运行 · 密钥与日志仅保存在本机 · 无云端遥测
             </p>
           </div>

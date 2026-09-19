@@ -78,7 +78,7 @@ export const Header: React.FC = () => {
           className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
             isProviderEditorOpen
               ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/80 dark:border-indigo-800 shadow-2xs'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-850'
+              : 'text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
           }`}
           aria-label="添加服务商"
           title="添加服务商"
@@ -92,7 +92,7 @@ export const Header: React.FC = () => {
           className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
             isLogsActive
               ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/80 dark:border-indigo-800 shadow-2xs'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-850'
+              : 'text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
           }`}
           aria-label="请求日志"
           title="请求日志"
@@ -103,7 +103,7 @@ export const Header: React.FC = () => {
         {/* 3. 外观切换 */}
         <button
           onClick={() => setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark')}
-          className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-850 transition-colors cursor-pointer"
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           aria-label="切换明暗主题"
           title="切换明暗主题"
         >
@@ -116,7 +116,7 @@ export const Header: React.FC = () => {
           className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
             isSettingsActive
               ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/80 dark:border-indigo-800 shadow-2xs'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-850'
+              : 'text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
           }`}
           aria-label="关于 OmniSwitch"
           title="关于 OmniSwitch"

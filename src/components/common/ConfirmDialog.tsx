@@ -39,25 +39,25 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-2xl w-full max-w-md"
+        className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-2xl w-full max-w-md"
       >
-        <div className="flex items-start gap-3 px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+        <div className="flex items-start gap-3 px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
           <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-          <h2 id="confirm-dialog-title" className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          <h2 id="confirm-dialog-title" className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
             {title}
           </h2>
         </div>
         <div className="px-6 py-4 space-y-1.5">
           {details.map((line) => (
-            <p key={line} className="text-xs leading-relaxed text-gray-600 dark:text-gray-400">
+            <p key={line} className="text-xs leading-relaxed text-zinc-600 dark:text-zinc-400">
               {line}
             </p>
           ))}
         </div>
-        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-zinc-200 dark:border-zinc-800">
           <button
             type="button"
-            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
             disabled={busy}
             onClick={onCancel}
           >

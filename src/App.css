@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+@theme {
+  --color-zinc-850: #202023;
+  --color-zinc-150: #ebebef;
+}
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {

@@ -501,7 +501,7 @@ export function ProviderEditor() {
                   </div>
 
                   {showAuthHelp && (
-                    <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-850 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
+                    <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-850 text-[11px] text-zinc-600 dark:text-zinc-300 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
                       密钥保存在本地 SQLite 中。留空时默认沿用客户端传入的密钥；本地模型（如 Ollama）通常无需填写。
                     </div>
                   )}

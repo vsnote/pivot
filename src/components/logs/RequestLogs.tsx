@@ -377,7 +377,7 @@ export const RequestLogs: React.FC = () => {
             <div
               key={log.id}
               onClick={() => setActiveLog(log)}
-              className="p-3.5 sm:p-4 hover:bg-zinc-50/80 dark:hover:bg-zinc-850/50 transition-colors cursor-pointer flex items-center justify-between gap-4 select-none"
+              className="p-3.5 sm:p-4 hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50 transition-colors cursor-pointer flex items-center justify-between gap-4 select-none"
             >
               <div className="flex items-center gap-3.5 min-w-0">
                 <span className={`px-2 py-0.5 rounded text-xs font-mono font-bold shrink-0 border ${getStatusBadge(log.statusCode)}`}>

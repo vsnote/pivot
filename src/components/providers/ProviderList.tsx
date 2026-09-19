@@ -95,8 +95,8 @@ function ProviderCard({ provider }: { provider: Provider }) {
       }}
       className={`group flex items-center justify-between gap-3.5 px-4 py-3 sm:py-3.5 transition-colors cursor-pointer select-none ${
         provider.enabled
-          ? 'hover:bg-zinc-50/80 dark:hover:bg-zinc-850/50'
-          : 'opacity-60 bg-zinc-50/30 dark:bg-zinc-900/30 hover:bg-zinc-100/50 dark:hover:bg-zinc-850/40'
+          ? 'hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50'
+          : 'opacity-60 bg-zinc-50/30 dark:bg-zinc-900/30 hover:bg-zinc-100/50 dark:hover:bg-zinc-800/40'
       }`}
       aria-label={`编辑服务商 ${provider.name}`}
       aria-busy={pending !== null}
@@ -308,7 +308,7 @@ function GatewayQuickBar() {
                   className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all duration-150 cursor-pointer ${
                     active
                       ? `${activeClass} shadow-2xs`
-                      : 'bg-zinc-100/70 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-800'
+                      : 'bg-zinc-100/70 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400 border-transparent hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/60'
                   }`}
                   title={title}
                 >

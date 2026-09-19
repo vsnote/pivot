@@ -213,7 +213,7 @@ export const ProviderAvatar: React.FC<{
     if (IconRenderer) {
       return (
         <div
-          className={`${sizeClass} rounded-xl flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-800/80 bg-zinc-50/80 dark:bg-zinc-850/60 text-zinc-850 dark:text-zinc-150 p-1.5 transition-colors ${className}`}
+          className={`${sizeClass} rounded-xl flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-700/60 bg-zinc-50/80 dark:bg-zinc-800/80 text-zinc-850 dark:text-zinc-150 p-1.5 transition-colors ${className}`}
         >
           <IconRenderer className="w-full h-full object-contain" />
         </div>

@@ -37,7 +37,7 @@ export const Switch: React.FC<SwitchProps> = ({
         className="peer sr-only"
       />
       <span
-        className={`${trackSize} rounded-full bg-gray-200 p-0.5 transition-colors peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-500/40 peer-focus-visible:ring-offset-2 dark:bg-zinc-700 dark:peer-focus-visible:ring-offset-[#1a1b1e]`}
+        className={`${trackSize} rounded-full bg-zinc-200 p-0.5 transition-colors peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-500/40 peer-focus-visible:ring-offset-2 dark:bg-zinc-700 dark:peer-focus-visible:ring-offset-zinc-900`}
       >
         <span
           className={`block ${thumbSize} rounded-full border border-black/5 bg-white shadow-sm transition-transform ${
