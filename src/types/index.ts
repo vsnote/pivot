@@ -87,6 +87,14 @@ export interface GatewayStats {
   uptimeSecs: number;
 }
 
+export interface ThirdPartyConfig {
+  endpoint: string;
+  authToken?: string;
+  suggestedName: string;
+  protocol: string;
+  models: string[];
+}
+
 export interface InterceptorStatus {
   id: 'claude_code' | 'codex_cli' | 'gemini_cli';
   name: string;
@@ -96,6 +104,7 @@ export interface InterceptorStatus {
   backupPath?: string;
   originalEndpoint?: string;
   conflict?: string;
+  thirdParty?: ThirdPartyConfig;
 }
 
 export interface Preset {

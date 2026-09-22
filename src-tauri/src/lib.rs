@@ -88,6 +88,7 @@ pub fn run() {
             clear_logs,
             get_interceptor_status,
             toggle_interceptor,
+            import_third_party_provider,
             get_presets,
             preview_route,
             fetch_provider_models,

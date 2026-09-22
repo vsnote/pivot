@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
+import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import {
   Terminal,
   ShieldCheck,
@@ -11,6 +12,7 @@ import {
   Copy,
   Check,
   Sparkles,
+  ArrowRightLeft,
 } from 'lucide-react';
 
 const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
@@ -38,16 +40,44 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
 ];
 
 export const InterceptorPanel: React.FC = () => {
-  const { interceptors, toggleInterceptor, stats } = useAppStore();
+  const { interceptors, toggleInterceptor, importThirdPartyProvider, stats } = useAppStore();
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [conflictConfirmTarget, setConflictConfirmTarget] = useState<InterceptorStatus | null>(null);
 
   const displayList = interceptors.length > 0 ? interceptors : DEFAULT_INTERCEPTORS;
 
   const handleToggle = async (id: string, enable: boolean) => {
+    const target = displayList.find((item) => item.id === id);
+    if (enable && target && target.conflict) {
+      setConflictConfirmTarget(target);
+      return;
+    }
+
     setTogglingId(id);
     try {
       await toggleInterceptor(id, enable);
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
+  const handleImportAndToggle = async (target: InterceptorStatus) => {
+    if (togglingId) return;
+    setTogglingId(target.id);
+    try {
+      await importThirdPartyProvider(target.id);
+      setConflictConfirmTarget(null);
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
+  const handleJustToggle = async (target: InterceptorStatus) => {
+    setConflictConfirmTarget(null);
+    setTogglingId(target.id);
+    try {
+      await toggleInterceptor(target.id, true);
     } finally {
       setTogglingId(null);
     }
@@ -191,11 +221,26 @@ export const InterceptorPanel: React.FC = () => {
 
                 {/* 冲突警告 */}
                 {tool.conflict && (
-                  <div className="mb-2.5 p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 flex items-start gap-2">
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-                    <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
-                      {tool.conflict}
-                    </p>
+                  <div className="mb-2.5 p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                      <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400 flex-1">
+                        {tool.conflict}
+                      </p>
+                    </div>
+                    {tool.thirdParty && (
+                      <div className="flex items-center gap-2 pt-1 border-t border-amber-200/40 dark:border-amber-800/40">
+                        <button
+                          type="button"
+                          onClick={() => setConflictConfirmTarget(tool)}
+                          disabled={isToggling}
+                          className="text-[11px] font-medium text-amber-800 dark:text-amber-300 bg-amber-100/80 dark:bg-amber-900/50 hover:bg-amber-200/80 dark:hover:bg-amber-800/60 px-2 py-1 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                        >
+                          <ArrowRightLeft className="w-3 h-3" />
+                          协同接入为服务商
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -270,6 +315,16 @@ export const InterceptorPanel: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* 冲突处理弹窗 */}
+      <AgentConflictDialog
+        open={conflictConfirmTarget !== null}
+        target={conflictConfirmTarget}
+        busy={togglingId !== null}
+        onClose={() => setConflictConfirmTarget(null)}
+        onImportAndToggle={handleImportAndToggle}
+        onJustToggle={handleJustToggle}
+      />
     </div>
   );
 };

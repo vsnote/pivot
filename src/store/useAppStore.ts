@@ -52,6 +52,7 @@ interface AppStore {
   saveRoutes: (routes: RouteRule[]) => Promise<void>;
   previewRoute: (model: string) => Promise<RoutePlan>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
+  importThirdPartyProvider: (id: string) => Promise<void>;
   clearLogs: () => Promise<void>;
   initEventListeners: () => Promise<() => void>;
 }
@@ -263,6 +264,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set((state) => ({
         interceptors: state.interceptors.map((i) => (i.id === id ? status : i)),
       }));
+    } catch (err: unknown) {
+      set({ error: String(err) });
+      throw err;
+    }
+  },
+
+  importThirdPartyProvider: async (id: string) => {
+    try {
+      const [provider, status] = await invoke<[Provider, InterceptorStatus]>('import_third_party_provider', { id });
+      set((state) => {
+        const exists = state.providers.some((p) => p.id === provider.id);
+        const newProviders = exists
+          ? state.providers.map((p) => (p.id === provider.id ? provider : p))
+          : [provider, ...state.providers];
+        return {
+          providers: newProviders,
+          interceptors: state.interceptors.map((i) => (i.id === id ? status : i)),
+        };
+      });
     } catch (err: unknown) {
       set({ error: String(err) });
       throw err;

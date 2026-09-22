@@ -6,6 +6,16 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThirdPartyConfig {
+    pub endpoint: String,
+    pub auth_token: Option<String>,
+    pub suggested_name: String,
+    pub protocol: String,
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InterceptorInfo {
     pub id: String,
     pub name: String,
@@ -15,6 +25,7 @@ pub struct InterceptorInfo {
     pub backup_path: Option<String>,
     pub original_endpoint: Option<String>,
     pub conflict: Option<String>,
+    pub third_party: Option<ThirdPartyConfig>,
 }
 
 pub struct InterceptorManager {
@@ -56,114 +67,253 @@ impl InterceptorManager {
         ]
     }
 
-    /// Extracts the current custom endpoint from the tool's configuration if it points
-    /// to a third-party service (i.e. neither official upstream nor this OmniSwitch gateway).
-    fn detect_third_party_endpoint(&self, tool_id: &str) -> Option<String> {
+    /// Extract full third-party configuration (endpoint, auth token, suggested name, protocol, models)
+    pub fn get_third_party_config(&self, tool_id: &str) -> Option<ThirdPartyConfig> {
         match tool_id {
             "claude_code" => {
-                let config_path = Self::claude_config_path();
-                if config_path.exists() {
-                    if let Ok(content) = fs::read_to_string(&config_path) {
+                let mut ep_opt = None;
+                let mut token = None;
+
+                // 1. 优先检查 ~/.claude/settings.json (现代 Claude Code 全局配置)
+                let settings_path = Self::claude_settings_path();
+                if settings_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&settings_path) {
                         if !content.contains(&self.gateway_url) {
                             if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                                let ep = v
-                                    .get("anthropicBaseUrl")
-                                    .and_then(|u| u.as_str())
-                                    .or_else(|| {
-                                        v.get("env")
-                                            .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
-                                            .and_then(|u| u.as_str())
-                                    });
-                                if let Some(url) = ep {
-                                    let trimmed = url.trim().trim_end_matches('/');
-                                    if !trimmed.is_empty() && trimmed != "https://api.anthropic.com" {
-                                        return Some(url.to_string());
+                                if let Some(env_obj) = v.get("env").and_then(|e| e.as_object()) {
+                                    if let Some(url) = env_obj.get("ANTHROPIC_BASE_URL").and_then(|u| u.as_str()) {
+                                        ep_opt = Some(url.to_string());
+                                    }
+                                    token = env_obj
+                                        .get("ANTHROPIC_AUTH_TOKEN")
+                                        .or_else(|| env_obj.get("ANTHROPIC_API_KEY"))
+                                        .and_then(|t| t.as_str())
+                                        .map(|s| s.to_string());
+                                }
+                                if ep_opt.is_none() {
+                                    if let Some(url) = v.get("anthropicBaseUrl").and_then(|u| u.as_str()) {
+                                        ep_opt = Some(url.to_string());
                                     }
                                 }
                             }
                         }
                     }
                 }
+
+                // 2. 检查 ~/.claude.json
+                if ep_opt.is_none() {
+                    let config_path = Self::claude_config_path();
+                    if config_path.exists() {
+                        if let Ok(content) = fs::read_to_string(&config_path) {
+                            if !content.contains(&self.gateway_url) {
+                                if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                                    let url = v
+                                        .get("anthropicBaseUrl")
+                                        .and_then(|u| u.as_str())
+                                        .or_else(|| {
+                                            v.get("env")
+                                                .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
+                                                .and_then(|u| u.as_str())
+                                        });
+                                    if let Some(u) = url {
+                                        ep_opt = Some(u.to_string());
+                                    }
+                                    if token.is_none() {
+                                        token = v
+                                            .get("primaryApiKey")
+                                            .or_else(|| v.get("apiKey"))
+                                            .and_then(|t| t.as_str())
+                                            .map(|s| s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let raw_ep = ep_opt?;
+                let clean_ep = raw_ep.trim().trim_end_matches('/').to_string();
+                if clean_ep.is_empty() || clean_ep == "https://api.anthropic.com" {
+                    return None;
+                }
+
+                let name = if clean_ep.contains("8317") {
+                    "CC-Switch 本地通道 (8317)".to_string()
+                } else if clean_ep.contains("127.0.0.1") || clean_ep.contains("localhost") {
+                    let port = clean_ep.rsplit(':').next().unwrap_or("代理");
+                    format!("本地代理 ({})", port)
+                } else {
+                    let host = clean_ep
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("代理");
+                    format!("第三方服务 ({})", host)
+                };
+
+                let default_models = vec![
+                    "claude-3-5-sonnet-20241022".to_string(),
+                    "claude-3-7-sonnet-20250219".to_string(),
+                    "claude-3-opus-20240229".to_string(),
+                    "claude-3-5-haiku-20241022".to_string(),
+                ];
+
+                Some(ThirdPartyConfig {
+                    endpoint: clean_ep,
+                    auth_token: token,
+                    suggested_name: name,
+                    protocol: "anthropic".to_string(),
+                    models: default_models,
+                })
             }
             "codex_cli" => {
                 let config_path = Self::codex_config_path();
-                if config_path.exists() {
-                    if let Ok(content) = fs::read_to_string(&config_path) {
-                        if !content.contains(&self.gateway_url) {
-                            if let Ok(doc) = toml::from_str::<toml::Value>(&content) {
-                                let current_provider = doc
-                                    .get("model_provider")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("custom");
+                if !config_path.exists() {
+                    return None;
+                }
+                let content = fs::read_to_string(&config_path).ok()?;
+                if content.contains(&self.gateway_url) {
+                    return None;
+                }
+                let doc = toml::from_str::<toml::Value>(&content).ok()?;
+                let current_provider = doc
+                    .get("model_provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("custom");
 
-                                let ep = doc
-                                    .get("model_providers")
-                                    .and_then(|mp| mp.get(current_provider))
-                                    .and_then(|p| p.get("base_url"))
-                                    .and_then(|u| u.as_str())
-                                    .or_else(|| doc.get("base_url").and_then(|u| u.as_str()));
+                let mut token = None;
+                let ep = if let Some(p) = doc
+                    .get("model_providers")
+                    .and_then(|mp| mp.get(current_provider))
+                {
+                    token = p
+                        .get("experimental_bearer_token")
+                        .or_else(|| p.get("api_key"))
+                        .and_then(|k| k.as_str())
+                        .map(|s| s.to_string());
+                    p.get("base_url").and_then(|u| u.as_str())
+                } else {
+                    doc.get("base_url").and_then(|u| u.as_str())
+                }?;
 
-                                if let Some(url) = ep {
-                                    let trimmed = url.trim().trim_end_matches('/');
-                                    if !trimmed.is_empty()
-                                        && trimmed != "https://api.openai.com"
-                                        && trimmed != "https://api.openai.com/v1"
-                                    {
-                                        return Some(url.to_string());
-                                    }
-                                }
-                            }
-                        }
+                let clean_ep = ep.trim().trim_end_matches('/').to_string();
+                if clean_ep.is_empty()
+                    || clean_ep == "https://api.openai.com"
+                    || clean_ep == "https://api.openai.com/v1"
+                {
+                    return None;
+                }
+
+                let name = if clean_ep.contains("8317") {
+                    "CC-Switch Codex 通道 (8317)".to_string()
+                } else if clean_ep.contains("127.0.0.1") || clean_ep.contains("localhost") {
+                    let port = clean_ep.rsplit(':').next().unwrap_or("代理");
+                    format!("本地 Codex 代理 ({})", port)
+                } else {
+                    let host = clean_ep
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("代理");
+                    format!("Codex 渠道 ({})", host)
+                };
+
+                let mut models = vec![
+                    "gpt-4o".to_string(),
+                    "gpt-4o-mini".to_string(),
+                    "o1".to_string(),
+                    "o3-mini".to_string(),
+                ];
+                if let Some(m) = doc.get("model").and_then(|m| m.as_str()) {
+                    if !models.contains(&m.to_string()) {
+                        models.insert(0, m.to_string());
                     }
                 }
+
+                Some(ThirdPartyConfig {
+                    endpoint: clean_ep,
+                    auth_token: token,
+                    suggested_name: name,
+                    protocol: "openai".to_string(),
+                    models,
+                })
             }
             "gemini_cli" => {
+                let mut ep_opt = None;
+                let mut token = None;
+
                 let env_path = Self::gemini_env_path();
                 if env_path.exists() {
                     if let Ok(content) = fs::read_to_string(&env_path) {
                         if !content.contains(&self.gateway_url) {
                             for line in content.lines() {
                                 let trimmed = line.trim();
-                                let val = if let Some(stripped) = trimmed.strip_prefix("GOOGLE_GEMINI_BASE_URL=") {
-                                    Some(stripped)
+                                if let Some(stripped) = trimmed.strip_prefix("GOOGLE_GEMINI_BASE_URL=") {
+                                    ep_opt = Some(stripped.trim().trim_matches('"').trim_matches('\'').to_string());
                                 } else if let Some(stripped) = trimmed.strip_prefix("GEMINI_BASE_URL=") {
-                                    Some(stripped)
-                                } else {
-                                    None
-                                };
-                                if let Some(url) = val {
-                                    let clean_url = url
-                                        .trim()
-                                        .trim_matches('"')
-                                        .trim_matches('\'')
-                                        .trim_end_matches('/');
-                                    if !clean_url.is_empty() && !clean_url.contains("googleapis.com") {
-                                        return Some(clean_url.to_string());
+                                    if ep_opt.is_none() {
+                                        ep_opt = Some(stripped.trim().trim_matches('"').trim_matches('\'').to_string());
+                                    }
+                                } else if let Some(stripped) = trimmed.strip_prefix("GEMINI_API_KEY=") {
+                                    token = Some(stripped.trim().trim_matches('"').trim_matches('\'').to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if ep_opt.is_none() {
+                    let config_path = Self::gemini_config_path();
+                    if config_path.exists() {
+                        if let Ok(content) = fs::read_to_string(&config_path) {
+                            if !content.contains(&self.gateway_url) {
+                                if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                                    if let Some(url) = v.get("baseUrl").and_then(|u| u.as_str()) {
+                                        ep_opt = Some(url.to_string());
                                     }
                                 }
                             }
                         }
                     }
                 }
-                let config_path = Self::gemini_config_path();
-                if config_path.exists() {
-                    if let Ok(content) = fs::read_to_string(&config_path) {
-                        if !content.contains(&self.gateway_url) {
-                            if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                                if let Some(url) = v.get("baseUrl").and_then(|u| u.as_str()) {
-                                    let clean_url = url.trim().trim_end_matches('/');
-                                    if !clean_url.is_empty() && !clean_url.contains("googleapis.com") {
-                                        return Some(clean_url.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
+
+                let raw_ep = ep_opt?;
+                let clean_ep = raw_ep.trim().trim_end_matches('/').to_string();
+                if clean_ep.is_empty() || clean_ep.contains("googleapis.com") {
+                    return None;
                 }
+
+                let name = if clean_ep.contains("127.0.0.1") || clean_ep.contains("localhost") {
+                    let port = clean_ep.rsplit(':').next().unwrap_or("代理");
+                    format!("本地 Gemini 代理 ({})", port)
+                } else {
+                    let host = clean_ep
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("代理");
+                    format!("Gemini 渠道 ({})", host)
+                };
+
+                Some(ThirdPartyConfig {
+                    endpoint: clean_ep,
+                    auth_token: token,
+                    suggested_name: name,
+                    protocol: "gemini".to_string(),
+                    models: vec!["gemini-2.0-flash".to_string(), "gemini-2.5-pro".to_string()],
+                })
             }
-            _ => {}
+            _ => None,
         }
-        None
+    }
+
+    /// Extracts the current custom endpoint from the tool's configuration if it points
+    /// to a third-party service (i.e. neither official upstream nor this OmniSwitch gateway).
+    fn detect_third_party_endpoint(&self, tool_id: &str) -> Option<String> {
+        self.get_third_party_config(tool_id).map(|tp| tp.endpoint)
     }
 
     /// Generate user-facing conflict warning message if a third-party endpoint is detected.
@@ -176,6 +326,20 @@ impl InterceptorManager {
     }
 
     // ================= Claude Code =================
+
+    fn claude_settings_path() -> PathBuf {
+        Self::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+            .join("settings.json")
+    }
+
+    fn claude_settings_backup_path() -> PathBuf {
+        Self::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+            .join("settings.json.omniswitch.bak")
+    }
 
     fn claude_config_path() -> PathBuf {
         Self::home_dir()
@@ -190,9 +354,13 @@ impl InterceptorManager {
     }
 
     pub fn get_claude_code_status(&self) -> InterceptorInfo {
+        let settings_path = Self::claude_settings_path();
+        let settings_backup_path = Self::claude_settings_backup_path();
         let config_path = Self::claude_config_path();
         let backup_path = Self::claude_backup_path();
+
         let installed = Self::is_binary_installed("claude")
+            || settings_path.exists()
             || config_path.exists()
             || Self::home_dir()
                 .map(|h| h.join(".claude").exists())
@@ -207,95 +375,150 @@ impl InterceptorManager {
             original_endpoint = orig_ep;
         }
 
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(&config_path) {
+        let mut file_intercepted = false;
+        if settings_path.exists() {
+            if let Ok(content) = fs::read_to_string(&settings_path) {
                 if content.contains(&self.gateway_url) {
-                    is_intercepted = true;
+                    file_intercepted = true;
                 }
             }
         }
+        if !file_intercepted && config_path.exists() {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if content.contains(&self.gateway_url) {
+                    file_intercepted = true;
+                }
+            }
+        }
+
+        let is_intercepted = if settings_path.exists() || config_path.exists() {
+            file_intercepted
+        } else {
+            is_intercepted
+        };
+
+        let effective_config_path = if settings_path.exists() {
+            settings_path.to_string_lossy().to_string()
+        } else {
+            config_path.to_string_lossy().to_string()
+        };
+
+        let effective_backup_path = if settings_backup_path.exists() {
+            Some(settings_backup_path.to_string_lossy().to_string())
+        } else if backup_path.exists() {
+            Some(backup_path.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        let third_party = self.get_third_party_config("claude_code");
+        let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
 
         InterceptorInfo {
             id: "claude_code".to_string(),
             name: "Claude Code CLI".to_string(),
             installed,
-            config_path: config_path.to_string_lossy().to_string(),
+            config_path: effective_config_path,
             is_intercepted,
-            backup_path: if backup_path.exists() {
-                Some(backup_path.to_string_lossy().to_string())
-            } else {
-                None
-            },
-            original_endpoint: self.detect_third_party_endpoint("claude_code").or(original_endpoint),
+            backup_path: effective_backup_path,
+            original_endpoint,
             conflict: self.check_third_party_conflict("claude_code"),
+            third_party,
         }
     }
 
     pub fn toggle_claude_code(&self, enable: bool) -> Result<InterceptorInfo, String> {
+        let settings_path = Self::claude_settings_path();
+        let settings_backup_path = Self::claude_settings_backup_path();
         let config_path = Self::claude_config_path();
         let backup_path = Self::claude_backup_path();
 
         if enable {
-            let mut original_content = String::new();
-            let mut parsed: Value = json!({});
+            // 提取现有第三方端点作为记录
+            let orig_ep = self.detect_third_party_endpoint("claude_code");
+
+            // 1. 接管 ~/.claude/settings.json (现代 Claude Code 全局官方环境变量配置)
+            let mut orig_settings = String::new();
+            if settings_path.exists() {
+                orig_settings = fs::read_to_string(&settings_path).unwrap_or_default();
+            } else if let Some(p) = settings_path.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+
+            if !settings_backup_path.exists() && settings_path.exists() {
+                let _ = atomic_write(&settings_backup_path, &orig_settings);
+            }
+
+            let mut settings_val: Value =
+                serde_json::from_str(&orig_settings).unwrap_or_else(|_| json!({}));
+            if !settings_val.is_object() {
+                settings_val = json!({});
+            }
+            if !settings_val["env"].is_object() {
+                settings_val["env"] = json!({});
+            }
+            settings_val["env"]["ANTHROPIC_BASE_URL"] = json!(self.gateway_url);
+
+            if let Ok(new_settings) = serde_json::to_string_pretty(&settings_val) {
+                let _ = atomic_write(&settings_path, &new_settings);
+            }
+
+            // 2. 同步接管 ~/.claude.json (如果文件存在)
             if config_path.exists() {
-                original_content = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-                if let Ok(v) = serde_json::from_str::<Value>(&original_content) {
-                    parsed = v;
+                let orig_config = fs::read_to_string(&config_path).unwrap_or_default();
+                if !backup_path.exists() {
+                    let _ = atomic_write(&backup_path, &orig_config);
+                }
+                if let Ok(mut config_val) = serde_json::from_str::<Value>(&orig_config) {
+                    config_val["anthropicBaseUrl"] = json!(self.gateway_url);
+                    if !config_val["env"].is_object() {
+                        config_val["env"] = json!({});
+                    }
+                    config_val["env"]["ANTHROPIC_BASE_URL"] = json!(self.gateway_url);
+                    if let Ok(new_config) = serde_json::to_string_pretty(&config_val) {
+                        let _ = atomic_write(&config_path, &new_config);
+                    }
                 }
             }
-            let saved_state = self
-                .db
-                .get_interceptor_state("claude_code")
-                .ok()
-                .flatten();
-            let already_intercepted = backup_path.exists()
-                || saved_state.as_ref().map(|state| state.0).unwrap_or(false)
-                || original_content.contains(&self.gateway_url);
 
-            // Keep the first backup. Re-enabling must never replace the user's
-            // original configuration with an already-intercepted snapshot.
-            if !already_intercepted && config_path.exists() {
-                atomic_write(&backup_path, &original_content).map_err(|e| e.to_string())?;
-            }
-
-            // Save original endpoint if present
-            let orig_ep = parsed
-                .get("anthropicBaseUrl")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            // Set OmniSwitch gateway endpoint
-            parsed["anthropicBaseUrl"] = json!(self.gateway_url);
-            if !parsed["env"].is_object() {
-                parsed["env"] = json!({});
-            }
-            parsed["env"]["ANTHROPIC_BASE_URL"] = json!(self.gateway_url);
-
-            let new_content = serde_json::to_string_pretty(&parsed).map_err(|e| e.to_string())?;
-            atomic_write(&config_path, &new_content).map_err(|e| e.to_string())?;
-
-            if !already_intercepted {
-                let _ = self.db.save_interceptor_state(
-                    "claude_code",
-                    true,
-                    Some(&original_content),
-                    orig_ep.as_deref(),
-                );
-            }
+            let _ = self.db.save_interceptor_state(
+                "claude_code",
+                true,
+                Some(&orig_settings),
+                orig_ep.as_deref(),
+            );
         } else {
-            // Restore
+            // 恢复 ~/.claude/settings.json
+            if settings_backup_path.exists() {
+                if let Ok(orig) = fs::read_to_string(&settings_backup_path) {
+                    let _ = atomic_write(&settings_path, &orig);
+                }
+                let _ = fs::remove_file(&settings_backup_path);
+            } else if settings_path.exists() {
+                if let Ok(content) = fs::read_to_string(&settings_path) {
+                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.remove("anthropicBaseUrl");
+                            if let Some(env_obj) =
+                                obj.get_mut("env").and_then(|e| e.as_object_mut())
+                            {
+                                env_obj.remove("ANTHROPIC_BASE_URL");
+                            }
+                        }
+                        if let Ok(updated) = serde_json::to_string_pretty(&v) {
+                            let _ = atomic_write(&settings_path, &updated);
+                        }
+                    }
+                }
+            }
+
+            // 恢复 ~/.claude.json
             if backup_path.exists() {
                 if let Ok(orig) = fs::read_to_string(&backup_path) {
                     let _ = atomic_write(&config_path, &orig);
                 }
                 let _ = fs::remove_file(&backup_path);
-            } else if let Ok(Some((_, Some(backup_content), _))) =
-                self.db.get_interceptor_state("claude_code")
-            {
-                let _ = atomic_write(&config_path, &backup_content);
             } else if config_path.exists() {
-                // Remove custom baseUrl keys
                 if let Ok(content) = fs::read_to_string(&config_path) {
                     if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
                         if let Some(obj) = v.as_object_mut() {
@@ -306,8 +529,9 @@ impl InterceptorManager {
                                 env_obj.remove("ANTHROPIC_BASE_URL");
                             }
                         }
-                        let updated = serde_json::to_string_pretty(&v).unwrap_or_default();
-                        let _ = atomic_write(&config_path, &updated);
+                        if let Ok(updated) = serde_json::to_string_pretty(&v) {
+                            let _ = atomic_write(&config_path, &updated);
+                        }
                     }
                 }
             }
@@ -353,13 +577,24 @@ impl InterceptorManager {
             original_endpoint = orig_ep;
         }
 
+        let mut file_intercepted = false;
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
-                if content.contains(&self.gateway_url) {
-                    is_intercepted = true;
+                let target_endpoint = format!("{}/v1", self.gateway_url);
+                if content.contains(&self.gateway_url) || content.contains(&target_endpoint) {
+                    file_intercepted = true;
                 }
             }
         }
+
+        let is_intercepted = if config_path.exists() {
+            file_intercepted
+        } else {
+            is_intercepted
+        };
+
+        let third_party = self.get_third_party_config("codex_cli");
+        let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
 
         InterceptorInfo {
             id: "codex_cli".to_string(),
@@ -372,8 +607,9 @@ impl InterceptorManager {
             } else {
                 None
             },
-            original_endpoint: self.detect_third_party_endpoint("codex_cli").or(original_endpoint),
+            original_endpoint,
             conflict: self.check_third_party_conflict("codex_cli"),
+            third_party,
         }
     }
 
@@ -486,20 +722,30 @@ impl InterceptorManager {
             original_endpoint = orig_ep;
         }
 
+        let mut file_intercepted = false;
         if env_path.exists() {
             if let Ok(content) = fs::read_to_string(&env_path) {
                 if content.contains(&self.gateway_url) {
-                    is_intercepted = true;
+                    file_intercepted = true;
                 }
             }
         }
-        if config_path.exists() {
+        if !file_intercepted && config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
                 if content.contains(&self.gateway_url) {
-                    is_intercepted = true;
+                    file_intercepted = true;
                 }
             }
         }
+
+        let is_intercepted = if env_path.exists() || config_path.exists() {
+            file_intercepted
+        } else {
+            is_intercepted
+        };
+
+        let third_party = self.get_third_party_config("gemini_cli");
+        let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
 
         InterceptorInfo {
             id: "gemini_cli".to_string(),
@@ -516,8 +762,9 @@ impl InterceptorManager {
             } else {
                 None
             },
-            original_endpoint: self.detect_third_party_endpoint("gemini_cli").or(original_endpoint),
+            original_endpoint,
             conflict: self.check_third_party_conflict("gemini_cli"),
+            third_party,
         }
     }
 
@@ -709,10 +956,14 @@ fn atomic_write<P: AsRef<Path>>(path: P, content: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn repeated_enable_preserves_original_cli_configuration() {
+        let _lock = HOME_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "omniswitch-interceptor-{}",
             SystemTime::now()
@@ -809,6 +1060,7 @@ followUpQueueMode = "queue"
 
     #[test]
     fn test_detect_third_party_endpoint_and_conflict() {
+        let _lock = HOME_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "omniswitch-conflict-test-{}",
             SystemTime::now()
@@ -850,6 +1102,27 @@ followUpQueueMode = "queue"
                 .unwrap()
                 .contains("https://my-proxy.example.com"));
 
+            // 验证现代 ~/.claude/settings.json 中的第三方端点优先检出
+            let claude_dir = home.join(".claude");
+            fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
+            fs::write(
+                claude_dir.join("settings.json"),
+                r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8317"}}"#,
+            )
+            .map_err(|e| e.to_string())?;
+            assert_eq!(
+                manager.detect_third_party_endpoint("claude_code"),
+                Some("http://127.0.0.1:8317".to_string())
+            );
+            assert!(manager
+                .check_third_party_conflict("claude_code")
+                .unwrap()
+                .contains("http://127.0.0.1:8317"));
+            let claude_tp = manager.get_third_party_config("claude_code").unwrap();
+            assert_eq!(claude_tp.endpoint, "http://127.0.0.1:8317");
+            assert!(claude_tp.suggested_name.contains("CC-Switch"));
+            assert_eq!(claude_tp.protocol, "anthropic");
+
             // 2. Codex
             let codex_dir = home.join(".codex");
             fs::create_dir_all(&codex_dir).map_err(|e| e.to_string())?;
@@ -874,6 +1147,9 @@ followUpQueueMode = "queue"
                 .check_third_party_conflict("codex_cli")
                 .unwrap()
                 .contains("https://sub2api.vonote.com"));
+            let codex_tp = manager.get_third_party_config("codex_cli").unwrap();
+            assert_eq!(codex_tp.endpoint, "https://sub2api.vonote.com");
+            assert_eq!(codex_tp.protocol, "openai");
 
             // 3. Gemini CLI
             let gemini_dir = home.join(".gemini");
@@ -891,6 +1167,9 @@ followUpQueueMode = "queue"
                 .check_third_party_conflict("gemini_cli")
                 .unwrap()
                 .contains("https://gemini-proxy.com"));
+            let gemini_tp = manager.get_third_party_config("gemini_cli").unwrap();
+            assert_eq!(gemini_tp.endpoint, "https://gemini-proxy.com");
+            assert_eq!(gemini_tp.protocol, "gemini");
 
             Ok(())
         })();

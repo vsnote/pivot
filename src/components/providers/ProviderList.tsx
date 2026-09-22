@@ -4,6 +4,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import {
   Plus,
   Trash2,
@@ -222,10 +223,11 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
 ];
 
 function GatewayQuickBar() {
-  const { interceptors, toggleInterceptor } = useAppStore(
+  const { interceptors, toggleInterceptor, importThirdPartyProvider } = useAppStore(
     useShallow((state) => ({
       interceptors: state.interceptors,
       toggleInterceptor: state.toggleInterceptor,
+      importThirdPartyProvider: state.importThirdPartyProvider,
     })),
   );
 
@@ -259,6 +261,24 @@ function GatewayQuickBar() {
     }
 
     await doToggle(client.id, !client.isIntercepted);
+  };
+
+  const handleImportAndToggle = async (target: InterceptorStatus) => {
+    if (togglingId) return;
+    setTogglingId(target.id);
+    try {
+      await importThirdPartyProvider(target.id);
+      setConflictConfirmTarget(null);
+    } catch {
+      // 全局处理
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
+  const handleJustToggle = async (target: InterceptorStatus) => {
+    setConflictConfirmTarget(null);
+    await doToggle(target.id, true);
   };
 
   // 收集当前已开启接管、且仍存在配置冲突的客户端
@@ -342,33 +362,34 @@ function GatewayQuickBar() {
       {activeConflicts.map((c) => (
         <div
           key={c.id}
-          className="flex items-start gap-2 p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 animate-in fade-in"
+          className="flex items-start justify-between gap-2 p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 animate-in fade-in"
         >
-          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-          <div className="leading-relaxed">
-            <span className="font-semibold">{c.name}：</span>
-            {c.conflict}
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+            <div className="leading-relaxed">
+              <span className="font-semibold">{c.name}：</span>
+              {c.conflict}
+            </div>
           </div>
+          <button
+            type="button"
+            disabled={togglingId !== null}
+            onClick={() => handleToggleClient(c, { stopPropagation: () => {} } as React.MouseEvent)}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 transition-colors shrink-0 cursor-pointer"
+          >
+            一键重新接管
+          </button>
         </div>
       ))}
 
-      {/* 开启前的冲突拦截确认弹窗 */}
-      <ConfirmDialog
+      {/* 开启前的冲突拦截确认与级联导入弹窗 */}
+      <AgentConflictDialog
         open={conflictConfirmTarget !== null}
-        title={`开启 ${conflictConfirmTarget?.name} 代理提示`}
-        details={[
-          conflictConfirmTarget?.conflict || '检测到配置冲突，开启可能影响现有配置。',
-        ]}
-        confirmLabel="仍然开启"
-        variant="warning"
+        target={conflictConfirmTarget}
         busy={togglingId !== null}
-        onConfirm={async () => {
-          if (!conflictConfirmTarget) return;
-          const target = conflictConfirmTarget;
-          setConflictConfirmTarget(null);
-          await doToggle(target.id, true);
-        }}
-        onCancel={() => setConflictConfirmTarget(null)}
+        onClose={() => setConflictConfirmTarget(null)}
+        onImportAndToggle={handleImportAndToggle}
+        onJustToggle={handleJustToggle}
       />
     </div>
   );

@@ -144,6 +144,60 @@ pub async fn toggle_interceptor(
     mgr.toggle_tool(&id, enable)
 }
 
+#[tauri::command]
+pub async fn import_third_party_provider(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(Provider, InterceptorInfo), String> {
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    let third_party = mgr
+        .get_third_party_config(&id)
+        .ok_or_else(|| format!("未检测到 {} 的有效第三方配置", id))?;
+
+    let existing_providers = state.db.get_providers().map_err(|e| e.to_string())?;
+    let found = existing_providers
+        .iter()
+        .find(|p| p.base_url.trim_end_matches('/') == third_party.endpoint.trim_end_matches('/'));
+
+    let provider = match found {
+        Some(existing) => {
+            let mut updated = existing.clone();
+            updated.enabled = true;
+            state.db.save_provider(&updated).map_err(|e| e.to_string())?;
+            updated
+        }
+        None => {
+            let new_provider = Provider {
+                id: format!("tp_{}_{}", id, &uuid::Uuid::new_v4().to_string()[..8]),
+                name: third_party.suggested_name,
+                protocol: third_party.protocol,
+                base_url: third_party.endpoint,
+                preset_id: None,
+                api_keys: third_party
+                    .auth_token
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|k| vec![k])
+                    .unwrap_or_else(|| vec!["default".to_string()]),
+                models: third_party.models,
+                default_model: None,
+                is_default: existing_providers.is_empty(),
+                enabled: true,
+                priority: 10,
+                weight: 1,
+                timeout_secs: 60,
+                latency_ms: None,
+                created_at: None,
+                updated_at: None,
+            };
+            state.db.save_provider(&new_provider).map_err(|e| e.to_string())?;
+            new_provider
+        }
+    };
+
+    let info = mgr.toggle_tool(&id, true)?;
+    Ok((provider, info))
+}
+
 /// Explain what the gateway would do with a model name, using the very same
 /// resolver the proxy runs, so the advanced page cannot drift from reality.
 #[tauri::command]
