@@ -5,6 +5,7 @@ pub mod gateway;
 pub mod interceptor;
 pub mod macos_tab;
 pub mod state;
+pub mod sync;
 pub mod tray;
 
 use commands::*;
@@ -94,6 +95,13 @@ pub fn run() {
             fetch_provider_models,
             sync_native_tab,
             set_native_toolbar_enabled,
+            get_sync_config,
+            save_sync_config,
+            test_sync_connection,
+            get_sync_sessions,
+            upload_sync_session,
+            restore_sync_session,
+            sync_all_sessions,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

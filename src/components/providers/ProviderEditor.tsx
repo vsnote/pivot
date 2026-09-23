@@ -38,7 +38,7 @@ const protocols: Record<Protocol, string> = {
 };
 
 export function ProviderEditor() {
-  const { editingProvider, presets, closeProviderEditor, saveProvider } = useAppStore();
+  const { editingProvider, presets, closeProviderEditor, saveProvider, activeTab } = useAppStore();
   const [initial] = useState(() => createProviderDraft(editingProvider, presets));
   const [draft, setDraft] = useState(initial);
   const [choosing, setChoosing] = useState(!editingProvider);
@@ -129,7 +129,13 @@ export function ProviderEditor() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || event.target instanceof HTMLSelectElement) return;
+      if (
+        activeTab !== 'providers' ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        event.target instanceof HTMLSelectElement
+      )
+        return;
       event.preventDefault();
       if (confirmation) setConfirmation(null);
       else handleBack();
@@ -278,7 +284,7 @@ export function ProviderEditor() {
       <div className="flex items-center justify-between pb-1">
         <div className="flex items-center gap-2">
           {confirmation ? (
-            <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
+            <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
               <span className="text-xs font-medium text-rose-700 dark:text-rose-300">
                 {confirmation.kind === 'preset'
                   ? '放弃已填内容并重选预设？'
@@ -287,14 +293,14 @@ export function ProviderEditor() {
               <button
                 type="button"
                 onClick={handleConfirmAbandon}
-                className="px-2.5 py-1 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
+                className="px-2.5 py-1 rounded-md text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
               >
                 确认放弃
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmation(null)}
-                className="px-2.5 py-1 rounded-lg text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-white dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                className="px-2.5 py-1 rounded-md text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-white dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 继续编辑
               </button>
@@ -317,7 +323,7 @@ export function ProviderEditor() {
               type="submit"
               form="provider-drawer-form"
               disabled={saving || fetching || draft.models.length === 0}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 shadow-2xs transition-all active:scale-[0.98] cursor-pointer"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 dark:bg-cyan-600 dark:hover:bg-cyan-500 disabled:opacity-50 shadow-2xs transition-all active:scale-[0.98] cursor-pointer"
             >
               {saving ? (
                 <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
@@ -343,7 +349,7 @@ export function ProviderEditor() {
         ref={drawerRef}
         role="region"
         aria-label={editingProvider ? '编辑服务商' : '添加服务商'}
-        className="p-6 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-6"
+        className="p-6 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-6"
       >
         {/* 表单内容 */}
         <div ref={contentRef} className="space-y-6">
@@ -358,7 +364,7 @@ export function ProviderEditor() {
                   placeholder="搜索服务商预设，如 Anthropic, OpenAI, DeepSeek..."
                   value={presetSearch}
                   onChange={(e) => setPresetSearch(e.target.value)}
-                  className="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  className="w-full pl-9 pr-3.5 py-2 text-xs rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
                 />
               </div>
 
@@ -367,12 +373,12 @@ export function ProviderEditor() {
                 <button
                   type="button"
                   onClick={() => choosePreset()}
-                  className="flex items-center gap-2.5 p-3 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-indigo-500 dark:hover:border-indigo-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
+                  className="flex items-center gap-2.5 p-3 rounded-md border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-cyan-500 dark:hover:border-cyan-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
                 >
-                  <div className="w-7 h-7 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200/60 dark:border-indigo-800/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                  <div className="w-7 h-7 rounded-md bg-cyan-50 dark:bg-cyan-950/50 border border-cyan-200/60 dark:border-cyan-800/60 text-cyan-600 dark:text-cyan-400 flex items-center justify-center shrink-0">
                     <Plus className="w-4 h-4" />
                   </div>
-                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
+                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate">
                     自定义服务商
                   </span>
                 </button>
@@ -384,7 +390,7 @@ export function ProviderEditor() {
                       key={p.id}
                       type="button"
                       onClick={() => choosePreset(p)}
-                      className="flex items-center gap-2.5 p-3 rounded-xl border border-zinc-200/80 dark:border-zinc-800 hover:border-indigo-500/80 dark:hover:border-indigo-500/80 bg-white dark:bg-zinc-900/90 hover:bg-indigo-50/20 dark:hover:bg-indigo-950/20 text-left shadow-2xs hover:shadow-xs transition-all duration-150 group cursor-pointer"
+                      className="flex items-center gap-2.5 p-3 rounded-md border border-zinc-200/80 dark:border-zinc-800 hover:border-cyan-500/80 dark:hover:border-cyan-500/80 bg-white dark:bg-zinc-900/90 hover:bg-cyan-50/20 dark:hover:bg-cyan-950/20 text-left shadow-2xs hover:shadow-xs transition-all duration-150 group cursor-pointer"
                     >
                       <ProviderAvatar
                         name={cleanName}
@@ -392,7 +398,7 @@ export function ProviderEditor() {
                         iconKey={p.icon || p.id}
                         sizeClass="w-7 h-7"
                       />
-                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
+                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate">
                         {cleanName}
                       </span>
                     </button>
@@ -419,7 +425,7 @@ export function ProviderEditor() {
                     value={draft.name}
                     onChange={(e) => update({ name: e.target.value })}
                     placeholder="例如 Anthropic Claude、DeepSeek 官方"
-                    className="w-full px-3 py-2 text-xs rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    className="w-full px-3 py-2 text-xs rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
                   />
                   {errors.name && <p className="text-[11px] text-rose-500 mt-1">{errors.name}</p>}
                 </div>
@@ -431,7 +437,7 @@ export function ProviderEditor() {
                       协议格式
                     </label>
                     {preset ? (
-                      <div className="px-3 py-2 text-xs font-mono rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-850/50 text-zinc-700 dark:text-zinc-300">
+                      <div className="px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-850/50 text-zinc-700 dark:text-zinc-300">
                         {protocols[draft.protocol]}
                       </div>
                     ) : (
@@ -467,7 +473,7 @@ export function ProviderEditor() {
                       onChange={(e) => changeUrl(e.target.value)}
                       disabled={!urlEditable}
                       placeholder="https://api.example.com/v1"
-                      className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                      className="w-full px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
                     />
                     {errors.baseUrl && (
                       <p className="text-[11px] text-rose-500 mt-1">{errors.baseUrl}</p>
@@ -485,7 +491,7 @@ export function ProviderEditor() {
                       <button
                         type="button"
                         onClick={() => setShowAuthHelp(!showAuthHelp)}
-                        className="text-[11px] text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center gap-0.5 cursor-pointer"
+                        className="text-[11px] text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 flex items-center gap-0.5 cursor-pointer"
                       >
                         <HelpCircle className="w-3 h-3" />
                         <span>密钥说明</span>
@@ -493,7 +499,7 @@ export function ProviderEditor() {
                       <button
                         type="button"
                         onClick={() => update({ apiKeys: [...keyInputs, ''] })}
-                        className="text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                        className="text-[11px] text-cyan-600 dark:text-cyan-400 hover:underline cursor-pointer"
                       >
                         + 多密钥轮询
                       </button>
@@ -520,7 +526,7 @@ export function ProviderEditor() {
                               update({ apiKeys: keys });
                             }}
                             placeholder={index ? '添加备用密钥' : 'sk-ant-... / sk-...（可留空）'}
-                            className="w-full pl-3 pr-9 py-2 text-xs font-mono rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                            className="w-full pl-3 pr-9 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
                           />
                           <button
                             type="button"
@@ -566,7 +572,7 @@ export function ProviderEditor() {
                     type="button"
                     onClick={fetchModels}
                     disabled={fetching}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors disabled:opacity-50 cursor-pointer"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-600 dark:text-cyan-400 bg-cyan-50 dark:bg-cyan-950/50 hover:bg-cyan-100 dark:hover:bg-cyan-900/40 transition-colors disabled:opacity-50 cursor-pointer"
                   >
                     {fetching ? (
                       <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
@@ -578,7 +584,7 @@ export function ProviderEditor() {
                 </div>
 
                 {fetchError && (
-                  <div className="px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+                  <div className="px-3 py-2 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
                     <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-500" />
                     <span className="truncate">{fetchError}</span>
                   </div>
@@ -586,7 +592,7 @@ export function ProviderEditor() {
 
                 {/* 已选模型 Chips */}
                 {draft.models.length > 0 && (
-                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/80 dark:border-zinc-800/80">
+                  <div className="p-3 rounded-md bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/80 dark:border-zinc-800/80">
                     <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
                       {draft.models.map((model) => (
                         <span
@@ -619,7 +625,7 @@ export function ProviderEditor() {
                           placeholder="在获取到的模型中快速筛选…"
                           value={modelSearch}
                           onChange={(e) => setModelSearch(e.target.value)}
-                          className="w-full pl-8 pr-3 py-1.5 text-xs font-mono rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          className="w-full pl-8 pr-3 py-1.5 text-xs font-mono rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-1 focus:ring-cyan-500"
                         />
                       </div>
                       {candidates.length > 0 && (
@@ -633,7 +639,7 @@ export function ProviderEditor() {
                       )}
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto p-1.5 rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-950/50">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto p-1.5 rounded-md border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-950/50">
                       {candidates.map((model) => {
                         const isSelected = draft.models.includes(model);
                         return (
@@ -643,7 +649,7 @@ export function ProviderEditor() {
                             onClick={() => toggleModel(model)}
                             className={`flex items-center justify-between p-2 rounded-lg text-left text-xs font-mono transition-colors cursor-pointer ${
                               isSelected
-                                ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60'
+                                ? 'bg-cyan-50 dark:bg-cyan-950/60 text-cyan-700 dark:text-cyan-300 border border-cyan-200/60 dark:border-cyan-800/60'
                                 : 'hover:bg-white dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
                             }`}
                           >
@@ -674,20 +680,20 @@ export function ProviderEditor() {
                       }
                     }}
                     placeholder="手动输入模型 ID，如 claude-3-7-sonnet-20250219"
-                    className="flex-1 px-3 py-2 text-xs font-mono rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    className="flex-1 px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
                   />
                   <button
                     type="button"
                     onClick={addManualModel}
                     disabled={!manualModel.trim()}
-                    className="px-3 py-2 rounded-xl text-xs font-medium text-zinc-700 dark:text-zinc-200 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
+                    className="px-3 py-2 rounded-md text-xs font-medium text-zinc-700 dark:text-zinc-200 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
                   >
                     添加模型
                   </button>
                 </div>
                 {errors.models && <p className="text-[11px] text-rose-500 mt-1">{errors.models}</p>}
                 {errors.save && (
-                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300">
+                  <div className="p-3 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300">
                     保存失败：{errors.save}
                   </div>
                 )}

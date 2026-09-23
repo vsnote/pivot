@@ -3,6 +3,8 @@ use crate::gateway::router as gateway_router;
 use crate::db::{Provider, RequestLog, RouteRule};
 use crate::interceptor::{InterceptorInfo, InterceptorManager};
 use crate::state::AppState;
+use crate::sync::types::{SyncConfig, SyncSessionItem, TestConnectionResult};
+use crate::sync::SyncManager;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -234,3 +236,67 @@ pub async fn fetch_provider_models(protocol: String, base_url: String, api_key: 
 pub async fn set_provider_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
     state.db.set_provider_enabled(&id, enabled).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn get_sync_config(state: State<'_, AppState>) -> Result<SyncConfig, String> {
+    state.db.get_sync_config().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_sync_config(state: State<'_, AppState>, config: SyncConfig) -> Result<(), String> {
+    state.db.save_sync_config(&config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn test_sync_connection(state: State<'_, AppState>) -> Result<TestConnectionResult, String> {
+    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
+    let mgr = SyncManager::new(config);
+    mgr.test_connection().await
+}
+
+#[tauri::command]
+pub async fn get_sync_sessions(
+    state: State<'_, AppState>,
+    agent_type: String,
+) -> Result<Vec<SyncSessionItem>, String> {
+    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
+    let mgr = SyncManager::new(config);
+    mgr.get_sessions(&agent_type).await
+}
+
+#[tauri::command]
+pub async fn upload_sync_session(
+    state: State<'_, AppState>,
+    agent_type: String,
+    session_id: String,
+) -> Result<(), String> {
+    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
+    let mgr = SyncManager::new(config);
+    mgr.upload_session(&agent_type, &session_id).await
+}
+
+#[tauri::command]
+pub async fn restore_sync_session(
+    state: State<'_, AppState>,
+    agent_type: String,
+    session_id: String,
+) -> Result<(), String> {
+    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
+    let mgr = SyncManager::new(config);
+    mgr.restore_session(&agent_type, &session_id).await
+}
+
+#[tauri::command]
+pub async fn sync_all_sessions(
+    state: State<'_, AppState>,
+    agent_type: String,
+) -> Result<Value, String> {
+    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
+    let mgr = SyncManager::new(config);
+    let (uploaded, restored) = mgr.sync_all(&agent_type).await?;
+    Ok(json!({
+        "uploaded": uploaded,
+        "restored": restored,
+    }))
+}
+

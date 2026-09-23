@@ -3,6 +3,8 @@
 @theme {
   --color-zinc-850: #202023;
   --color-zinc-150: #ebebef;
+  --color-relay-cyan: #06b6d4;
+  --color-cobalt-anchor: #0284c7;
 }
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -15,8 +17,8 @@
     --border-subtle: #e2e8f0;
     --text-main: #0f172a;
     --text-muted: #64748b;
-    --accent: #4f46e5;
-    --accent-hover: #4338ca;
+    --accent: #0284c7;
+    --accent-hover: #0369a1;
   }
 
   html.dark, :root.dark {
@@ -26,8 +28,8 @@
     --border-subtle: #27272a;
     --text-main: #fafafa;
     --text-muted: #a1a1aa;
-    --accent: #6366f1;
-    --accent-hover: #4f46e5;
+    --accent: #06b6d4;
+    --accent-hover: #0891b2;
   }
 }
 
@@ -94,4 +96,17 @@ body {
 
 .animate-fade-in {
   animation: fadeIn 150ms ease-out forwards;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s infinite cubic-bezier(0.4, 0, 0.2, 1);
 }

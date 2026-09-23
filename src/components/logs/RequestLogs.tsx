@@ -119,7 +119,7 @@ export const RequestLogs: React.FC = () => {
           <div className="flex items-center gap-2">
             <button
               onClick={() => copyCurl(activeLog)}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 shadow-2xs transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 dark:bg-cyan-600 dark:hover:bg-cyan-500 shadow-2xs transition-colors cursor-pointer"
             >
               {copiedCurl ? <Check className="w-3.5 h-3.5" /> : <Terminal className="w-3.5 h-3.5" />}
               <span>{copiedCurl ? '已复制 cURL' : '复制为 cURL'}</span>
@@ -128,7 +128,7 @@ export const RequestLogs: React.FC = () => {
         </div>
 
         {/* 详情主卡片 */}
-        <div className="p-6 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-6">
+        <div className="p-6 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-6">
           {/* 请求概览头 */}
           <div className="flex items-center justify-between pb-4 border-b border-zinc-100 dark:border-zinc-800">
             <div className="flex items-center gap-3">
@@ -148,13 +148,13 @@ export const RequestLogs: React.FC = () => {
 
           {/* 核心指标栅格 */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
+            <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
               <span className="text-[11px] text-zinc-400 block mb-0.5">耗时</span>
               <span className="text-base font-mono font-bold text-zinc-900 dark:text-zinc-100">
                 {activeLog.latencyMs} ms
               </span>
             </div>
-            <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
+            <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
               <span className="text-[11px] text-zinc-400 block mb-0.5">Token 总用量</span>
               <span className="text-base font-mono font-bold text-zinc-900 dark:text-zinc-100">
                 {(activeLog.promptTokens || 0) + (activeLog.completionTokens || 0)}
@@ -163,7 +163,7 @@ export const RequestLogs: React.FC = () => {
                 ({activeLog.promptTokens || 0} 输入 / {activeLog.completionTokens || 0} 输出)
               </span>
             </div>
-            <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
+            <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
               <span className="text-[11px] text-zinc-400 block mb-0.5">客户端</span>
               <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
                 {formatClientType(activeLog.clientType)}
@@ -176,7 +176,7 @@ export const RequestLogs: React.FC = () => {
             <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
               请求路由决策
             </h4>
-            <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 space-y-2.5 text-xs font-mono">
+            <div className="p-4 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 space-y-2.5 text-xs font-mono">
               <div className="flex justify-between">
                 <span className="text-zinc-400">请求模型 (Incoming Model)</span>
                 <span className="font-semibold text-zinc-900 dark:text-zinc-100">
@@ -185,7 +185,7 @@ export const RequestLogs: React.FC = () => {
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-400">最终服务商 (Routed Provider)</span>
-                <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                <span className="font-semibold text-sky-600 dark:text-cyan-400">
                   {activeLog.routedProviderName || activeLog.routedProviderId}
                 </span>
               </div>
@@ -202,14 +202,14 @@ export const RequestLogs: React.FC = () => {
           {activeLog.attempts && activeLog.attempts.length > 0 && (
             <div className="space-y-2">
               <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider flex items-center gap-1.5">
-                <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                <Layers className="w-3.5 h-3.5 text-sky-600 dark:text-cyan-400" />
                 <span>上游服务商尝试链路 ({activeLog.attempts.length})</span>
               </h4>
               <div className="space-y-2">
                 {activeLog.attempts.map((att, index) => (
                   <div
                     key={index}
-                    className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/60 dark:border-zinc-800 text-xs font-mono space-y-1.5"
+                    className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/60 dark:border-zinc-800 text-xs font-mono space-y-1.5"
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-zinc-900 dark:text-zinc-100">
@@ -247,7 +247,7 @@ export const RequestLogs: React.FC = () => {
                   <span>复制错误信息</span>
                 </button>
               </div>
-              <div className="p-3.5 rounded-xl bg-rose-50/50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/50 text-rose-700 dark:text-rose-300 font-mono text-[11px] leading-relaxed break-all max-h-60 overflow-y-auto">
+              <div className="p-3.5 rounded-md bg-rose-50/50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/50 text-rose-700 dark:text-rose-300 font-mono text-[11px] leading-relaxed break-all max-h-60 overflow-y-auto">
                 {activeLog.errorMessage}
               </div>
             </div>
@@ -274,154 +274,149 @@ export const RequestLogs: React.FC = () => {
         </button>
       </div>
 
-      {/* 统计指标卡片矩阵（原监控页面核心卡片移至此处） */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      {/* 紧凑一体化指标条（直线直角 + 零间距 + 精细分割） */}
+      <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-zinc-100 dark:divide-zinc-800/80 overflow-hidden">
         {/* 请求总数 */}
-        <div className="p-4 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs">
-          <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-            <span>请求总数</span>
-            <Activity className="w-4 h-4 text-indigo-500" />
-          </div>
-          <div className="mt-2 flex items-baseline">
-            <span className="text-2xl font-bold font-mono text-zinc-950 dark:text-white">
+        <div className="px-4 py-2.5 flex items-center justify-between">
+          <div className="min-w-0">
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">请求总数</span>
+            <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
               {stats.totalRequests}
-            </span>
+            </div>
           </div>
+          <Activity className="w-4 h-4 text-cyan-500 shrink-0" />
         </div>
 
         {/* Token 用量 */}
-        <div className="p-4 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs">
-          <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-            <span>Token 用量</span>
-            <Sparkles className="w-4 h-4 text-violet-500" />
-          </div>
-          <div className="mt-2 flex items-baseline">
-            <span className="text-2xl font-bold font-mono text-zinc-950 dark:text-white">
+        <div className="px-4 py-2.5 flex items-center justify-between">
+          <div className="min-w-0">
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Token 用量</span>
+            <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
               {formatTokens(totalTokens)}
-            </span>
+            </div>
           </div>
+          <Sparkles className="w-4 h-4 text-sky-500 shrink-0" />
         </div>
 
         {/* 进行中并发 */}
-        <div className="p-4 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs">
-          <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-            <span>进行中并发</span>
-            <Zap className="w-4 h-4 text-amber-500" />
-          </div>
-          <div className="mt-2 flex items-baseline">
-            <span className="text-2xl font-bold font-mono text-zinc-950 dark:text-white">
+        <div className="px-4 py-2.5 flex items-center justify-between">
+          <div className="min-w-0">
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">进行中并发</span>
+            <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
               {stats.activeRequests}
-            </span>
+            </div>
           </div>
+          <Zap className="w-4 h-4 text-amber-500 shrink-0" />
         </div>
 
         {/* 异常与失败 */}
-        <div className="p-4 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs">
-          <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-            <span>异常与失败</span>
-            <AlertTriangle className="w-4 h-4 text-rose-500" />
-          </div>
-          <div className="mt-2 flex items-baseline">
-            <span className="text-2xl font-bold font-mono text-zinc-950 dark:text-white">
+        <div className="px-4 py-2.5 flex items-center justify-between">
+          <div className="min-w-0">
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">异常与失败</span>
+            <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
               {stats.errorCount}
-            </span>
+            </div>
           </div>
+          <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
         </div>
       </div>
 
-      {/* 筛选与清空工具栏 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-        <div className="flex items-center gap-2">
-          <Select
-            value={selectedClient}
-            onChange={(e) => setSelectedClient(e.target.value)}
-          >
-            <option value="all">全部客户端</option>
-            <option value="claude_code">Claude Code</option>
-            <option value="codex_cli">Codex CLI</option>
-            <option value="gemini_cli">Gemini CLI</option>
-            <option value="openai_api">OpenAI API 直连</option>
-            <option value="anthropic_api">Anthropic API 直连</option>
-            <option value="generic">通用客户端</option>
-          </Select>
+      {/* 日志一体化控制面板 */}
+      <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs overflow-hidden">
+        {/* 顶部筛选与清空工具栏 */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 bg-zinc-50/60 dark:bg-zinc-850/40 border-b border-zinc-200/80 dark:border-zinc-800">
+          <div className="flex items-center gap-2">
+            <Select
+              value={selectedClient}
+              onChange={(e) => setSelectedClient(e.target.value)}
+            >
+              <option value="all">全部客户端</option>
+              <option value="claude_code">Claude Code</option>
+              <option value="codex_cli">Codex CLI</option>
+              <option value="gemini_cli">Gemini CLI</option>
+              <option value="openai_api">OpenAI API 直连</option>
+              <option value="anthropic_api">Anthropic API 直连</option>
+              <option value="generic">通用客户端</option>
+            </Select>
 
-          <Select
-            value={selectedStatus}
-            onChange={(e) => setSelectedStatus(e.target.value)}
-          >
-            <option value="all">全部状态</option>
-            <option value="success">成功 (2xx)</option>
-            <option value="error">错误 (4xx/5xx)</option>
-          </Select>
+            <Select
+              value={selectedStatus}
+              onChange={(e) => setSelectedStatus(e.target.value)}
+            >
+              <option value="all">全部状态</option>
+              <option value="success">成功 (2xx)</option>
+              <option value="error">错误 (4xx/5xx)</option>
+            </Select>
+          </div>
+
+          {logs.length > 0 && (
+            <button
+              onClick={() => clearLogs()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-zinc-200/80 dark:border-zinc-800 transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>清空日志</span>
+            </button>
+          )}
         </div>
 
-        {logs.length > 0 && (
-          <button
-            onClick={() => clearLogs()}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-zinc-200/80 dark:border-zinc-800 transition-colors cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>清空日志</span>
-          </button>
-        )}
-      </div>
-
-      {/* 日志列表卡片 */}
-      <div className="rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs divide-y divide-zinc-100 dark:divide-zinc-800 overflow-hidden">
+        {/* 日志列表主体 */}
         {filteredLogs.length === 0 ? (
           <div className="p-12 text-center text-zinc-400 text-xs">
             {logs.length === 0 ? '暂无请求日志，发起请求后将在此自动记录' : '没有符合筛选条件的日志'}
           </div>
         ) : (
-          filteredLogs.map((log) => (
-            <div
-              key={log.id}
-              onClick={() => setActiveLog(log)}
-              className="p-3.5 sm:p-4 hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50 transition-colors cursor-pointer flex items-center justify-between gap-4 select-none"
-            >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <span className={`px-2 py-0.5 rounded text-xs font-mono font-bold shrink-0 border ${getStatusBadge(log.statusCode)}`}>
-                  {log.statusCode}
-                </span>
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+            {filteredLogs.map((log) => (
+              <div
+                key={log.id}
+                onClick={() => setActiveLog(log)}
+                className="group p-3.5 sm:p-4 hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50 transition-colors cursor-pointer flex items-center justify-between gap-4 select-none"
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <span className={`px-2 py-0.5 rounded text-xs font-mono font-bold shrink-0 border ${getStatusBadge(log.statusCode)}`}>
+                    {log.statusCode}
+                  </span>
 
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 text-xs font-mono truncate">
-                    <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                      {log.incomingModel}
-                    </span>
-                    <span className="text-zinc-400">→</span>
-                    <span className="text-indigo-600 dark:text-indigo-400 truncate">
-                      {log.routedProviderName || log.routedProviderId}
-                    </span>
-                    {log.routedModel && log.routedModel !== log.incomingModel && (
-                      <span className="text-zinc-400 text-[11px] truncate">
-                        ({log.routedModel})
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-mono truncate">
+                      <span className="font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors truncate">
+                        {log.incomingModel}
                       </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
-                    <span>{formatTimestamp(log.timestamp)}</span>
-                    <span>·</span>
-                    <span>{formatClientType(log.clientType)}</span>
-                    <span>·</span>
-                    <span className="font-mono">{log.path}</span>
+                      <span className="text-zinc-400">→</span>
+                      <span className="text-sky-600 dark:text-cyan-400 truncate">
+                        {log.routedProviderName || log.routedProviderId}
+                      </span>
+                      {log.routedModel && log.routedModel !== log.incomingModel && (
+                        <span className="text-zinc-400 text-[11px] truncate">
+                          ({log.routedModel})
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
+                      <span>{formatTimestamp(log.timestamp)}</span>
+                      <span>·</span>
+                      <span>{formatClientType(log.clientType)}</span>
+                      <span>·</span>
+                      <span className="font-mono">{log.path}</span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex items-center gap-3 shrink-0">
-                <div className="text-right font-mono">
-                  <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                    {log.latencyMs} ms
+                <div className="flex items-center gap-3 shrink-0">
+                  <div className="text-right font-mono">
+                    <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                      {log.latencyMs} ms
+                    </div>
+                    <div className="text-[11px] text-zinc-400">
+                      {(log.promptTokens || 0) + (log.completionTokens || 0)} tokens
+                    </div>
                   </div>
-                  <div className="text-[11px] text-zinc-400">
-                    {(log.promptTokens || 0) + (log.completionTokens || 0)} tokens
-                  </div>
+                  <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-300 group-hover:translate-x-0.5 transition-all" />
                 </div>
-                <ChevronRight className="w-4 h-4 text-zinc-400" />
               </div>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
     </div>

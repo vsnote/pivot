@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   Boxes,
   AlertTriangle,
+  ChevronRight,
 } from 'lucide-react';
 
 import {
@@ -102,7 +103,7 @@ function ProviderCard({ provider }: { provider: Provider }) {
       aria-label={`编辑服务商 ${provider.name}`}
       aria-busy={pending !== null}
     >
-      {/* 左侧身份与服务商基本信息 */}
+      {/* 左侧身份与服务商基本信息（精致双行排版） */}
       <div className="flex items-center gap-3.5 min-w-0 flex-1">
         <ProviderAvatar
           name={provider.name}
@@ -111,16 +112,21 @@ function ProviderCard({ provider }: { provider: Provider }) {
         />
 
         <div className="min-w-0 flex-1 flex items-center gap-2">
-          <h3 className="text-[14px] font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+          <h3 className="text-[14px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
             {provider.name}
           </h3>
+          {provider.isDefault && (
+            <span className="text-[10px] font-medium px-1.5 py-0.2 rounded-sm bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/60 dark:border-cyan-800/60 select-none">
+              默认
+            </span>
+          )}
           <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-mono select-none">
             · {provider.models.length} 个模型
           </span>
         </div>
       </div>
 
-      {/* 右侧：操作区与启用开关 */}
+      {/* 右侧：操作区、启用开关与详情指引 */}
       <div className="flex items-center gap-1.5 shrink-0">
         {/* 删除按钮：hover 时显现，排在测速左侧，避免夹在毫秒与开关中间 */}
         <button
@@ -130,7 +136,7 @@ function ProviderCard({ provider }: { provider: Provider }) {
             e.stopPropagation();
             setConfirmingDelete(true);
           }}
-          className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
+          className="p-1.5 rounded-md text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
           title="删除服务商"
         >
           <Trash2 className="w-3.5 h-3.5" />
@@ -140,15 +146,15 @@ function ProviderCard({ provider }: { provider: Provider }) {
         {provider.enabled && (
           <div className="flex items-center">
             {pending === 'test' ? (
-              <div className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-mono text-zinc-400">
-                <LoaderCircle className="w-3.5 h-3.5 animate-spin text-indigo-500" />
+              <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono text-zinc-400">
+                <LoaderCircle className="w-3.5 h-3.5 animate-spin text-cyan-500" />
                 <span>…</span>
               </div>
             ) : testedLatency !== null ? (
               <button
                 type="button"
                 onClick={(e) => runAction('test', e)}
-                className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-mono font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer ${latencyColor}`}
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer ${latencyColor}`}
                 title="点击重新测速"
               >
                 <Zap className="w-3.5 h-3.5" />
@@ -158,7 +164,7 @@ function ProviderCard({ provider }: { provider: Provider }) {
               <button
                 type="button"
                 onClick={(e) => runAction('test', e)}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
+                className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
                 title="测试延迟"
               >
                 <Zap className="w-3.5 h-3.5 text-zinc-400 group-hover:text-amber-500" />
@@ -179,6 +185,11 @@ function ProviderCard({ provider }: { provider: Provider }) {
             onCheckedChange={() => runAction('toggle')}
             ariaLabel="启用服务商"
           />
+        </div>
+
+        {/* 详情指引箭头 */}
+        <div className="pl-0.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-300 group-hover:translate-x-0.5 transition-all">
+          <ChevronRight className="w-4 h-4" />
         </div>
       </div>
 
@@ -285,8 +296,8 @@ function GatewayQuickBar() {
   const activeConflicts = clientList.filter((c) => c.isIntercepted && c.conflict);
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-2xl border border-zinc-200/80 dark:border-zinc-800/80 bg-white dark:bg-zinc-900 shadow-xs">
+    <>
+      <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-zinc-50/60 dark:bg-zinc-850/40 border-b border-zinc-200/80 dark:border-zinc-800">
         {/* CLI / Agent 自动代理胶囊 */}
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500 shrink-0 select-none">
@@ -325,7 +336,7 @@ function GatewayQuickBar() {
                   type="button"
                   disabled={isBusy}
                   onClick={(e) => handleToggleClient(client, e)}
-                  className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all duration-150 cursor-pointer ${
+                  className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-all duration-150 cursor-pointer ${
                     active
                       ? `${activeClass} shadow-2xs`
                       : 'bg-zinc-100/70 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400 border-transparent hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/60'
@@ -362,7 +373,7 @@ function GatewayQuickBar() {
       {activeConflicts.map((c) => (
         <div
           key={c.id}
-          className="flex items-start justify-between gap-2 p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 animate-in fade-in"
+          className="flex items-start justify-between gap-2 px-4 py-2.5 bg-amber-50/90 dark:bg-amber-950/30 border-b border-amber-200/70 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 animate-in fade-in"
         >
           <div className="flex items-start gap-2">
             <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
@@ -375,7 +386,7 @@ function GatewayQuickBar() {
             type="button"
             disabled={togglingId !== null}
             onClick={() => handleToggleClient(c, { stopPropagation: () => {} } as React.MouseEvent)}
-            className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 transition-colors shrink-0 cursor-pointer"
+            className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 transition-colors shrink-0 cursor-pointer"
           >
             一键重新接管
           </button>
@@ -391,7 +402,7 @@ function GatewayQuickBar() {
         onImportAndToggle={handleImportAndToggle}
         onJustToggle={handleJustToggle}
       />
-    </div>
+    </>
   );
 }
 
@@ -408,42 +419,45 @@ export function ProviderList() {
   const dataReady = initialLoaded && !isLoading;
 
   return (
-    <div className="space-y-4 animate-in fade-in duration-150">
-      {/* 统一网关入口与客户端快捷接管单行栏 */}
-      <GatewayQuickBar />
+    <div className="animate-in fade-in duration-150">
+      {/* 一体化控制面板：无缝融合 Agent 代理栏与服务商列表，间距归零 */}
+      <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs overflow-hidden">
+        {/* 顶部工具栏：Agent 代理快捷接管 */}
+        <GatewayQuickBar />
 
-      {!dataReady ? (
-        <div className="p-12 text-center rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-          <LoaderCircle className="w-6 h-6 text-indigo-600 dark:text-indigo-400 animate-spin mx-auto mb-2" />
-          <p className="text-xs text-zinc-400">载入配置中…</p>
-        </div>
-      ) : providers.length === 0 ? (
-        <div className="rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-8 text-center shadow-xs">
-          <div className="w-12 h-12 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto mb-3">
-            <Boxes className="w-6 h-6" />
+        {!dataReady ? (
+          <div className="p-12 text-center">
+            <LoaderCircle className="w-6 h-6 text-cyan-600 dark:text-cyan-400 animate-spin mx-auto mb-2" />
+            <p className="text-xs text-zinc-400">载入配置中…</p>
           </div>
-          <h3 className="text-sm font-bold text-zinc-950 dark:text-zinc-100">
-            暂无已配置的服务商
-          </h3>
-          <p className="text-xs text-zinc-400 mt-1 max-w-sm mx-auto">
-            添加上游 API Key 与可用模型，即可通过 OmniSwitch 本地分发。
-          </p>
-          <button
-            type="button"
-            onClick={() => openProviderEditor(null)}
-            className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>添加服务商</span>
-          </button>
-        </div>
-      ) : (
-        <div className="rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs divide-y divide-zinc-100 dark:divide-zinc-800/80 overflow-hidden">
-          {providers.map((provider) => (
-            <ProviderCard key={provider.id} provider={provider} />
-          ))}
-        </div>
-      )}
+        ) : providers.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="w-12 h-12 rounded-lg bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 flex items-center justify-center mx-auto mb-3">
+              <Boxes className="w-6 h-6" />
+            </div>
+            <h3 className="text-sm font-bold text-zinc-950 dark:text-zinc-100">
+              暂无已配置的服务商
+            </h3>
+            <p className="text-xs text-zinc-400 mt-1 max-w-sm mx-auto">
+              添加上游 API Key 与可用模型，即可通过 AnyRelay 本地中继分发。
+            </p>
+            <button
+              type="button"
+              onClick={() => openProviderEditor(null)}
+              className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 dark:bg-cyan-600 dark:hover:bg-cyan-500 shadow-xs cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>添加服务商</span>
+            </button>
+          </div>
+        ) : (
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+            {providers.map((provider) => (
+              <ProviderCard key={provider.id} provider={provider} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

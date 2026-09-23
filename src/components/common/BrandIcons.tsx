@@ -173,13 +173,13 @@ export function detectProviderBrand(
 }
 
 const AVATAR_PALETTES = [
-  'bg-indigo-500/10 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
-  'bg-violet-500/10 dark:bg-violet-500/20 text-violet-600 dark:text-violet-400 border-violet-500/20',
+  'bg-cyan-500/10 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
   'bg-sky-500/10 dark:bg-sky-500/20 text-sky-600 dark:text-sky-400 border-sky-500/20',
+  'bg-blue-500/10 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 border-blue-500/20',
   'bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+  'bg-teal-500/10 dark:bg-teal-500/20 text-teal-600 dark:text-teal-400 border-teal-500/20',
   'bg-amber-500/10 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/20',
   'bg-rose-500/10 dark:bg-rose-500/20 text-rose-600 dark:text-rose-400 border-rose-500/20',
-  'bg-cyan-500/10 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
 ];
 
 function getInitialLetter(name: string): string {
@@ -213,7 +213,7 @@ export const ProviderAvatar: React.FC<{
     if (IconRenderer) {
       return (
         <div
-          className={`${sizeClass} rounded-xl flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-700/60 bg-zinc-50/80 dark:bg-zinc-800/80 text-zinc-850 dark:text-zinc-150 p-1.5 transition-colors ${className}`}
+          className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-700/60 bg-zinc-50/80 dark:bg-zinc-800/80 text-zinc-850 dark:text-zinc-150 p-1.5 transition-colors ${className}`}
         >
           <IconRenderer className="w-full h-full object-contain" />
         </div>
@@ -226,7 +226,7 @@ export const ProviderAvatar: React.FC<{
   const letter = getInitialLetter(name);
   return (
     <div
-      className={`${sizeClass} rounded-xl flex items-center justify-center shrink-0 border font-semibold text-[13px] tracking-tight select-none shadow-2xs ${palette} ${className}`}
+      className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border font-semibold text-[13px] tracking-tight select-none shadow-2xs ${palette} ${className}`}
     >
       {letter}
     </div>

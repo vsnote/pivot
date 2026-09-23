@@ -1,5 +1,6 @@
 pub mod presets;
 
+use crate::sync::types::SyncConfig;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -190,6 +191,16 @@ impl Database {
                 backup_config TEXT,
                 original_endpoint TEXT,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_configs (
+                id TEXT PRIMARY KEY,
+                endpoint TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                bucket TEXT NOT NULL,
+                access_key_id TEXT NOT NULL,
+                secret_access_key TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );",
         )?;
 
@@ -214,6 +225,12 @@ impl Database {
         }
         if !has_column(&conn, "request_logs", "attempts")? {
             conn.execute("ALTER TABLE request_logs ADD COLUMN attempts TEXT", [])?;
+        }
+        if !has_column(&conn, "sync_configs", "provider_type")? {
+            conn.execute("ALTER TABLE sync_configs ADD COLUMN provider_type TEXT", [])?;
+        }
+        if !has_column(&conn, "sync_configs", "region")? {
+            conn.execute("ALTER TABLE sync_configs ADD COLUMN region TEXT", [])?;
         }
         Ok(())
     }
@@ -625,6 +642,74 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_sync_config(&self) -> Result<SyncConfig, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT endpoint, account_id, bucket, access_key_id, secret_access_key, provider_type, region
+             FROM sync_configs
+             WHERE id = 'default'",
+        )?;
+        let mut rows = stmt.query([])?;
+
+        if let Some(row) = rows.next()? {
+            let endpoint: String = row.get(0)?;
+            let account_id: String = row.get(1)?;
+            let bucket: String = row.get(2)?;
+            let access_key_id: String = row.get(3)?;
+            let secret_access_key: String = row.get(4)?;
+            let provider_type: Option<String> = row.get(5)?;
+            let region: Option<String> = row.get(6)?;
+
+            // 检查是否为早先测试阶段遗留的硬编码凭据，如果是，自动清除为未配置
+            if account_id == "e7dc2c0e9df738ccaab1cff8b33bec9c"
+                || access_key_id == "cf25e859272565fde11d32db6b424300"
+            {
+                return Ok(SyncConfig::default());
+            }
+
+            Ok(SyncConfig {
+                provider_type: provider_type.or_else(|| Some("r2".to_string())),
+                endpoint,
+                region: region.or_else(|| Some("auto".to_string())),
+                account_id,
+                bucket,
+                access_key_id,
+                secret_access_key,
+            })
+        } else {
+            Ok(SyncConfig::default())
+        }
+    }
+
+    pub fn save_sync_config(&self, config: &SyncConfig) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO sync_configs (id, endpoint, account_id, bucket, access_key_id, secret_access_key, provider_type, region, updated_at)
+             VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                endpoint = excluded.endpoint,
+                account_id = excluded.account_id,
+                bucket = excluded.bucket,
+                access_key_id = excluded.access_key_id,
+                secret_access_key = excluded.secret_access_key,
+                provider_type = excluded.provider_type,
+                region = excluded.region,
+                updated_at = excluded.updated_at",
+            params![
+                config.endpoint,
+                config.account_id,
+                config.bucket,
+                config.access_key_id,
+                config.secret_access_key,
+                config.provider_type.as_deref().unwrap_or("r2"),
+                config.region.as_deref().unwrap_or("auto"),
+                now,
+            ],
+        )?;
+        Ok(())
     }
 }
 

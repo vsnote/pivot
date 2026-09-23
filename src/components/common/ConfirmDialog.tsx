@@ -39,7 +39,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-2xl w-full max-w-md"
+        className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 shadow-2xl w-full max-w-md"
       >
         <div className="flex items-start gap-3 px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
           <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
@@ -57,7 +57,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-zinc-200 dark:border-zinc-800">
           <button
             type="button"
-            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
+            className="px-3 py-1.5 text-xs font-medium rounded-md border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50 cursor-pointer"
             disabled={busy}
             onClick={onCancel}
           >
@@ -66,11 +66,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button
             type="button"
             data-autofocus
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg text-white disabled:opacity-50 transition-colors ${
+            className={`px-3 py-1.5 text-xs font-medium rounded-md text-white disabled:opacity-50 transition-colors cursor-pointer ${
               variant === 'warning'
                 ? 'bg-amber-600 hover:bg-amber-700'
                 : variant === 'primary'
-                  ? 'bg-indigo-600 hover:bg-indigo-700'
+                  ? 'bg-sky-600 hover:bg-sky-700 dark:bg-cyan-600 dark:hover:bg-cyan-500'
                   : 'bg-red-600 hover:bg-red-700'
             }`}
             disabled={busy}

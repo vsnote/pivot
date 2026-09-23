@@ -14,7 +14,7 @@ export const Select: React.FC<SelectProps> = ({
   return (
     <div className={`relative inline-flex items-center ${containerClassName}`}>
       <select
-        className={`appearance-none bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 text-xs text-zinc-800 dark:text-zinc-200 rounded-lg pl-3 pr-8 py-1.5 h-8 font-medium hover:border-zinc-300 dark:hover:border-zinc-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-[0_1px_2px_rgba(0,0,0,0.02)] cursor-pointer transition-colors w-full ${className}`}
+        className={`appearance-none bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-800 text-xs text-zinc-800 dark:text-zinc-200 rounded-md pl-3 pr-8 py-1.5 h-8 font-medium hover:border-zinc-300 dark:hover:border-zinc-700 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500 shadow-[0_1px_2px_rgba(0,0,0,0.02)] cursor-pointer transition-colors w-full ${className}`}
         {...props}
       >
         {children}

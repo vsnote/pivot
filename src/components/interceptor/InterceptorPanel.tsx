@@ -95,7 +95,7 @@ export const InterceptorPanel: React.FC = () => {
   return (
     <div className="space-y-4 animate-in fade-in duration-150">
       {/* 统一网关接入地址 */}
-      <div className="p-4 sm:p-5 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-3">
+      <div className="p-4 sm:p-5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-3">
         <div>
           <h2 className="text-base font-bold text-zinc-950 dark:text-zinc-100">
             网关接入地址
@@ -106,10 +106,10 @@ export const InterceptorPanel: React.FC = () => {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-          <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
+          <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
               <div className="text-[11px] text-zinc-400 mb-0.5">OpenAI 兼容 Base URL</div>
-              <div className="font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400 truncate">
+              <div className="font-mono text-xs font-semibold text-cyan-600 dark:text-cyan-400 truncate">
                 http://127.0.0.1:{stats.port}/v1
               </div>
             </div>
@@ -127,10 +127,10 @@ export const InterceptorPanel: React.FC = () => {
             </button>
           </div>
 
-          <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
+          <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
               <div className="text-[11px] text-zinc-400 mb-0.5">Anthropic 兼容 Base URL</div>
-              <div className="font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400 truncate">
+              <div className="font-mono text-xs font-semibold text-cyan-600 dark:text-cyan-400 truncate">
                 http://127.0.0.1:{stats.port}
               </div>
             </div>
@@ -165,9 +165,9 @@ export const InterceptorPanel: React.FC = () => {
           return (
             <div
               key={tool.id}
-              className={`rounded-2xl p-4 sm:p-5 flex flex-col justify-between transition-all duration-150 bg-white dark:bg-zinc-900 border shadow-xs ${
+              className={`rounded-lg p-4 sm:p-5 flex flex-col justify-between transition-all duration-150 bg-white dark:bg-zinc-900 border shadow-xs ${
                 tool.isIntercepted
-                  ? 'border-indigo-500/60 dark:border-indigo-500/60 ring-1 ring-indigo-500/20'
+                  ? 'border-cyan-500/60 dark:border-cyan-500/60 ring-1 ring-cyan-500/20'
                   : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
               }`}
             >
@@ -176,9 +176,9 @@ export const InterceptorPanel: React.FC = () => {
                 <div className="flex items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-3">
                     <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                      className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${
                         tool.isIntercepted
-                          ? 'bg-indigo-600 text-white shadow-xs shadow-indigo-500/30'
+                          ? 'bg-sky-600 dark:bg-cyan-600 text-white shadow-xs shadow-cyan-500/30'
                           : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300'
                       }`}
                     >
@@ -221,7 +221,7 @@ export const InterceptorPanel: React.FC = () => {
 
                 {/* 冲突警告 */}
                 {tool.conflict && (
-                  <div className="mb-2.5 p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 space-y-2">
+                  <div className="mb-2.5 p-2.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 space-y-2">
                     <div className="flex items-start gap-2">
                       <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
                       <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400 flex-1">
@@ -245,7 +245,7 @@ export const InterceptorPanel: React.FC = () => {
                 )}
 
                 {/* 状态行 */}
-                <div className="py-2 px-3 rounded-xl bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">
+                <div className="py-2 px-3 rounded-md bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">
                   <span className="text-zinc-400">状态</span>
                   <span className="font-semibold flex items-center gap-1.5">
                     <span
@@ -256,7 +256,7 @@ export const InterceptorPanel: React.FC = () => {
                     <span
                       className={
                         tool.isIntercepted
-                          ? 'text-indigo-600 dark:text-indigo-400'
+                          ? 'text-cyan-600 dark:text-cyan-400'
                           : 'text-zinc-500 dark:text-zinc-400'
                       }
                     >
@@ -276,14 +276,14 @@ export const InterceptorPanel: React.FC = () => {
       </div>
 
       {/* 终端临时命令 */}
-      <div className="p-4 sm:p-5 rounded-2xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-2.5">
+      <div className="p-4 sm:p-5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-2.5">
         <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
           临时环境变量
         </h3>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
           {/* Claude Code */}
-          <div className="flex items-center justify-between bg-zinc-950 text-zinc-100 p-2 px-3 rounded-xl font-mono text-xs border border-zinc-800">
+          <div className="flex items-center justify-between bg-zinc-950 text-zinc-100 p-2 px-3 rounded-md font-mono text-xs border border-zinc-800">
             <span className="truncate">{claudeExport}</span>
             <button
               onClick={() => copyToClipboard('claude', claudeExport)}
@@ -299,7 +299,7 @@ export const InterceptorPanel: React.FC = () => {
           </div>
 
           {/* OpenAI */}
-          <div className="flex items-center justify-between bg-zinc-950 text-zinc-100 p-2 px-3 rounded-xl font-mono text-xs border border-zinc-800">
+          <div className="flex items-center justify-between bg-zinc-950 text-zinc-100 p-2 px-3 rounded-md font-mono text-xs border border-zinc-800">
             <span className="truncate">{openaiExport}</span>
             <button
               onClick={() => copyToClipboard('openai', openaiExport)}
