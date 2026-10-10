@@ -106,9 +106,28 @@ fn models_url(protocol: &str, base: &str) -> Result<Url, String> {
     let mut url = validate_base_url(base)?;
     let path = url.path().trim_end_matches('/');
     // Use the same API base as the gateway's chat requests, including custom version paths.
-    let path = format!("{path}/models");
+    let path = if (protocol == "anthropic" || protocol == "openai") && path.is_empty() {
+        "/v1/models".to_string()
+    } else {
+        format!("{path}/models")
+    };
     url.set_path(&path);
     Ok(url)
+}
+
+fn clean_model_id(raw_id: &str) -> String {
+    let trimmed = raw_id.trim();
+    // 检查是否为第三方代理针对 Claude 客户端混淆编码的模型名：claude-fable-*-dd-<reversed_name>
+    if let Some(rest) = trimmed.strip_prefix("claude-fable-") {
+        if let Some(pos) = rest.find("-dd-") {
+            let encoded = &rest[pos + 4..];
+            if !encoded.is_empty() {
+                let decoded: String = encoded.chars().rev().collect();
+                return decoded;
+            }
+        }
+    }
+    trimmed.to_string()
 }
 
 fn parse_page(protocol: &str, body: &Value) -> Result<(Vec<String>, Option<String>), String> {
@@ -140,8 +159,9 @@ fn parse_page(protocol: &str, body: &Value) -> Result<(Vec<String>, Option<Strin
         } else {
             id
         };
-        if !id.trim().is_empty() {
-            models.push(id.trim().to_string());
+        let cleaned = clean_model_id(id);
+        if !cleaned.trim().is_empty() {
+            models.push(cleaned);
         }
     }
     let next = if protocol == "gemini" {
@@ -398,5 +418,21 @@ mod tests {
             ["org/model:tag"]
         );
         assert!(parse_page("anthropic", &json!({"data":[],"has_more":true})).is_err());
+    }
+
+    #[test]
+    fn test_clean_model_id() {
+        assert_eq!(
+            clean_model_id("claude-fable-5-dd-hgih-hsalf-8.3-inimeg"),
+            "gemini-3.8-flash-high"
+        );
+        assert_eq!(
+            clean_model_id("claude-fable-5-dd-muidem-b021-sso-tpg"),
+            "gpt-oss-120b-medium"
+        );
+        assert_eq!(
+            clean_model_id("claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
     }
 }

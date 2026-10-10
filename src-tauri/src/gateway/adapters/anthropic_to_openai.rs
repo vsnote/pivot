@@ -157,12 +157,30 @@ pub fn convert_anthropic_req_to_openai(
             .collect()
     });
 
+    let reasoning_effort = if let Some(ref th) = req.thinking {
+        if th.thinking_type == "enabled" {
+            let budget = th.budget_tokens.unwrap_or(8192);
+            if budget <= 3000 {
+                Some("low".to_string())
+            } else if budget <= 12000 {
+                Some("medium".to_string())
+            } else {
+                Some("high".to_string())
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     OpenAIChatRequest {
         model: target_model.to_string(),
         messages: openai_messages,
         temperature: req.temperature,
         max_tokens: req.max_tokens,
         max_completion_tokens: req.max_tokens,
+        reasoning_effort,
         tools: openai_tools,
         tool_choice: req.tool_choice.clone(),
         stream: req.stream,

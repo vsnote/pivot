@@ -11,6 +11,7 @@ import {
   Search,
   X,
   AlertCircle,
+  AlertTriangle,
   HelpCircle,
 } from 'lucide-react';
 import {
@@ -277,6 +278,18 @@ export function ProviderEditor() {
   const candidates = (fetched ?? []).filter((model) =>
     model.toLowerCase().includes(modelSearch.toLowerCase()),
   );
+
+  const invalidModels =
+    fetched && fetched.length > 0
+      ? draft.models.filter((model) => !fetched.includes(model))
+      : [];
+
+  const removeInvalidModels = () => {
+    if (!fetched || fetched.length === 0) return;
+    update({
+      models: draft.models.filter((model) => fetched.includes(model)),
+    });
+  };
 
   return (
     <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
@@ -561,11 +574,25 @@ export function ProviderEditor() {
               {/* 模型选择与声明 */}
               <div className="space-y-3.5 pt-4 border-t border-zinc-100 dark:border-zinc-800">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider flex items-center gap-1.5">
-                    可用模型池
+                  <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
+                    <span>可用模型池</span>
                     <span className="text-[11px] font-normal font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
                       已选 {draft.models.length}
                     </span>
+                    {invalidModels.length > 0 && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[11px] font-normal bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30">
+                        <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                        <span>{invalidModels.length} 个未在上游提供</span>
+                        <button
+                          type="button"
+                          onClick={removeInvalidModels}
+                          className="ml-1 underline hover:text-amber-800 dark:hover:text-amber-200 cursor-pointer font-medium"
+                          title="从已选模型中移除上游列表中不存在的模型"
+                        >
+                          一键移除
+                        </button>
+                      </span>
+                    )}
                   </h3>
 
                   <button
@@ -594,22 +621,31 @@ export function ProviderEditor() {
                 {draft.models.length > 0 && (
                   <div className="p-3 rounded-md bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/80 dark:border-zinc-800/80">
                     <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
-                      {draft.models.map((model) => (
-                        <span
-                          key={model}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700 shadow-2xs"
-                        >
-                          <span>{model}</span>
-                          <button
-                            type="button"
-                            onClick={() => toggleModel(model)}
-                            className="hover:text-rose-500 cursor-pointer"
-                            aria-label={`移除模型 ${model}`}
+                      {draft.models.map((model) => {
+                        const isInvalid = invalidModels.includes(model);
+                        return (
+                          <span
+                            key={model}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono border transition-colors shadow-2xs ${
+                              isInvalid
+                                ? 'bg-amber-50/80 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 border-amber-300/80 dark:border-amber-800/70'
+                                : 'bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border-zinc-200 dark:border-zinc-700'
+                            }`}
+                            title={isInvalid ? '该模型未在上游接口返回的列表中' : undefined}
                           >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </span>
-                      ))}
+                            {isInvalid && <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />}
+                            <span>{model}</span>
+                            <button
+                              type="button"
+                              onClick={() => toggleModel(model)}
+                              className="hover:text-rose-500 cursor-pointer"
+                              aria-label={`移除模型 ${model}`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -629,13 +665,24 @@ export function ProviderEditor() {
                         />
                       </div>
                       {candidates.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => update({ models: uniqueValues([...draft.models, ...candidates]) })}
-                          className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
-                        >
-                          全选结果 ({candidates.length})
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => update({ models: [...candidates] })}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/50 hover:bg-cyan-100 dark:hover:bg-cyan-900/40 border border-cyan-200 dark:border-cyan-800/60 transition-colors cursor-pointer"
+                            title="将已选模型完全替换为当前匹配的上游真实模型"
+                          >
+                            对齐上游 ({candidates.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => update({ models: uniqueValues([...draft.models, ...candidates]) })}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+                            title="将匹配的上游模型追加到已选模型中"
+                          >
+                            全选追加
+                          </button>
+                        </div>
                       )}
                     </div>
 

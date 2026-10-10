@@ -2,7 +2,7 @@ use crate::db::{Database, LogAttempt, RequestLog};
 use crate::gateway::adapters::{
     anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, openai_to_anthropic,
     parse_anthropic_event_to_openai_chunks, parse_gemini_chunk_to_anthropic_events,
-    parse_openai_chunk_to_anthropic_events, SseState,
+    parse_openai_chunk_to_anthropic_events, responses, SseState,
 };
 use crate::gateway::router::{RouteCandidate, RoutingEngine};
 use crate::gateway::types::*;
@@ -15,7 +15,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -49,6 +48,86 @@ struct DispatchResult {
     completion_tokens: u32,
 }
 
+fn estimate_text_tokens(text: &str) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut cjk_count = 0usize;
+    let mut other_count = 0usize;
+    for c in text.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{3400}'..='\u{4dbf}').contains(&c)
+            || ('\u{3000}'..='\u{303f}').contains(&c)
+        {
+            cjk_count += 1;
+        } else {
+            other_count += 1;
+        }
+    }
+    let tokens = (cjk_count as f64 * 1.1 + other_count as f64 * 0.28).ceil() as u32;
+    tokens.max(1)
+}
+
+fn estimate_anthropic_req_prompt_tokens(req: &AnthropicMessageRequest) -> u32 {
+    let mut total: u32 = 20;
+    if let Some(ref sys) = req.system {
+        match sys {
+            Value::String(s) => total += estimate_text_tokens(s),
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                        total += estimate_text_tokens(t);
+                    }
+                }
+            }
+            _ => total += estimate_text_tokens(&sys.to_string()),
+        }
+    }
+    for m in &req.messages {
+        total += 4;
+        match &m.content {
+            Value::String(s) => total += estimate_text_tokens(s),
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                        total += estimate_text_tokens(t);
+                    } else if let Some(content) = item.get("content").and_then(|v| v.as_str()) {
+                        total += estimate_text_tokens(content);
+                    }
+                }
+            }
+            _ => total += estimate_text_tokens(&m.content.to_string()),
+        }
+    }
+    if let Some(ref tools) = req.tools {
+        for t in tools {
+            total += 15 + estimate_text_tokens(&t.name) + estimate_text_tokens(t.description.as_deref().unwrap_or(""));
+            total += estimate_text_tokens(&t.input_schema.to_string());
+        }
+    }
+    total
+}
+
+fn estimate_openai_req_prompt_tokens(req: &OpenAIChatRequest) -> u32 {
+    let mut total: u32 = 20;
+    for m in &req.messages {
+        total += 4;
+        if let Some(ref content) = m.content {
+            match content {
+                Value::String(s) => total += estimate_text_tokens(s),
+                _ => total += estimate_text_tokens(&content.to_string()),
+            }
+        }
+    }
+    if let Some(ref tools) = req.tools {
+        for t in tools {
+            total += 15 + estimate_text_tokens(&t.function.name) + estimate_text_tokens(t.function.description.as_deref().unwrap_or(""));
+            total += estimate_text_tokens(&t.function.parameters.to_string());
+        }
+    }
+    total
+}
+
 pub fn create_gateway_router(state: GatewayState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -61,8 +140,11 @@ pub fn create_gateway_router(state: GatewayState) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/messages", post(handle_messages))
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/v1/responses", post(handle_responses))
         .route("/api/stats", get(get_stats))
         .layer(cors)
+        .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(tower_http::decompression::RequestDecompressionLayer::new().pass_through_unaccepted(true))
         .with_state(state)
 }
 
@@ -117,6 +199,19 @@ async fn list_models(State(state): State<GatewayState>) -> Json<Value> {
                 "root": m,
                 "parent": null
             }));
+            let provider_prefix = p.name.to_lowercase().replace(' ', "-");
+            let named_id = format!("{}/{}", provider_prefix, m);
+            if named_id != *m {
+                model_list.push(json!({
+                    "id": named_id,
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": p.id,
+                    "permission": [],
+                    "root": m,
+                    "parent": null
+                }));
+            }
         }
     }
 
@@ -237,7 +332,7 @@ async fn handle_messages(
 
         let attempt_started = Instant::now();
         let resp_result = dispatch_anthropic_request(
-            &state.http_client,
+            &state,
             &req,
             cand,
             &req_id,
@@ -342,24 +437,37 @@ async fn handle_messages(
         .into_response()
 }
 
+fn resolve_upstream_endpoint(base_url: &str, suffix: &str) -> String {
+    let clean = base_url.trim_end_matches('/');
+    if clean.ends_with(suffix) {
+        return clean.to_string();
+    }
+    let url_parsed = reqwest::Url::parse(clean);
+    let path = url_parsed.as_ref().map(|u| u.path().trim_end_matches('/')).unwrap_or("");
+    if path.is_empty() {
+        format!("{clean}/v1{suffix}")
+    } else {
+        format!("{clean}{suffix}")
+    }
+}
+
 async fn dispatch_anthropic_request(
-    client: &reqwest::Client,
+    state: &GatewayState,
     req: &AnthropicMessageRequest,
     cand: &RouteCandidate,
     req_id: &str,
     is_stream: bool,
     client_key: Option<&str>,
 ) -> Result<DispatchResult, (StatusCode, String)> {
+    let client = &state.http_client;
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let effective_key = cand.api_key.as_deref().or(client_key);
+    let estimated_prompt = estimate_anthropic_req_prompt_tokens(req);
 
     match cand.provider.protocol.as_str() {
         "anthropic" => {
             // Direct Anthropic upstream
-            let mut url = cand.provider.base_url.trim_end_matches('/').to_string();
-            if !url.ends_with("/messages") {
-                url = format!("{}/messages", url);
-            }
+            let url = resolve_upstream_endpoint(&cand.provider.base_url, "/messages");
 
             let mut req_body = req.clone();
             req_body.model = cand.target_model.clone();
@@ -389,17 +497,80 @@ async fn dispatch_anthropic_request(
             }
 
             if is_stream {
-                let stream_bytes = res
-                    .bytes_stream()
-                    .map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
+                let req_id_str = req_id.to_string();
+                let byte_stream = res.bytes_stream();
+
+                let sse_stream = stream! {
+                    let mut buffer = String::new();
+                    let mut final_prompt_tokens = estimated_prompt;
+                    let mut final_completion_tokens = 0u32;
+                    let mut estimated_output_chars = 0usize;
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            if let Ok(s) = std::str::from_utf8(&bytes) {
+                                buffer.push_str(s);
+
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].trim().to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+
+                                    if line.starts_with("data:") {
+                                        let payload = line.trim_start_matches("data:").trim();
+                                        if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                            if let Some(msg) = val.get("message") {
+                                                if let Some(u) = msg.get("usage") {
+                                                    if let Some(it) = u.get("input_tokens").and_then(Value::as_u64) {
+                                                        if it > 0 { final_prompt_tokens = it as u32; }
+                                                    }
+                                                }
+                                            }
+                                            if let Some(u) = val.get("usage") {
+                                                if let Some(ot) = u.get("output_tokens").and_then(Value::as_u64) {
+                                                    if ot > 0 { final_completion_tokens = ot as u32; }
+                                                }
+                                            }
+                                            if let Some(delta) = val.get("delta") {
+                                                if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                                                    estimated_output_chars += text.len();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            yield Ok::<_, std::io::Error>(bytes);
+                        }
+                    }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = (estimated_output_chars as f64 * 0.3).ceil() as u32;
+                        if final_completion_tokens == 0 { final_completion_tokens = 1; }
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > estimated_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - estimated_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
+                };
+
                 Ok(DispatchResult {
                     response: Response::builder()
                         .header("content-type", "text/event-stream")
                         .header("cache-control", "no-cache")
                         .header("connection", "keep-alive")
-                        .body(Body::from_stream(stream_bytes))
+                        .body(Body::from_stream(sse_stream))
                         .unwrap(),
-                    prompt_tokens: 0,
+                    prompt_tokens: estimated_prompt,
                     completion_tokens: 0,
                 })
             } else {
@@ -410,30 +581,31 @@ async fn dispatch_anthropic_request(
                 let usage = serde_json::from_slice::<Value>(&bytes)
                     .ok()
                     .and_then(|body| body.get("usage").cloned());
+                let prompt_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32)
+                    .unwrap_or(estimated_prompt);
+                let completion_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
+
                 Ok(DispatchResult {
                     response: Response::builder()
                         .header("content-type", "application/json")
                         .body(Body::from(bytes))
                         .unwrap(),
-                    prompt_tokens: usage
-                        .as_ref()
-                        .and_then(|u| u.get("input_tokens"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as u32,
-                    completion_tokens: usage
-                        .as_ref()
-                        .and_then(|u| u.get("output_tokens"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as u32,
+                    prompt_tokens,
+                    completion_tokens,
                 })
             }
         }
         "openai" | "openrouter" | "ollama" => {
             // Convert to OpenAI Chat Completions
-            let mut url = cand.provider.base_url.trim_end_matches('/').to_string();
-            if !url.ends_with("/chat/completions") {
-                url = format!("{}/chat/completions", url);
-            }
+            let url = resolve_upstream_endpoint(&cand.provider.base_url, "/chat/completions");
 
             let openai_req =
                 anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
@@ -465,10 +637,15 @@ async fn dispatch_anthropic_request(
                 let req_id_str = req_id.to_string();
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
                     let mut sse_state = SseState::new();
                     let mut buffer = String::new();
+                    let mut final_prompt_tokens = estimated_prompt;
+                    let mut final_completion_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
                         if let Ok(bytes) = chunk_res {
@@ -480,6 +657,20 @@ async fn dispatch_anthropic_request(
                                     buffer = buffer[pos + 1..].to_string();
 
                                     if !line.is_empty() {
+                                        if line.starts_with("data:") && !line.contains("[DONE]") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                if let Some(usage) = val.get("usage") {
+                                                    if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                    }
+                                                    if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         let events = parse_openai_chunk_to_anthropic_events(
                                             &line,
                                             &mut sse_state,
@@ -494,6 +685,21 @@ async fn dispatch_anthropic_request(
                             }
                         }
                     }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = sse_state.total_output_tokens.max(1);
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > estimated_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - estimated_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
                 };
 
                 Ok(DispatchResult {
@@ -503,7 +709,7 @@ async fn dispatch_anthropic_request(
                         .header("connection", "keep-alive")
                         .body(Body::from_stream(sse_stream))
                         .unwrap(),
-                    prompt_tokens: 0,
+                    prompt_tokens: estimated_prompt,
                     completion_tokens: 0,
                 })
             } else {
@@ -514,12 +720,20 @@ async fn dispatch_anthropic_request(
                     )
                 })?;
                 let usage = openai_resp.usage.clone();
+                let prompt_tokens = usage
+                    .as_ref()
+                    .map(|u| u.prompt_tokens)
+                    .unwrap_or(estimated_prompt);
+                let completion_tokens = usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0);
                 let anthropic_resp =
                     anthropic_to_openai::convert_openai_resp_to_anthropic(&openai_resp, &req.model);
                 Ok(DispatchResult {
                     response: Json(anthropic_resp).into_response(),
-                    prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                    completion_tokens: usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                    prompt_tokens,
+                    completion_tokens,
                 })
             }
         }
@@ -562,15 +776,18 @@ async fn dispatch_anthropic_request(
             }
 
             if is_stream {
-                // Gemini SSE is not Anthropic SSE. Translate each upstream data line
-                // so Claude Code receives the same event contract as other providers.
                 let req_id_str = req_id.to_string();
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
                     let mut sse_state = SseState::new();
                     let mut buffer = String::new();
+                    let mut final_prompt_tokens = estimated_prompt;
+                    let mut final_completion_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
                         if let Ok(bytes) = chunk_res {
@@ -580,6 +797,20 @@ async fn dispatch_anthropic_request(
                                     let line = buffer[..pos].trim().to_string();
                                     buffer = buffer[pos + 1..].to_string();
                                     if !line.is_empty() {
+                                        if line.starts_with("data:") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                if let Some(usage) = val.get("usageMetadata") {
+                                                    if let Some(pt) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                    }
+                                                    if let Some(ct) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+                                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         let events = parse_gemini_chunk_to_anthropic_events(
                                             &line,
                                             &mut sse_state,
@@ -610,6 +841,21 @@ async fn dispatch_anthropic_request(
                     for event in finish_gemini_stream(&mut sse_state, "end_turn") {
                         yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
                     }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = sse_state.total_output_tokens.max(1);
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > estimated_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - estimated_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
                 };
 
                 Ok(DispatchResult {
@@ -619,7 +865,7 @@ async fn dispatch_anthropic_request(
                         .header("connection", "keep-alive")
                         .body(Body::from_stream(sse_stream))
                         .unwrap(),
-                    prompt_tokens: 0,
+                    prompt_tokens: estimated_prompt,
                     completion_tokens: 0,
                 })
             } else {
@@ -630,18 +876,20 @@ async fn dispatch_anthropic_request(
                     )
                 })?;
                 let usage = gemini_resp.usage_metadata.clone();
+                let prompt_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.prompt_token_count)
+                    .unwrap_or(estimated_prompt);
+                let completion_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.candidates_token_count)
+                    .unwrap_or(0);
                 let anthropic_resp =
                     anthropic_to_gemini::convert_gemini_resp_to_anthropic(&gemini_resp, &req.model);
                 Ok(DispatchResult {
                     response: Json(anthropic_resp).into_response(),
-                    prompt_tokens: usage
-                        .as_ref()
-                        .and_then(|u| u.prompt_token_count)
-                        .unwrap_or(0),
-                    completion_tokens: usage
-                        .as_ref()
-                        .and_then(|u| u.candidates_token_count)
-                        .unwrap_or(0),
+                    prompt_tokens,
+                    completion_tokens,
                 })
             }
         }
@@ -728,7 +976,7 @@ async fn handle_chat_completions(
 
         let attempt_started = Instant::now();
         let resp_result = dispatch_openai_request(
-            &state.http_client,
+            &state,
             &req,
             cand,
             &req_id,
@@ -831,23 +1079,265 @@ async fn handle_chat_completions(
         .into_response()
 }
 
+/// Handler for OpenAI Responses API clients (e.g. Codex CLI / Desktop) calling `/v1/responses`
+async fn handle_responses(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body_res: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let body = match body_res {
+        Ok(Json(b)) => b,
+        Err(e) => {
+            tracing::error!("Failed to parse /v1/responses request body: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to parse request body as JSON: {}", e),
+                        "type": "invalid_request_error"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let start_time = Instant::now();
+    let req_id = uuid::Uuid::new_v4().to_string();
+    state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
+    state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+
+    let session_id = extract_session_id(&headers);
+    let client_key = extract_client_api_key(&headers);
+    let providers = state.db.get_providers().unwrap_or_default();
+    let routes = state.db.get_routes().unwrap_or_default();
+
+    let is_compaction = responses::is_compaction_request(&body);
+    let req = responses::convert_responses_req_to_chat(&body);
+    let is_stream = req.stream.unwrap_or(true);
+
+    let route_match = match state
+        .router
+        .resolve_route(&req.model, session_id.as_deref(), &providers, &routes)
+    {
+        Ok(rm) => rm,
+        Err(err) => {
+            state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+            log_request(
+                &state,
+                RequestLog {
+                    id: req_id.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    method: "POST".to_string(),
+                    path: "/v1/responses".to_string(),
+                    client_type: "codex_cli".to_string(),
+                    incoming_model: req.model.clone(),
+                    routed_provider_id: "none".to_string(),
+                    routed_provider_name: None,
+                    routed_model: String::new(),
+                    status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
+                    latency_ms: start_time.elapsed().as_millis() as i64,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error_message: Some(err.clone()),
+                    is_stream,
+                    fallback_used: false,
+                    attempts: Vec::new(),
+                },
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": { "message": err, "type": "routing_error" } })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut candidates = vec![route_match.primary];
+    candidates.extend(route_match.fallbacks);
+
+    let mut attempts: Vec<LogAttempt> = Vec::new();
+    let mut last_error = String::new();
+    let mut last_status = StatusCode::BAD_GATEWAY;
+    let mut fallback_used = false;
+
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        if cand_idx > 0 {
+            fallback_used = true;
+            tracing::warn!(
+                "Failing over responses to fallback candidate {} ({})",
+                cand.provider.name,
+                cand.target_model
+            );
+        }
+
+        let attempt_started = Instant::now();
+        match dispatch_openai_request(
+            &state,
+            &req,
+            cand,
+            &req_id,
+            is_stream,
+            client_key.as_deref(),
+        )
+        .await
+        {
+            Ok(result) => {
+                attempts.push(attempt(
+                    cand,
+                    StatusCode::OK,
+                    None,
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
+                let latency_ms = start_time.elapsed().as_millis() as i64;
+                state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_prompt_tokens
+                    .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_completion_tokens
+                    .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
+
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id.clone(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: "/v1/responses".to_string(),
+                        client_type: "codex_cli".to_string(),
+                        incoming_model: req.model.clone(),
+                        routed_provider_id: cand.provider.id.clone(),
+                        routed_provider_name: Some(cand.provider.name.clone()),
+                        routed_model: cand.target_model.clone(),
+                        status_code: 200,
+                        latency_ms,
+                        prompt_tokens: result.prompt_tokens as i32,
+                        completion_tokens: result.completion_tokens as i32,
+                        error_message: None,
+                        is_stream,
+                        fallback_used,
+                        attempts,
+                    },
+                );
+
+                if is_stream {
+                    let response_id = format!("resp_{}", req_id.replace('-', ""));
+                    let model_str = req.model.clone();
+                    let byte_stream = result.response.into_body().into_data_stream();
+
+                    let responses_stream = stream! {
+                        let mut sse_state = responses::ResponsesSseState::new_with_compaction(&response_id, &model_str, is_compaction);
+                        let mut buffer = String::new();
+
+                        for await chunk_res in byte_stream {
+                            if let Ok(bytes) = chunk_res {
+                                if let Ok(s) = std::str::from_utf8(&bytes) {
+                                    buffer.push_str(s);
+
+                                    while let Some(pos) = buffer.find('\n') {
+                                        let line = buffer[..pos].trim().to_string();
+                                        buffer = buffer[pos + 1..].to_string();
+
+                                        if !line.is_empty() {
+                                            let events = sse_state.process_line(&line);
+                                            for ev in events {
+                                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let trailing = sse_state.finish();
+                        for ev in trailing {
+                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                        }
+                    };
+
+                    return Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(responses_stream))
+                        .unwrap();
+                } else {
+                    let body_bytes = axum::body::to_bytes(result.response.into_body(), 10 * 1024 * 1024)
+                        .await
+                        .unwrap_or_default();
+                    let chat_json: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
+                    let resp_id = format!("resp_{}", req_id.replace('-', ""));
+                    let responses_val = responses::chat_response_to_responses(&chat_json, &resp_id, &req.model, is_compaction);
+                    return Json(responses_val).into_response();
+                }
+            }
+            Err((status, err_msg)) => {
+                attempts.push(attempt(
+                    cand,
+                    status,
+                    Some(summarize_error(&err_msg)),
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
+                last_error = err_msg;
+                last_status = status;
+                if status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED {
+                    break;
+                }
+            }
+        }
+    }
+
+    state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+    state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+    log_request(
+        &state,
+        RequestLog {
+            id: req_id,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            client_type: "codex_cli".to_string(),
+            incoming_model: req.model,
+            routed_provider_id: "none".to_string(),
+            routed_provider_name: None,
+            routed_model: "".to_string(),
+            status_code: last_status.as_u16() as i32,
+            latency_ms: start_time.elapsed().as_millis() as i64,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some(last_error.clone()),
+            is_stream,
+            fallback_used,
+            attempts,
+        },
+    );
+
+    (
+        last_status,
+        Json(json!({ "error": { "message": last_error, "type": "upstream_error" } })),
+    )
+        .into_response()
+}
+
 async fn dispatch_openai_request(
-    client: &reqwest::Client,
+    state: &GatewayState,
     req: &OpenAIChatRequest,
     cand: &RouteCandidate,
     req_id: &str,
     is_stream: bool,
     client_key: Option<&str>,
 ) -> Result<DispatchResult, (StatusCode, String)> {
+    let client = &state.http_client;
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let effective_key = cand.api_key.as_deref().or(client_key);
+    let estimated_prompt = estimate_openai_req_prompt_tokens(req);
 
     match cand.provider.protocol.as_str() {
         "openai" | "openrouter" | "ollama" => {
-            let mut url = cand.provider.base_url.trim_end_matches('/').to_string();
-            if !url.ends_with("/chat/completions") {
-                url = format!("{}/chat/completions", url);
-            }
+            let url = resolve_upstream_endpoint(&cand.provider.base_url, "/chat/completions");
 
             let mut req_body = req.clone();
             req_body.model = cand.target_model.clone();
@@ -876,17 +1366,79 @@ async fn dispatch_openai_request(
             }
 
             if is_stream {
-                let stream_bytes = res
-                    .bytes_stream()
-                    .map(|b| b.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                let req_id_str = req_id.to_string();
+                let byte_stream = res.bytes_stream();
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
+
+                let sse_stream = stream! {
+                    let mut buffer = String::new();
+                    let mut final_prompt_tokens = estimated_prompt;
+                    let mut final_completion_tokens = 0u32;
+                    let mut generated_tokens = 0u32;
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            if let Ok(s) = std::str::from_utf8(&bytes) {
+                                buffer.push_str(s);
+
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].trim().to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+
+                                    if line.starts_with("data:") && !line.contains("[DONE]") {
+                                        let payload = line.trim_start_matches("data:").trim();
+                                        if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                            if let Some(usage) = val.get("usage") {
+                                                if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                                    if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                }
+                                                if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                                    if ct > 0 { final_completion_tokens = ct as u32; }
+                                                }
+                                            }
+                                            if let Some(choices) = val.get("choices").and_then(Value::as_array) {
+                                                if let Some(c0) = choices.first() {
+                                                    if let Some(d) = c0.get("delta") {
+                                                        if d.get("content").is_some() || d.get("reasoning_content").is_some() {
+                                                            generated_tokens += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            yield Ok::<_, std::io::Error>(bytes);
+                        }
+                    }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = generated_tokens.max(1);
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > estimated_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - estimated_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
+                };
+
                 Ok(DispatchResult {
                     response: Response::builder()
                         .header("content-type", "text/event-stream")
                         .header("cache-control", "no-cache")
                         .header("connection", "keep-alive")
-                        .body(Body::from_stream(stream_bytes))
+                        .body(Body::from_stream(sse_stream))
                         .unwrap(),
-                    prompt_tokens: 0,
+                    prompt_tokens: estimated_prompt,
                     completion_tokens: 0,
                 })
             } else {
@@ -897,21 +1449,25 @@ async fn dispatch_openai_request(
                 let usage = serde_json::from_slice::<Value>(&bytes)
                     .ok()
                     .and_then(|body| body.get("usage").cloned());
+                let prompt_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.get("prompt_tokens"))
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32)
+                    .unwrap_or(estimated_prompt);
+                let completion_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.get("completion_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
+
                 Ok(DispatchResult {
                     response: Response::builder()
                         .header("content-type", "application/json")
                         .body(Body::from(bytes))
                         .unwrap(),
-                    prompt_tokens: usage
-                        .as_ref()
-                        .and_then(|u| u.get("prompt_tokens"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as u32,
-                    completion_tokens: usage
-                        .as_ref()
-                        .and_then(|u| u.get("completion_tokens"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as u32,
+                    prompt_tokens,
+                    completion_tokens,
                 })
             }
         }
@@ -919,10 +1475,7 @@ async fn dispatch_openai_request(
             // Client called OpenAI endpoint, but upstream is Anthropic!
             let anthropic_req =
                 openai_to_anthropic::convert_openai_req_to_anthropic(req, &cand.target_model);
-            let mut url = cand.provider.base_url.trim_end_matches('/').to_string();
-            if !url.ends_with("/messages") {
-                url = format!("{}/messages", url);
-            }
+            let url = resolve_upstream_endpoint(&cand.provider.base_url, "/messages");
 
             let mut req_builder = client
                 .post(&url)
@@ -952,9 +1505,15 @@ async fn dispatch_openai_request(
                 let req_id_str = req_id.to_string();
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
                     let mut buffer = String::new();
+                    let mut final_prompt_tokens = estimated_prompt;
+                    let mut final_completion_tokens = 0u32;
+                    let mut generated_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
                         if let Ok(bytes) = chunk_res {
@@ -966,6 +1525,29 @@ async fn dispatch_openai_request(
                                     buffer = buffer[pos + 1..].to_string();
 
                                     if !line.is_empty() {
+                                        if line.starts_with("data:") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                if let Some(msg) = val.get("message") {
+                                                    if let Some(u) = msg.get("usage") {
+                                                        if let Some(it) = u.get("input_tokens").and_then(Value::as_u64) {
+                                                            if it > 0 { final_prompt_tokens = it as u32; }
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(u) = val.get("usage") {
+                                                    if let Some(ot) = u.get("output_tokens").and_then(Value::as_u64) {
+                                                        if ot > 0 { final_completion_tokens = ot as u32; }
+                                                    }
+                                                }
+                                                if let Some(delta) = val.get("delta") {
+                                                    if delta.get("text").is_some() {
+                                                        generated_tokens += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         let chunks = parse_anthropic_event_to_openai_chunks(
                                             &line,
                                             &req_id_str,
@@ -979,6 +1561,21 @@ async fn dispatch_openai_request(
                             }
                         }
                     }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = generated_tokens.max(1);
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > estimated_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - estimated_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
                 };
 
                 Ok(DispatchResult {
@@ -988,7 +1585,7 @@ async fn dispatch_openai_request(
                         .header("connection", "keep-alive")
                         .body(Body::from_stream(sse_stream))
                         .unwrap(),
-                    prompt_tokens: 0,
+                    prompt_tokens: estimated_prompt,
                     completion_tokens: 0,
                 })
             } else {

@@ -8,11 +8,10 @@ import {
   ShieldCheck,
   CheckCircle2,
   AlertCircle,
-  AlertTriangle,
   Copy,
   Check,
   Sparkles,
-  ArrowRightLeft,
+  AlertTriangle,
 } from 'lucide-react';
 
 const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
@@ -40,16 +39,17 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
 ];
 
 export const InterceptorPanel: React.FC = () => {
-  const { interceptors, toggleInterceptor, importThirdPartyProvider, stats } = useAppStore();
+  const { interceptors, toggleInterceptor, providers, stats } = useAppStore();
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [conflictConfirmTarget, setConflictConfirmTarget] = useState<InterceptorStatus | null>(null);
 
   const displayList = interceptors.length > 0 ? interceptors : DEFAULT_INTERCEPTORS;
+  const hasEnabledProviders = providers.some((p) => p.enabled);
 
   const handleToggle = async (id: string, enable: boolean) => {
     const target = displayList.find((item) => item.id === id);
-    if (enable && target && target.conflict) {
+    if ((enable || target?.isOverwritten) && target && target.conflict) {
       setConflictConfirmTarget(target);
       return;
     }
@@ -62,18 +62,7 @@ export const InterceptorPanel: React.FC = () => {
     }
   };
 
-  const handleImportAndToggle = async (target: InterceptorStatus) => {
-    if (togglingId) return;
-    setTogglingId(target.id);
-    try {
-      await importThirdPartyProvider(target.id);
-      setConflictConfirmTarget(null);
-    } finally {
-      setTogglingId(null);
-    }
-  };
-
-  const handleJustToggle = async (target: InterceptorStatus) => {
+  const handleConfirmTakeover = async (target: InterceptorStatus) => {
     setConflictConfirmTarget(null);
     setTogglingId(target.id);
     try {
@@ -161,14 +150,17 @@ export const InterceptorPanel: React.FC = () => {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
         {displayList.map((tool) => {
           const isToggling = togglingId === tool.id;
+          const isOverwritten = tool.isOverwritten ?? false;
 
           return (
             <div
               key={tool.id}
               className={`rounded-lg p-4 sm:p-5 flex flex-col justify-between transition-all duration-150 bg-white dark:bg-zinc-900 border shadow-xs ${
-                tool.isIntercepted
-                  ? 'border-cyan-500/60 dark:border-cyan-500/60 ring-1 ring-cyan-500/20'
-                  : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
+                isOverwritten
+                  ? 'border-amber-500/60 dark:border-amber-500/60 ring-1 ring-amber-500/20'
+                  : tool.isIntercepted
+                    ? 'border-cyan-500/60 dark:border-cyan-500/60 ring-1 ring-cyan-500/20'
+                    : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
               }`}
             >
               <div>
@@ -177,9 +169,11 @@ export const InterceptorPanel: React.FC = () => {
                   <div className="flex items-center gap-3">
                     <div
                       className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${
-                        tool.isIntercepted
-                          ? 'bg-sky-600 dark:bg-cyan-600 text-white shadow-xs shadow-cyan-500/30'
-                          : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300'
+                        isOverwritten
+                          ? 'bg-amber-600 dark:bg-amber-600 text-white shadow-xs shadow-amber-500/30'
+                          : tool.isIntercepted
+                            ? 'bg-sky-600 dark:bg-cyan-600 text-white shadow-xs shadow-cyan-500/30'
+                            : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300'
                       }`}
                     >
                       {tool.id === 'claude_code' ? (
@@ -219,48 +213,33 @@ export const InterceptorPanel: React.FC = () => {
                   />
                 </div>
 
-                {/* 冲突警告 */}
-                {tool.conflict && (
-                  <div className="mb-2.5 p-2.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 space-y-2">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-                      <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400 flex-1">
-                        {tool.conflict}
-                      </p>
-                    </div>
-                    {tool.thirdParty && (
-                      <div className="flex items-center gap-2 pt-1 border-t border-amber-200/40 dark:border-amber-800/40">
-                        <button
-                          type="button"
-                          onClick={() => setConflictConfirmTarget(tool)}
-                          disabled={isToggling}
-                          className="text-[11px] font-medium text-amber-800 dark:text-amber-300 bg-amber-100/80 dark:bg-amber-900/50 hover:bg-amber-200/80 dark:hover:bg-amber-800/60 px-2 py-1 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
-                        >
-                          <ArrowRightLeft className="w-3 h-3" />
-                          协同接入为服务商
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 {/* 状态行 */}
                 <div className="py-2 px-3 rounded-md bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">
                   <span className="text-zinc-400">状态</span>
                   <span className="font-semibold flex items-center gap-1.5">
                     <span
                       className={`w-1.5 h-1.5 rounded-full ${
-                        tool.isIntercepted ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'
+                        isOverwritten
+                          ? 'bg-amber-500 animate-pulse'
+                          : tool.isIntercepted
+                            ? 'bg-emerald-500 animate-pulse'
+                            : 'bg-zinc-400'
                       }`}
                     />
                     <span
                       className={
-                        tool.isIntercepted
-                          ? 'text-cyan-600 dark:text-cyan-400'
-                          : 'text-zinc-500 dark:text-zinc-400'
+                        isOverwritten
+                          ? 'text-amber-600 dark:text-amber-400 font-medium'
+                          : tool.isIntercepted
+                            ? 'text-cyan-600 dark:text-cyan-400'
+                            : 'text-zinc-500 dark:text-zinc-400'
                       }
                     >
-                      {tool.isIntercepted ? `已接管 (:16888)` : '官方直连'}
+                      {isOverwritten
+                        ? '外部改写覆盖 (争夺暂停)'
+                        : tool.isIntercepted
+                          ? `已接管 (:16888)`
+                          : '官方直连'}
                     </span>
                   </span>
                 </div>
@@ -269,6 +248,23 @@ export const InterceptorPanel: React.FC = () => {
                 <div className="text-[11px] font-mono text-zinc-400 truncate" title={tool.configPath}>
                   {tool.configPath}
                 </div>
+
+                {/* 外部篡改争夺小提示条 */}
+                {isOverwritten && (
+                  <div className="mt-2.5 p-2 rounded-md bg-amber-50/90 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/40 text-[11px] text-amber-900 dark:text-amber-300 flex items-center justify-between gap-2">
+                    <span className="truncate flex items-center gap-1 text-[11px]">
+                      <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                      第三方工具写入冲突
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setConflictConfirmTarget(tool)}
+                      className="text-amber-700 dark:text-amber-300 underline font-medium hover:text-amber-950 dark:hover:text-amber-100 shrink-0 cursor-pointer text-[10px]"
+                    >
+                      解决冲突
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -321,9 +317,9 @@ export const InterceptorPanel: React.FC = () => {
         open={conflictConfirmTarget !== null}
         target={conflictConfirmTarget}
         busy={togglingId !== null}
+        hasEnabledProviders={hasEnabledProviders}
         onClose={() => setConflictConfirmTarget(null)}
-        onImportAndToggle={handleImportAndToggle}
-        onJustToggle={handleJustToggle}
+        onConfirmTakeover={handleConfirmTakeover}
       />
     </div>
   );

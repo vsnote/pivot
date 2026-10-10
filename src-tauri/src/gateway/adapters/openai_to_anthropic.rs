@@ -87,6 +87,50 @@ pub fn convert_openai_req_to_anthropic(
             .collect()
     });
 
+    let thinking = if let Some(ref effort) = req.reasoning_effort {
+        match effort.as_str() {
+            "none" => None,
+            "low" => Some(AnthropicThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: Some(2048),
+            }),
+            "high" => Some(AnthropicThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: Some(16384),
+            }),
+            "xhigh" | "max" => Some(AnthropicThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: Some(32768),
+            }),
+            _ => Some(AnthropicThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: Some(8192),
+            }),
+        }
+    } else if target_model.contains("thinking") {
+        Some(AnthropicThinkingConfig {
+            thinking_type: "enabled".to_string(),
+            budget_tokens: Some(8192),
+        })
+    } else {
+        None
+    };
+
+    let (temperature, max_tokens) = if let Some(ref th) = thinking {
+        let budget = th.budget_tokens.unwrap_or(8192);
+        let max_tok = req
+            .max_completion_tokens
+            .or(req.max_tokens)
+            .unwrap_or(4096)
+            .max(budget + 4096);
+        (None, Some(max_tok))
+    } else {
+        (
+            req.temperature,
+            req.max_completion_tokens.or(req.max_tokens).or(Some(4096)),
+        )
+    };
+
     AnthropicMessageRequest {
         model: target_model.to_string(),
         messages: anthropic_messages,
@@ -95,12 +139,12 @@ pub fn convert_openai_req_to_anthropic(
         } else {
             Some(Value::String(system_text))
         },
-        max_tokens: req.max_completion_tokens.or(req.max_tokens).or(Some(4096)),
-        temperature: req.temperature,
+        max_tokens,
+        temperature,
         tools: anthropic_tools,
         tool_choice: req.tool_choice.clone(),
         stream: req.stream,
-        thinking: None,
+        thinking,
         metadata: None,
     }
 }

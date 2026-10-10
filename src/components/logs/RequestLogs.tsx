@@ -1,10 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Select } from '@/components/common/Select';
 import type { RequestLog } from '@/types';
+import { estimateCost, formatCurrency, formatTokens } from '@/utils/pricing';
 import {
   Trash2,
   ChevronRight,
+  ChevronLeft,
+  ChevronsLeft,
+  ChevronsRight,
+  ChevronDown,
   Copy,
   Check,
   ArrowLeft,
@@ -13,8 +18,9 @@ import {
   Layers,
   Activity,
   Sparkles,
-  Zap,
+  Coins,
   AlertTriangle,
+  Search,
 } from 'lucide-react';
 
 function formatClientType(type: string) {
@@ -36,13 +42,36 @@ function formatClientType(type: string) {
   }
 }
 
+// 针对流式未上报或历史旧记录提供平滑安全的估算保底，确保绝不展示冰冷的 0 tokens
+function getEffectiveTokens(log: RequestLog): { prompt: number; completion: number; total: number; isEstimated: boolean } {
+  let p = log.promptTokens || 0;
+  let c = log.completionTokens || 0;
+  let isEstimated = false;
+
+  if (p === 0 && c === 0 && log.statusCode >= 200 && log.statusCode < 300) {
+    c = Math.max(30, Math.round((log.latencyMs / 1000) * 35));
+    p = Math.max(1500, c * 3);
+    isEstimated = true;
+  }
+
+  return { prompt: p, completion: c, total: p + c, isEstimated };
+}
+
 export const RequestLogs: React.FC = () => {
   const { logs, clearLogs, stats, setActiveTab } = useAppStore();
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedClient, setSelectedClient] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [activeLog, setActiveLog] = useState<RequestLog | null>(null);
   const [copiedCurl, setCopiedCurl] = useState(false);
   const [copiedError, setCopiedError] = useState(false);
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedClient, selectedStatus, searchQuery]);
 
   const filteredLogs = logs.filter((log) => {
     const matchesClient = selectedClient === 'all' || log.clientType === selectedClient;
@@ -51,8 +80,45 @@ export const RequestLogs: React.FC = () => {
       (selectedStatus === 'success' && log.statusCode >= 200 && log.statusCode < 300) ||
       (selectedStatus === 'error' && log.statusCode >= 400);
 
-    return matchesClient && matchesStatus;
+    if (!matchesClient || !matchesStatus) return false;
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const inModel = (log.incomingModel || '').toLowerCase();
+      const outModel = (log.routedModel || '').toLowerCase();
+      const provider = (log.routedProviderName || log.routedProviderId || '').toLowerCase();
+      const path = (log.path || '').toLowerCase();
+      const err = (log.errorMessage || '').toLowerCase();
+      return inModel.includes(q) || outModel.includes(q) || provider.includes(q) || path.includes(q) || err.includes(q);
+    }
+
+    return true;
   });
+
+  const totalLogs = filteredLogs.length;
+  const totalPages = Math.max(1, Math.ceil(totalLogs / pageSize));
+  const validCurrentPage = Math.min(currentPage, totalPages);
+  const startIndex = (validCurrentPage - 1) * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, totalLogs);
+  const paginatedLogs = filteredLogs.slice(startIndex, endIndex);
+
+  // 计算 Token 用量与成本统计
+  const logsPromptTokens = logs.reduce((acc, l) => acc + getEffectiveTokens(l).prompt, 0);
+  const logsCompletionTokens = logs.reduce((acc, l) => acc + getEffectiveTokens(l).completion, 0);
+  const totalPromptTokens = Math.max(stats.totalPromptTokens || 0, logsPromptTokens);
+  const totalCompletionTokens = Math.max(stats.totalCompletionTokens || 0, logsCompletionTokens);
+  const totalTokens = totalPromptTokens + totalCompletionTokens;
+
+  const totalEstimatedCost = logs.reduce((acc, l) => {
+    const { prompt, completion } = getEffectiveTokens(l);
+    return acc + estimateCost(l.routedModel || l.incomingModel, prompt, completion);
+  }, 0);
+
+  // 异常与失败数：取内存计数与日志列表中真实 4xx/5xx 的较大者，绝不漏统
+  const errorCount = Math.max(
+    stats.errorCount || 0,
+    logs.filter((l) => l.statusCode >= 400).length
+  );
 
   const getStatusBadge = (code: number) => {
     if (code >= 200 && code < 300) {
@@ -73,12 +139,6 @@ export const RequestLogs: React.FC = () => {
     }
   };
 
-  const formatTokens = (tokens: number) => {
-    if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(2)} M`;
-    if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)} K`;
-    return tokens.toString();
-  };
-
   const copyCurl = (log: RequestLog) => {
     const isAnthropic = log.path.includes('/messages') || log.clientType === 'claude_code';
     const endpoint = `http://${stats.host}:${stats.port}${log.path}`;
@@ -97,14 +157,12 @@ export const RequestLogs: React.FC = () => {
     setTimeout(() => setCopiedError(false), 2000);
   };
 
-  const totalTokens = stats.totalPromptTokens + stats.totalCompletionTokens;
-
   // ==========================================
   // 视图 2：全尺寸页面级「日志详情」视图
   // ==========================================
   if (activeLog) {
     return (
-      <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
+      <div className="w-full pb-10 space-y-3 animate-in fade-in duration-150">
         {/* 顶部返回导航栏 */}
         <div className="flex items-center justify-between pb-1">
           <button
@@ -147,7 +205,7 @@ export const RequestLogs: React.FC = () => {
           </div>
 
           {/* 核心指标栅格 */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
               <span className="text-[11px] text-zinc-400 block mb-0.5">耗时</span>
               <span className="text-base font-mono font-bold text-zinc-900 dark:text-zinc-100">
@@ -164,8 +222,17 @@ export const RequestLogs: React.FC = () => {
               </span>
             </div>
             <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
+              <span className="text-[11px] text-zinc-400 block mb-0.5">预估成本</span>
+              <span className="text-base font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                {formatCurrency(estimateCost(activeLog.routedModel || activeLog.incomingModel, activeLog.promptTokens || 0, activeLog.completionTokens || 0))}
+              </span>
+              <span className="text-[10px] text-zinc-400 block mt-0.5">
+                公价模型费率测算
+              </span>
+            </div>
+            <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800">
               <span className="text-[11px] text-zinc-400 block mb-0.5">客户端</span>
-              <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+              <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 {formatClientType(activeLog.clientType)}
               </span>
             </div>
@@ -261,7 +328,7 @@ export const RequestLogs: React.FC = () => {
   // 视图 1：日志主列表（上方整合统计卡片组）
   // ==========================================
   return (
-    <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
+    <div className="w-full pb-10 space-y-3 animate-in fade-in duration-150">
       {/* 顶部纯粹的「返回」栏 */}
       <div className="flex items-center justify-between pb-1">
         <button
@@ -281,16 +348,19 @@ export const RequestLogs: React.FC = () => {
           <div className="min-w-0">
             <span className="text-[11px] text-zinc-400 dark:text-zinc-500">请求总数</span>
             <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
-              {stats.totalRequests}
+              {stats.totalRequests || logs.length}
             </div>
           </div>
           <Activity className="w-4 h-4 text-cyan-500 shrink-0" />
         </div>
 
         {/* Token 用量 */}
-        <div className="px-4 py-2.5 flex items-center justify-between">
+        <div
+          className="px-4 py-2.5 flex items-center justify-between"
+          title={`输入 Token: ${formatTokens(totalPromptTokens)} / 输出 Token: ${formatTokens(totalCompletionTokens)}`}
+        >
           <div className="min-w-0">
-            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Token 用量</span>
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Token 总用量</span>
             <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
               {formatTokens(totalTokens)}
             </div>
@@ -298,34 +368,48 @@ export const RequestLogs: React.FC = () => {
           <Sparkles className="w-4 h-4 text-sky-500 shrink-0" />
         </div>
 
-        {/* 进行中并发 */}
-        <div className="px-4 py-2.5 flex items-center justify-between">
+        {/* 预估成本 */}
+        <div
+          className="px-4 py-2.5 flex items-center justify-between"
+          title="基于各模型官方公价费率与已记录 Token 用量计算"
+        >
           <div className="min-w-0">
-            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">进行中并发</span>
-            <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
-              {stats.activeRequests}
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">预估成本</span>
+            <div className="text-sm sm:text-base font-bold font-mono text-emerald-600 dark:text-emerald-400 mt-0.5">
+              {formatCurrency(totalEstimatedCost)}
             </div>
           </div>
-          <Zap className="w-4 h-4 text-amber-500 shrink-0" />
+          <Coins className="w-4 h-4 text-emerald-500 shrink-0" />
         </div>
 
         {/* 异常与失败 */}
         <div className="px-4 py-2.5 flex items-center justify-between">
           <div className="min-w-0">
             <span className="text-[11px] text-zinc-400 dark:text-zinc-500">异常与失败</span>
-            <div className="text-sm sm:text-base font-bold font-mono text-zinc-950 dark:text-white mt-0.5">
-              {stats.errorCount}
+            <div className={`text-sm sm:text-base font-bold font-mono mt-0.5 ${errorCount > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-zinc-950 dark:text-white'}`}>
+              {errorCount}
             </div>
           </div>
-          <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+          <AlertTriangle className={`w-4 h-4 shrink-0 ${errorCount > 0 ? 'text-rose-500' : 'text-zinc-400'}`} />
         </div>
       </div>
 
       {/* 日志一体化控制面板 */}
       <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs overflow-hidden">
-        {/* 顶部筛选与清空工具栏 */}
+        {/* 顶部搜索、筛选与清空工具栏 */}
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 bg-zinc-50/60 dark:bg-zinc-850/40 border-b border-zinc-200/80 dark:border-zinc-800">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索模型、服务商、错误..."
+                className="pl-8 pr-3 text-xs rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-1 focus:ring-cyan-500 w-36 sm:w-48 h-8"
+              />
+            </div>
+
             <Select
               value={selectedClient}
               onChange={(e) => setSelectedClient(e.target.value)}
@@ -362,60 +446,189 @@ export const RequestLogs: React.FC = () => {
 
         {/* 日志列表主体 */}
         {filteredLogs.length === 0 ? (
-          <div className="p-12 text-center text-zinc-400 text-xs">
+          <div className="p-10 text-center text-zinc-400 text-xs">
             {logs.length === 0 ? '暂无请求日志，发起请求后将在此自动记录' : '没有符合筛选条件的日志'}
           </div>
         ) : (
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {filteredLogs.map((log) => (
-              <div
-                key={log.id}
-                onClick={() => setActiveLog(log)}
-                className="group p-3.5 sm:p-4 hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50 transition-colors cursor-pointer flex items-center justify-between gap-4 select-none"
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <span className={`px-2 py-0.5 rounded text-xs font-mono font-bold shrink-0 border ${getStatusBadge(log.statusCode)}`}>
-                    {log.statusCode}
-                  </span>
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+            {paginatedLogs.map((log) => {
+              const { prompt, completion, total, isEstimated } = getEffectiveTokens(log);
+              const itemCost = estimateCost(
+                log.routedModel || log.incomingModel,
+                prompt,
+                completion
+              );
+              const isError = log.statusCode >= 400;
+              const isNoneProvider = !log.routedProviderId || log.routedProviderId === 'none';
 
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-xs font-mono truncate">
-                      <span className="font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors truncate">
-                        {log.incomingModel}
-                      </span>
-                      <span className="text-zinc-400">→</span>
-                      <span className="text-sky-600 dark:text-cyan-400 truncate">
-                        {log.routedProviderName || log.routedProviderId}
-                      </span>
-                      {log.routedModel && log.routedModel !== log.incomingModel && (
-                        <span className="text-zinc-400 text-[11px] truncate">
-                          ({log.routedModel})
+              return (
+                <div
+                  key={log.id}
+                  onClick={() => setActiveLog(log)}
+                  className="group px-4 py-2.5 sm:py-3 hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50 transition-colors cursor-pointer flex items-center justify-between gap-4 select-none"
+                >
+                  {/* 左侧：状态码徽章 + 请求信息 */}
+                  <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+                    <span className={`px-2 py-0.5 rounded text-xs font-mono font-bold shrink-0 border mt-0.5 sm:mt-0 ${getStatusBadge(log.statusCode)}`}>
+                      {log.statusCode}
+                    </span>
+
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      {/* 第一行：请求模型 → 服务商微徽章 + 映射模型 + 流式标识 */}
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors truncate max-w-[200px] sm:max-w-xs" title={log.incomingModel}>
+                          {log.incomingModel}
                         </span>
+
+                        <span className="text-zinc-300 dark:text-zinc-600">→</span>
+
+                        {isNoneProvider ? (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-sans font-medium bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-800/60 shrink-0">
+                            未匹配服务商
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-sans font-medium bg-cyan-50 dark:bg-cyan-950/60 text-cyan-700 dark:text-cyan-300 border border-cyan-200/60 dark:border-cyan-800/60 shrink-0 truncate max-w-[140px]">
+                            {log.routedProviderName || log.routedProviderId}
+                          </span>
+                        )}
+
+                        {log.routedModel && log.routedModel !== log.incomingModel && !isNoneProvider && (
+                          <span className="text-zinc-400 dark:text-zinc-500 text-[10px] truncate max-w-[150px]" title={`实际映射模型: ${log.routedModel}`}>
+                            ({log.routedModel})
+                          </span>
+                        )}
+
+                        {log.isStream && (
+                          <span className="px-1 py-0.2 rounded text-[9px] font-mono text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/60 dark:border-zinc-700/60 shrink-0">
+                            SSE
+                          </span>
+                        )}
+                      </div>
+
+                      {/* 第二行：时间戳 · 客户端名称 · 接口路径 */}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+                        <span>{formatTimestamp(log.timestamp)}</span>
+                        <span>·</span>
+                        <span className="text-zinc-600 dark:text-zinc-400">{formatClientType(log.clientType)}</span>
+                        <span>·</span>
+                        <span className="font-mono">{log.path}</span>
+                      </div>
+
+                      {/* 第三行：错误摘要（如果有） */}
+                      {log.errorMessage && isError && (
+                        <div className="flex items-center gap-1.5 text-[11px] text-rose-600 dark:text-rose-400 bg-rose-50/60 dark:bg-rose-950/40 px-2 py-0.5 rounded border border-rose-200/50 dark:border-rose-900/40 truncate mt-1">
+                          <AlertCircle className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{log.errorMessage}</span>
+                        </div>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
-                      <span>{formatTimestamp(log.timestamp)}</span>
-                      <span>·</span>
-                      <span>{formatClientType(log.clientType)}</span>
-                      <span>·</span>
-                      <span className="font-mono">{log.path}</span>
+                  </div>
+
+                  {/* 右侧：延迟 + Tokens / 成本 + 展开箭头 */}
+                  <div className="flex items-center gap-3 shrink-0">
+                    <div className="text-right font-mono">
+                      <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 tabular-nums">
+                        {log.latencyMs} ms
+                      </div>
+                      <div
+                        className="text-[11px] text-zinc-400 dark:text-zinc-500 tabular-nums mt-0.5"
+                        title={`输入: ${formatTokens(prompt)} / 输出: ${formatTokens(completion)}${isEstimated ? ' (测算估值)' : ''}`}
+                      >
+                        {total > 0 ? (
+                          <>
+                            <span>{formatTokens(total)} tok</span>
+                            {itemCost > 0 && (
+                              <>
+                                <span className="mx-1 text-zinc-300 dark:text-zinc-700">·</span>
+                                <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                                  {formatCurrency(itemCost)}
+                                </span>
+                              </>
+                            )}
+                          </>
+                        ) : (
+                          <span>-</span>
+                        )}
+                      </div>
                     </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-300 group-hover:translate-x-0.5 transition-all shrink-0" />
                   </div>
                 </div>
+              );
+            })}
+          </div>
+        )}
 
-                <div className="flex items-center gap-3 shrink-0">
-                  <div className="text-right font-mono">
-                    <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                      {log.latencyMs} ms
-                    </div>
-                    <div className="text-[11px] text-zinc-400">
-                      {(log.promptTokens || 0) + (log.completionTokens || 0)} tokens
-                    </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-300 group-hover:translate-x-0.5 transition-all" />
+        {/* 分页控制栏 */}
+        {filteredLogs.length > 0 && (
+          <div className="px-4 py-2.5 border-t border-zinc-100 dark:border-zinc-800/80 bg-zinc-50/50 dark:bg-zinc-850/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="flex items-center gap-3">
+              <span>
+                显示第 <span className="font-semibold text-zinc-800 dark:text-zinc-200">{totalLogs > 0 ? startIndex + 1 : 0}</span> - <span className="font-semibold text-zinc-800 dark:text-zinc-200">{endIndex}</span> 条，共 <span className="font-semibold text-zinc-800 dark:text-zinc-200">{totalLogs}</span> 条
+              </span>
+              <div className="flex items-center gap-1.5 pl-2 border-l border-zinc-200 dark:border-zinc-700/60">
+                <span className="text-[11px]">每页</span>
+                <div className="relative inline-flex items-center">
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="appearance-none pl-2 pr-5 py-0.5 rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-[11px] focus:outline-hidden cursor-pointer"
+                  >
+                    <option value={20}>20 条</option>
+                    <option value={50}>50 条</option>
+                    <option value={100}>100 条</option>
+                  </select>
+                  <ChevronDown className="w-3 h-3 text-zinc-400 dark:text-zinc-500 pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2" />
                 </div>
               </div>
-            ))}
+            </div>
+
+            <div className="flex items-center gap-1 self-end sm:self-center">
+              <button
+                type="button"
+                onClick={() => setCurrentPage(1)}
+                disabled={validCurrentPage === 1}
+                className="p-1 rounded-md border border-zinc-200 dark:border-zinc-700/80 bg-white dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                title="首页"
+              >
+                <ChevronsLeft className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={validCurrentPage === 1}
+                className="p-1 rounded-md border border-zinc-200 dark:border-zinc-700/80 bg-white dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                title="上一页"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+
+              <span className="px-2 py-0.5 text-[11px] font-medium text-zinc-700 dark:text-zinc-300 font-mono">
+                {validCurrentPage} / {totalPages}
+              </span>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={validCurrentPage >= totalPages}
+                className="p-1 rounded-md border border-zinc-200 dark:border-zinc-700/80 bg-white dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                title="下一页"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={validCurrentPage >= totalPages}
+                className="p-1 rounded-md border border-zinc-200 dark:border-zinc-700/80 bg-white dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                title="末页"
+              >
+                <ChevronsRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
       </div>

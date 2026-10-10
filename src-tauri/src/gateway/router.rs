@@ -163,7 +163,20 @@ pub fn plan_route(
     // 1. Prefix routing (e.g. "openai/gpt-4o", "anthropic/claude-3-7-sonnet"):
     // the model name after the prefix is forwarded as requested.
     if let Some((prefix, sub_model)) = incoming_model.split_once('/') {
-        if let Some(provider) = provider_map.get(prefix.to_lowercase().as_str()) {
+        let prefix_lower = prefix.to_lowercase();
+        let matched = provider_map
+            .get(prefix_lower.as_str())
+            .copied()
+            .or_else(|| {
+                active_providers
+                    .iter()
+                    .find(|p| {
+                        p.name.to_lowercase() == prefix_lower
+                            || p.name.to_lowercase().replace(' ', "-") == prefix_lower
+                    })
+                    .copied()
+            });
+        if let Some(provider) = matched {
             return Ok(RoutePlan {
                 primary: planned(provider, sub_model),
                 fallbacks: automatic_fallbacks(&active_providers, &provider.id, sub_model),
@@ -573,6 +586,17 @@ mod tests {
 
         assert_eq!(plan.primary.provider_id, "openrouter");
         assert_eq!(plan.primary.model, "anthropic/claude-3.7-sonnet");
+    }
+
+    #[test]
+    fn prefix_routing_matches_provider_name_case_insensitively() {
+        let mut p = provider("prov_uuid_12345", &["deepseek-v4-pro"], 10);
+        p.name = "DeepSeek".to_string();
+        let providers = vec![p];
+
+        let plan = plan_route("deepseek/deepseek-v4-pro", &providers, &[]).unwrap();
+        assert_eq!(plan.primary.provider_id, "prov_uuid_12345");
+        assert_eq!(plan.primary.model, "deepseek-v4-pro");
     }
 
     #[test]

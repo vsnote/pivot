@@ -11,7 +11,6 @@ import {
   Zap,
   LoaderCircle,
   Boxes,
-  AlertTriangle,
   ChevronRight,
 } from 'lucide-react';
 
@@ -234,14 +233,15 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
 ];
 
 function GatewayQuickBar() {
-  const { interceptors, toggleInterceptor, importThirdPartyProvider } = useAppStore(
+  const { interceptors, toggleInterceptor, providers } = useAppStore(
     useShallow((state) => ({
       interceptors: state.interceptors,
       toggleInterceptor: state.toggleInterceptor,
-      importThirdPartyProvider: state.importThirdPartyProvider,
+      providers: state.providers,
     })),
   );
 
+  const hasEnabledProviders = providers.some((p) => p.enabled);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [conflictConfirmTarget, setConflictConfirmTarget] = useState<InterceptorStatus | null>(null);
   const clientList = interceptors.length > 0 ? interceptors : DEFAULT_INTERCEPTORS;
@@ -265,8 +265,8 @@ function GatewayQuickBar() {
     e.stopPropagation();
     if (togglingId) return;
 
-    // 若尝试开启，且检测到第三方管理工具冲突（如 CC Switch），先弹窗提醒用户确认
-    if (!client.isIntercepted && client.conflict) {
+    // 若尝试开启或处于被第三方改写争夺状态，且检测到冲突，先弹窗提示
+    if ((!client.isIntercepted || client.isOverwritten) && client.conflict) {
       setConflictConfirmTarget(client);
       return;
     }
@@ -274,26 +274,10 @@ function GatewayQuickBar() {
     await doToggle(client.id, !client.isIntercepted);
   };
 
-  const handleImportAndToggle = async (target: InterceptorStatus) => {
-    if (togglingId) return;
-    setTogglingId(target.id);
-    try {
-      await importThirdPartyProvider(target.id);
-      setConflictConfirmTarget(null);
-    } catch {
-      // 全局处理
-    } finally {
-      setTogglingId(null);
-    }
-  };
-
-  const handleJustToggle = async (target: InterceptorStatus) => {
+  const handleConfirmTakeover = async (target: InterceptorStatus) => {
     setConflictConfirmTarget(null);
     await doToggle(target.id, true);
   };
-
-  // 收集当前已开启接管、且仍存在配置冲突的客户端
-  const activeConflicts = clientList.filter((c) => c.isIntercepted && c.conflict);
 
   return (
     <>
@@ -326,9 +310,14 @@ function GatewayQuickBar() {
                   'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30';
               }
 
-              const title = `${client.name}: ${
+              const isOverwritten = client.isOverwritten ?? false;
+              let title = `${client.name}: ${
                 active ? '已接管至本地网关 (点击恢复官方配置)' : '未接管 (点击一键配置代理)'
-              }${client.conflict ? `\n[冲突提示] ${client.conflict}` : ''}`;
+              }`;
+              if (isOverwritten) {
+                title = `${client.name}: 检测到配置已被第三方工具覆盖修改 (点击解决冲突)`;
+                activeClass = 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 ring-1 ring-amber-500/30';
+              }
 
               return (
                 <button
@@ -337,9 +326,11 @@ function GatewayQuickBar() {
                   disabled={isBusy}
                   onClick={(e) => handleToggleClient(client, e)}
                   className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-all duration-150 cursor-pointer ${
-                    active
+                    isOverwritten
                       ? `${activeClass} shadow-2xs`
-                      : 'bg-zinc-100/70 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400 border-transparent hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/60'
+                      : active
+                        ? `${activeClass} shadow-2xs`
+                        : 'bg-zinc-100/70 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400 border-transparent hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/60'
                   }`}
                   title={title}
                 >
@@ -351,17 +342,11 @@ function GatewayQuickBar() {
                   <span className="text-[11px] font-mono">
                     {label}
                   </span>
-                  {client.conflict && (
-                    <span
-                      title={client.conflict}
-                      className="flex items-center text-amber-500 dark:text-amber-400"
-                    >
-                      <AlertTriangle className="w-3 h-3" />
-                    </span>
-                  )}
-                  {active && (
+                  {isOverwritten ? (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 ring-2 ring-white dark:ring-zinc-900 animate-pulse" />
+                  ) : active ? (
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-zinc-900" />
-                  )}
+                  ) : null}
                 </button>
               );
             })}
@@ -369,38 +354,14 @@ function GatewayQuickBar() {
         </div>
       </div>
 
-      {/* 已接管状态下的冲突提示横幅 */}
-      {activeConflicts.map((c) => (
-        <div
-          key={c.id}
-          className="flex items-start justify-between gap-2 px-4 py-2.5 bg-amber-50/90 dark:bg-amber-950/30 border-b border-amber-200/70 dark:border-amber-900/50 text-xs text-amber-800 dark:text-amber-300 animate-in fade-in"
-        >
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-            <div className="leading-relaxed">
-              <span className="font-semibold">{c.name}：</span>
-              {c.conflict}
-            </div>
-          </div>
-          <button
-            type="button"
-            disabled={togglingId !== null}
-            onClick={() => handleToggleClient(c, { stopPropagation: () => {} } as React.MouseEvent)}
-            className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 transition-colors shrink-0 cursor-pointer"
-          >
-            一键重新接管
-          </button>
-        </div>
-      ))}
-
-      {/* 开启前的冲突拦截确认与级联导入弹窗 */}
+      {/* 开启前的冲突拦截确认与透明接管弹窗 */}
       <AgentConflictDialog
         open={conflictConfirmTarget !== null}
         target={conflictConfirmTarget}
         busy={togglingId !== null}
+        hasEnabledProviders={hasEnabledProviders}
         onClose={() => setConflictConfirmTarget(null)}
-        onImportAndToggle={handleImportAndToggle}
-        onJustToggle={handleJustToggle}
+        onConfirmTakeover={handleConfirmTakeover}
       />
     </>
   );
@@ -431,7 +392,7 @@ export function ProviderList() {
             <p className="text-xs text-zinc-400">载入配置中…</p>
           </div>
         ) : providers.length === 0 ? (
-          <div className="p-8 text-center">
+          <div className="p-10 text-center">
             <div className="w-12 h-12 rounded-lg bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 flex items-center justify-center mx-auto mb-3">
               <Boxes className="w-6 h-6" />
             </div>
