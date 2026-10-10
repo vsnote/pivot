@@ -18,10 +18,27 @@ use std::sync::Arc;
 const DEFAULT_PORT: u16 = 16888;
 
 fn get_db_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".omniswitch")
-        .join("omniswitch.db")
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let new_dir = home.join(".pivot");
+    let new_db = new_dir.join("pivot.db");
+
+    if !new_db.exists() {
+        let legacy_db = home.join(".omniswitch").join("omniswitch.db");
+        if legacy_db.exists() {
+            let _ = std::fs::create_dir_all(&new_dir);
+            let _ = std::fs::copy(&legacy_db, &new_db);
+            let legacy_wal = home.join(".omniswitch").join("omniswitch.db-wal");
+            let legacy_shm = home.join(".omniswitch").join("omniswitch.db-shm");
+            if legacy_wal.exists() {
+                let _ = std::fs::copy(legacy_wal, new_dir.join("pivot.db-wal"));
+            }
+            if legacy_shm.exists() {
+                let _ = std::fs::copy(legacy_shm, new_dir.join("pivot.db-shm"));
+            }
+        }
+    }
+
+    new_db
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

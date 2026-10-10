@@ -5,7 +5,7 @@ use tauri::{
 };
 
 pub fn setup_tray(app: &AppHandle, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let show_i = MenuItem::with_id(app, "show", "Open AnyRelay", true, None::<&str>)?;
+    let show_i = MenuItem::with_id(app, "show", "Open Pivot", true, None::<&str>)?;
     let status_i = MenuItem::with_id(
         app,
         "status",
@@ -13,14 +13,14 @@ pub fn setup_tray(app: &AppHandle, port: u16) -> Result<(), Box<dyn std::error::
         false,
         None::<&str>,
     )?;
-    let quit_i = MenuItem::with_id(app, "quit", "Quit AnyRelay", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "Quit Pivot", true, None::<&str>)?;
 
     let menu = Menu::with_items(app, &[&status_i, &show_i, &quit_i])?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip(format!("AnyRelay - Port {}", port))
+        .tooltip(format!("Pivot - Port {}", port))
         .icon_as_template(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {

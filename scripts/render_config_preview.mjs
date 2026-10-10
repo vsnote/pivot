@@ -5,7 +5,7 @@ const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>OmniSwitch - 配置服务商</title>
+  <title>Pivot - 配置服务商</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {

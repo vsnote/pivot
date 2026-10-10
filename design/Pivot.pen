@@ -6,7 +6,7 @@
       "id": "bi8Au",
       "x": 0,
       "y": 0,
-      "name": "00 · OmniSwitch / 设计系统与使用说明",
+      "name": "00 · Pivot / 设计系统与使用说明",
       "theme": {
         "mode": "light"
       },
@@ -20,9 +20,9 @@
         {
           "type": "text",
           "id": "JVnXw",
-          "name": "OmniSwitch  /  Desktop design",
+          "name": "Pivot  /  Desktop design",
           "fill": "$text",
-          "content": "OmniSwitch  /  Desktop design",
+          "content": "Pivot  /  Desktop design",
           "fontFamily": "$font",
           "fontSize": 28,
           "fontWeight": "normal"
@@ -5539,9 +5539,9 @@
                 {
                   "type": "text",
                   "id": "eqG9o",
-                  "name": "OmniSwitch",
+                  "name": "Pivot",
                   "fill": "$text",
-                  "content": "OmniSwitch",
+                  "content": "Pivot",
                   "fontFamily": "$font",
                   "fontSize": 30,
                   "fontWeight": "normal"

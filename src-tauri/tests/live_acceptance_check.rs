@@ -6,12 +6,12 @@
 //! is committed):
 //!
 //! ```text
-//! OMNISWITCH_LIVE_PROXY_URL=http://127.0.0.1:8317/v1 \
-//! OMNISWITCH_LIVE_PROXY_KEY=... \
-//! OMNISWITCH_LIVE_PROXY_MODEL=gemini-3.8-flash-high \
-//! OMNISWITCH_LIVE_EXACT_URL=https://api.deepseek.com/v1 \
-//! OMNISWITCH_LIVE_EXACT_KEY=... \
-//! OMNISWITCH_LIVE_EXACT_MODEL=deepseek-v4-pro \
+//! PIVOT_LIVE_PROXY_URL=http://127.0.0.1:8317/v1 \
+//! PIVOT_LIVE_PROXY_KEY=... \
+//! PIVOT_LIVE_PROXY_MODEL=gemini-3.8-flash-high \
+//! PIVOT_LIVE_EXACT_URL=https://api.deepseek.com/v1 \
+//! PIVOT_LIVE_EXACT_KEY=... \
+//! PIVOT_LIVE_EXACT_MODEL=deepseek-v4-pro \
 //! cargo test --test live_acceptance_check -- --ignored --nocapture
 //! ```
 //!
@@ -20,9 +20,9 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use anyrelay_lib::db::{Database, Provider};
-use anyrelay_lib::gateway::router::RoutingEngine;
-use anyrelay_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
+use pivot_lib::db::{Database, Provider};
+use pivot_lib::gateway::router::RoutingEngine;
+use pivot_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
 const GATEWAY_PORT: u16 = 16897;
 const PROXY_ID: &str = "live-proxy";
@@ -95,18 +95,22 @@ impl Drop for TempDatabase {
 #[ignore = "talks to real upstreams and spends real quota; run explicitly with the env vars in the header"]
 async fn live_acceptance_with_providers_only() {
     let (Some(proxy_url), Some(proxy_key), Some(exact_url), Some(exact_key)) = (
-        env("OMNISWITCH_LIVE_PROXY_URL"),
-        env("OMNISWITCH_LIVE_PROXY_KEY"),
-        env("OMNISWITCH_LIVE_EXACT_URL"),
-        env("OMNISWITCH_LIVE_EXACT_KEY"),
+        env("PIVOT_LIVE_PROXY_URL").or_else(|| env("OMNISWITCH_LIVE_PROXY_URL")),
+        env("PIVOT_LIVE_PROXY_KEY").or_else(|| env("OMNISWITCH_LIVE_PROXY_KEY")),
+        env("PIVOT_LIVE_EXACT_URL").or_else(|| env("OMNISWITCH_LIVE_EXACT_URL")),
+        env("PIVOT_LIVE_EXACT_KEY").or_else(|| env("OMNISWITCH_LIVE_EXACT_KEY")),
     ) else {
-        println!("live check skipped: set OMNISWITCH_LIVE_PROXY_URL/KEY and OMNISWITCH_LIVE_EXACT_URL/KEY");
+        println!("live check skipped: set PIVOT_LIVE_PROXY_URL/KEY and PIVOT_LIVE_EXACT_URL/KEY");
         return;
     };
-    let proxy_model = env("OMNISWITCH_LIVE_PROXY_MODEL").unwrap_or_else(|| "gemini-3.8-flash-high".to_string());
-    let exact_model = env("OMNISWITCH_LIVE_EXACT_MODEL").unwrap_or_else(|| "deepseek-v4-pro".to_string());
+    let proxy_model = env("PIVOT_LIVE_PROXY_MODEL")
+        .or_else(|| env("OMNISWITCH_LIVE_PROXY_MODEL"))
+        .unwrap_or_else(|| "gemini-3.8-flash-high".to_string());
+    let exact_model = env("PIVOT_LIVE_EXACT_MODEL")
+        .or_else(|| env("OMNISWITCH_LIVE_EXACT_MODEL"))
+        .unwrap_or_else(|| "deepseek-v4-pro".to_string());
 
-    let temp = TempDatabase::new("omni-live");
+    let temp = TempDatabase::new("pivot-live");
     let db = Database::new(temp.path.clone()).unwrap();
     assert!(db.get_providers().unwrap().is_empty(), "nothing is installed for the user");
 

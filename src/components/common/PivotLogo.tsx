@@ -1,10 +1,11 @@
 import React from 'react';
 
-export type AnyRelayLogoState = 'active' | 'idle' | 'fault';
+export type PivotLogoState = 'active' | 'idle' | 'fault';
+export type AnyRelayLogoState = PivotLogoState;
 
-export interface AnyRelayLogoProps {
+export interface PivotLogoProps {
   className?: string;
-  state?: AnyRelayLogoState;
+  state?: PivotLogoState;
   /**
    * - 'mark': 纯透明无底板品牌符号 (In-App Brandmark)，适用于导航栏、Header、工具栏；
    * - 'icon': macOS Squircle 规范应用图标 (App Icon)，带圆角底板与环境阴影，适用于桌面、关于面板。
@@ -13,16 +14,17 @@ export interface AnyRelayLogoProps {
   monochrome?: boolean;
   alt?: string;
 }
+export type AnyRelayLogoProps = PivotLogoProps;
 
 /**
- * AnyRelay 专属官方 Logo 组件
+ * Pivot 专属官方 Logo 组件
  * 规范化分离「应用内纯透明品牌标 (Brandmark)」与「系统级 Squircle 应用图标 (App Icon)」
  */
-export const AnyRelayLogo: React.FC<AnyRelayLogoProps> = ({
+export const PivotLogo: React.FC<PivotLogoProps> = ({
   className = 'w-5 h-5',
   state = 'active',
   variant = 'mark',
-  alt = 'AnyRelay Logo',
+  alt = 'Pivot Logo',
 }) => {
   const filterClass =
     state === 'fault'
@@ -63,3 +65,5 @@ export const AnyRelayLogo: React.FC<AnyRelayLogoProps> = ({
     </div>
   );
 };
+
+export const AnyRelayLogo = PivotLogo;

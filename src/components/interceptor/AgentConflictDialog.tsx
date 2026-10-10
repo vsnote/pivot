@@ -84,7 +84,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
               </h2>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                 {isOverwritten
-                  ? '检测到配置已被外部工具修改，可重新接管至 AnyRelay 本地网关。'
+                  ? '检测到配置已被外部工具修改，可重新接管至 Pivot 本地网关。'
                   : '检测到当前已存在代理配置，开启接管将自动备份原设置。'}
               </p>
             </div>
@@ -118,7 +118,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
           </div>
 
           <div className="p-3 rounded-lg bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/60 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
-            开启后，<span className="font-medium text-zinc-800 dark:text-zinc-200">{target.name}</span> 的请求将由 AnyRelay 网关统一按您的分发规则路由至已启用的服务商渠道。原配置文件将自动安全备份，随时可一键恢复。
+            开启后，<span className="font-medium text-zinc-800 dark:text-zinc-200">{target.name}</span> 的请求将由 Pivot 网关统一按您的分发规则路由至已启用的服务商渠道。原配置文件将自动安全备份，随时可一键恢复。
           </div>
 
           {/* 前置检查警示：若当前未配置任何服务商 */}

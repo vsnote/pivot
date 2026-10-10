@@ -277,7 +277,7 @@ mod tests {
             messages: vec![
                 AnthropicMessage {
                     role: "user".to_string(),
-                    content: Value::String("Hello OmniSwitch".to_string()),
+                    content: Value::String("Hello Pivot".to_string()),
                 },
                 AnthropicMessage {
                     role: "assistant".to_string(),

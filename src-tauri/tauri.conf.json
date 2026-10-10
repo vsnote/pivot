@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AnyRelay",
+  "productName": "Pivot",
   "version": "0.1.0",
-  "identifier": "com.anyrelay.desktop",
+  "identifier": "com.pivot.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "AnyRelay",
+        "title": "Pivot",
         "width": 1020,
         "height": 680,
         "minWidth": 800,

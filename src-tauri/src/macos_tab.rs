@@ -23,9 +23,9 @@ pub mod imp {
     static INIT: Once = Once::new();
 
     const TAB_IDS: &[&str] = &["providers", "clients", "routes", "gateway", "logs", "about"];
-    const NAVIGATION_ID: &str = "com.omniswitch.navigation";
-    const ADD_PROVIDER_ID: &str = "com.omniswitch.add-provider";
-    const THEME_ID: &str = "com.omniswitch.theme";
+    const NAVIGATION_ID: &str = "com.pivot.navigation";
+    const ADD_PROVIDER_ID: &str = "com.pivot.add-provider";
+    const THEME_ID: &str = "com.pivot.theme";
 
     extern "C" fn on_segment_changed(_this: &Object, _cmd: Sel, sender: id) {
         unsafe {
@@ -179,7 +179,7 @@ pub mod imp {
         static mut CLS: Option<&'static Class> = None;
         INIT.call_once(|| {
             let superclass = class!(NSObject);
-            let mut decl = ClassDecl::new("OmniSwitchTabDelegate", superclass).unwrap();
+            let mut decl = ClassDecl::new("PivotTabDelegate", superclass).unwrap();
             unsafe {
                 decl.add_method(
                     sel!(onSegmentChanged:),
@@ -229,7 +229,7 @@ pub mod imp {
             let delegate: id = msg_send![delegate_cls, alloc];
             let delegate: id = msg_send![delegate, init];
 
-            let toolbar_identifier = NSString::alloc(nil).init_str("com.omniswitch.toolbar");
+            let toolbar_identifier = NSString::alloc(nil).init_str("com.pivot.toolbar");
             let toolbar: id = msg_send![class!(NSToolbar), alloc];
             let toolbar: id = msg_send![toolbar, initWithIdentifier:toolbar_identifier];
             let _: () = msg_send![toolbar, setDelegate:delegate];

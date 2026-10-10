@@ -145,7 +145,7 @@ pub fn plan_route(
 ) -> Result<RoutePlan, String> {
     let mut active_providers: Vec<&Provider> = providers.iter().filter(|p| p.enabled).collect();
     if active_providers.is_empty() {
-        return Err("No active providers enabled in OmniSwitch".to_string());
+        return Err("No active providers enabled in Pivot".to_string());
     }
     // Candidate order is the provider priority, independent of how the caller
     // happened to hand the list over.
@@ -236,7 +236,7 @@ pub fn plan_route(
         .find(|p| p.is_default)
         .ok_or_else(|| {
             format!(
-                "Model '{}' is not declared by any enabled provider and no default provider is configured; mark one provider as default in OmniSwitch",
+                "Model '{}' is not declared by any enabled provider and no default provider is configured; mark one provider as default in Pivot",
                 incoming_model
             )
         })?;
@@ -606,6 +606,6 @@ mod tests {
 
         let error = plan_route("claude-3-7-sonnet", &[disabled], &[]).unwrap_err();
 
-        assert_eq!(error, "No active providers enabled in OmniSwitch");
+        assert_eq!(error, "No active providers enabled in Pivot");
     }
 }

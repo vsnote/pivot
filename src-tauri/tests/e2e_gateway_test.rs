@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use anyrelay_lib::db::{Database, Provider, RouteRule};
-use anyrelay_lib::gateway::router::RoutingEngine;
-use anyrelay_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
+use pivot_lib::db::{Database, Provider, RouteRule};
+use pivot_lib::gateway::router::RoutingEngine;
+use pivot_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
 static MOCK_CALL_COUNT_A: AtomicUsize = AtomicUsize::new(0);
 static MOCK_CALL_COUNT_B: AtomicUsize = AtomicUsize::new(0);
@@ -126,7 +126,9 @@ async fn mock_upstream_b_handler(Json(body): Json<Value>) -> (StatusCode, axum::
 #[tokio::test]
 async fn test_e2e_gateway_routing_and_failover() {
     // 1. Launch Mock Upstream Servers on ports 17881 and 17882
-    let mock_a_router = Router::new().route("/chat/completions", post(mock_a_upstream_route));
+    let mock_a_router = Router::new()
+        .route("/chat/completions", post(mock_a_upstream_route))
+        .route("/v1/chat/completions", post(mock_a_upstream_route));
     async fn mock_a_upstream_route(body: Json<Value>) -> impl IntoResponse {
         mock_upstream_a_handler(body).await
     }
@@ -135,7 +137,9 @@ async fn test_e2e_gateway_routing_and_failover() {
         axum::serve(listener_a, mock_a_router).await.unwrap();
     });
 
-    let mock_b_router = Router::new().route("/chat/completions", post(mock_b_upstream_route));
+    let mock_b_router = Router::new()
+        .route("/chat/completions", post(mock_b_upstream_route))
+        .route("/v1/chat/completions", post(mock_b_upstream_route));
     async fn mock_b_upstream_route(body: Json<Value>) -> impl IntoResponse {
         mock_upstream_b_handler(body).await
     }
@@ -145,7 +149,7 @@ async fn test_e2e_gateway_routing_and_failover() {
     });
 
     // 2. Setup SQLite database with Primary and Fallback providers
-    let db_path = std::env::temp_dir().join(format!("test_omniswitch_{}.db", uuid::Uuid::new_v4()));
+    let db_path = std::env::temp_dir().join(format!("test_pivot_{}.db", uuid::Uuid::new_v4()));
     let db = Database::new(db_path).unwrap();
 
     let primary_provider = Provider {
@@ -204,7 +208,7 @@ async fn test_e2e_gateway_routing_and_failover() {
 
     db.save_routes(&[route_rule]).unwrap();
 
-    // 3. Start OmniSwitch Gateway on port 16899
+    // 3. Start Pivot Gateway on port 16899
     let router = Arc::new(RoutingEngine::new());
     let http_client = reqwest::Client::new();
     let stats = Arc::new(GatewayStatsInternal::default());
@@ -363,8 +367,8 @@ async fn test_e2e_gateway_routing_and_failover() {
         .json()
         .await
         .unwrap();
-    assert_eq!(final_stats["totalPromptTokens"].as_u64(), Some(40));
-    assert_eq!(final_stats["totalCompletionTokens"].as_u64(), Some(24));
+    assert_eq!(final_stats["totalPromptTokens"].as_u64(), Some(68));
+    assert_eq!(final_stats["totalCompletionTokens"].as_u64(), Some(26));
 
     let logs = db.get_logs(10, 0).unwrap();
     assert_eq!(logs.len(), 3);

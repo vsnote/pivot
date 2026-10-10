@@ -12,9 +12,9 @@ use axum::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use anyrelay_lib::db::{Database, Provider};
-use anyrelay_lib::gateway::router::RoutingEngine;
-use anyrelay_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
+use pivot_lib::db::{Database, Provider};
+use pivot_lib::gateway::router::RoutingEngine;
+use pivot_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
 const ANTIGRAVITY_MODELS: &[&str] = &["gemini-3.8-flash-high"];
 const DEEPSEEK_MODELS: &[&str] = &["deepseek-v4-pro"];
@@ -96,6 +96,14 @@ async fn mock_offline(Json(_body): Json<Value>) -> (StatusCode, axum::response::
     )
 }
 
+macro_rules! mock_chat_app {
+    ($handler:expr) => {
+        Router::new()
+            .route("/chat/completions", post($handler))
+            .route("/v1/chat/completions", post($handler))
+    };
+}
+
 async fn serve(port: u16, app: Router) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -151,7 +159,7 @@ struct TempDatabase {
 impl TempDatabase {
     fn new(label: &str) -> Self {
         Self {
-            path: std::env::temp_dir().join(format!("omni-e2e-{}-{}.db", label, uuid::Uuid::new_v4())),
+            path: std::env::temp_dir().join(format!("pivot-e2e-{}-{}.db", label, uuid::Uuid::new_v4())),
         }
     }
 }
@@ -193,8 +201,8 @@ async fn post_messages(client: &reqwest::Client, port: u16, model: &str, stream:
 /// 验收 1 + 2: Claude Code 的模型名（包括后台小模型）在没有任何规则时也要能通。
 #[tokio::test]
 async fn claude_model_names_without_rules_use_the_default_provider() {
-    serve(17911, Router::new().route("/chat/completions", post(mock_antigravity))).await;
-    serve(17912, Router::new().route("/chat/completions", post(mock_deepseek))).await;
+    serve(17911, mock_chat_app!(mock_antigravity)).await;
+    serve(17912, mock_chat_app!(mock_deepseek)).await;
 
     let db = temp_db("claude-names");
     db.save_provider(&as_default(
@@ -250,8 +258,8 @@ async fn claude_model_names_without_rules_use_the_default_provider() {
 /// 验收 3 + 4: 精确模型名仍然匹配到声明它的服务商。
 #[tokio::test]
 async fn exact_model_names_route_to_the_provider_that_declares_them() {
-    serve(17921, Router::new().route("/chat/completions", post(mock_antigravity))).await;
-    serve(17922, Router::new().route("/chat/completions", post(mock_deepseek))).await;
+    serve(17921, mock_chat_app!(mock_antigravity)).await;
+    serve(17922, mock_chat_app!(mock_deepseek)).await;
 
     let db = temp_db("exact-names");
     db.save_provider(&as_default(
@@ -297,10 +305,10 @@ async fn exact_model_names_route_to_the_provider_that_declares_them() {
 /// 验收 5: 默认服务商不可用时按同名模型切换，attempts 记录每一次尝试。
 #[tokio::test]
 async fn unavailable_default_provider_falls_back_to_the_same_model_name() {
-    serve(17931, Router::new().route("/chat/completions", post(mock_antigravity))).await;
-    serve(17932, Router::new().route("/chat/completions", post(mock_deepseek))).await;
+    serve(17931, mock_chat_app!(mock_antigravity)).await;
+    serve(17932, mock_chat_app!(mock_deepseek)).await;
     // The configured default provider answers with a server error.
-    serve(17933, Router::new().route("/chat/completions", post(mock_offline))).await;
+    serve(17933, mock_chat_app!(mock_offline)).await;
 
     let db = temp_db("default-down");
     // The broken provider holds the catch-all slot ...
@@ -347,7 +355,7 @@ async fn unavailable_default_provider_falls_back_to_the_same_model_name() {
 /// 无默认服务商时返回明确错误，不再静默落到优先级最高的服务商。
 #[tokio::test]
 async fn unknown_model_without_default_provider_reports_a_routing_error() {
-    serve(17941, Router::new().route("/chat/completions", post(mock_deepseek))).await;
+    serve(17941, mock_chat_app!(mock_deepseek)).await;
 
     let db = temp_db("no-default");
     db.save_provider(&provider("deepseek", "DeepSeek", 17941, DEEPSEEK_MODELS, 10))
@@ -380,8 +388,8 @@ async fn unknown_model_without_default_provider_reports_a_routing_error() {
 /// 规则仍然生效并覆盖自动解析（高级用户的逃生舱）。
 #[tokio::test]
 async fn an_explicit_rule_still_overrides_automatic_routing() {
-    serve(17951, Router::new().route("/chat/completions", post(mock_antigravity))).await;
-    serve(17952, Router::new().route("/chat/completions", post(mock_deepseek))).await;
+    serve(17951, mock_chat_app!(mock_antigravity)).await;
+    serve(17952, mock_chat_app!(mock_deepseek)).await;
 
     let db = temp_db("rule-override");
     db.save_provider(&as_default(
@@ -391,7 +399,7 @@ async fn an_explicit_rule_still_overrides_automatic_routing() {
     .unwrap();
     db.save_provider(&provider("deepseek", "DeepSeek", 17952, DEEPSEEK_MODELS, 5))
         .unwrap();
-    db.save_routes(&[anyrelay_lib::db::RouteRule {
+    db.save_routes(&[pivot_lib::db::RouteRule {
         id: "route_deepseek".to_string(),
         pattern: "claude-3-7-*".to_string(),
         target_provider_id: "deepseek".to_string(),

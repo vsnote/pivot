@@ -9,10 +9,10 @@ fn main() {
         use cocoa::foundation::NSString;
         use objc::{class, msg_send, sel, sel_impl};
         let process_info: cocoa::base::id = msg_send![class!(NSProcessInfo), processInfo];
-        let name = NSString::alloc(nil).init_str("AnyRelay");
+        let name = NSString::alloc(nil).init_str("Pivot");
         let _: () = msg_send![process_info, setProcessName: name];
         let _: () = msg_send![name, release];
     }
 
-    anyrelay_lib::run()
+    pivot_lib::run()
 }

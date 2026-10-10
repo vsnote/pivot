@@ -11,7 +11,7 @@ pub fn start_gateway(state: GatewayState, port: u16) {
     state.stats.is_running.store(false, Ordering::Relaxed);
 
     std::thread::Builder::new()
-        .name("omniswitch-gateway".to_string())
+        .name("pivot-gateway".to_string())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -22,7 +22,7 @@ pub fn start_gateway(state: GatewayState, port: u16) {
                 let stats = state.stats.clone();
                 let app = create_gateway_router(state);
                 let addr = SocketAddr::from(([127, 0, 0, 1], port));
-                tracing::info!("Starting OmniSwitch Gateway on http://{}", addr);
+                tracing::info!("Starting Pivot Gateway on http://{}", addr);
 
                 match tokio::net::TcpListener::bind(addr).await {
                     Ok(listener) => {
@@ -30,16 +30,16 @@ pub fn start_gateway(state: GatewayState, port: u16) {
                         if let Ok(mut lock) = stats.start_time.lock() {
                             *lock = Some(std::time::Instant::now());
                         }
-                        tracing::info!("OmniSwitch Gateway running on http://{}", addr);
+                        tracing::info!("Pivot Gateway running on http://{}", addr);
                         if let Err(e) = axum::serve(listener, app).await {
-                            tracing::error!("OmniSwitch Gateway server error: {}", e);
+                            tracing::error!("Pivot Gateway server error: {}", e);
                         }
                         stats.is_running.store(false, Ordering::Relaxed);
                     }
                     Err(e) => {
                         stats.is_running.store(false, Ordering::Relaxed);
                         tracing::error!(
-                            "Failed to bind OmniSwitch Gateway on {}. Is another OmniSwitch instance or service using this port? {}",
+                            "Failed to bind Pivot Gateway on {}. Is another Pivot instance or service using this port? {}",
                             addr,
                             e
                         );

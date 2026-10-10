@@ -400,7 +400,7 @@ export function ProviderList() {
               暂无已配置的服务商
             </h3>
             <p className="text-xs text-zinc-400 mt-1 max-w-sm mx-auto">
-              添加上游 API Key 与可用模型，即可通过 AnyRelay 本地中继分发。
+              添加上游 API Key 与可用模型，即可通过 Pivot 本地中继分发。
             </p>
             <button
               type="button"

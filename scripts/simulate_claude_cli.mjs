@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * OmniSwitch - Claude Code CLI Simulation Test Script
+ * Pivot - Claude Code CLI Simulation Test Script
  *
- * Simulates real Claude Code CLI requests against the local OmniSwitch Gateway (http://127.0.0.1:16888)
+ * Simulates real Claude Code CLI requests against the local Pivot Gateway (http://127.0.0.1:16888)
  * Verifies:
  * 1. Health check & Gateway discovery
  * 2. Cross-protocol message dispatching (Anthropic -> OpenAI / Upstream)
@@ -29,7 +29,7 @@ function log(msg, color = colors.reset) {
 }
 
 async function testHealth() {
-  log('\n[1/4] Checking OmniSwitch Gateway Health...', colors.bold + colors.cyan);
+  log('\n[1/4] Checking Pivot Gateway Health...', colors.bold + colors.cyan);
   try {
     const res = await fetch(`${GATEWAY_URL}/health`);
     if (!res.ok) throw new Error(`Status ${res.status}`);
@@ -38,7 +38,7 @@ async function testHealth() {
     return true;
   } catch (err) {
     log(`  ✗ Gateway connection failed: ${err.message}`, colors.red);
-    log(`    (Ensure OmniSwitch is running on ${GATEWAY_URL})`, colors.yellow);
+    log(`    (Ensure Pivot is running on ${GATEWAY_URL})`, colors.yellow);
     return false;
   }
 }
@@ -70,7 +70,7 @@ async function testClaudeCodeMessage() {
     messages: [
       {
         role: 'user',
-        content: 'Hi OmniSwitch! Please respond with a short confirmation.'
+        content: 'Hi Pivot! Please respond with a short confirmation.'
       }
     ],
     max_tokens: 256,
@@ -187,13 +187,13 @@ async function testClaudeCodeStreaming() {
 
 async function main() {
   log('====================================================', colors.bold + colors.blue);
-  log('  OmniSwitch - Claude Code CLI End-to-End Simulation', colors.bold + colors.magenta);
+  log('  Pivot - Claude Code CLI End-to-End Simulation', colors.bold + colors.magenta);
   log(`  Target Gateway: ${GATEWAY_URL}`, colors.cyan);
   log('====================================================', colors.bold + colors.blue);
 
   const h = await testHealth();
   if (!h) {
-    log('\nNote: Launch OmniSwitch (pnpm tauri dev) to test against a live instance.', colors.yellow);
+    log('\nNote: Launch Pivot (pnpm tauri dev) to test against a live instance.', colors.yellow);
     return;
   }
 

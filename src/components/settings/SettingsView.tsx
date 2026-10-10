@@ -8,7 +8,7 @@ import {
   Palette,
   ShieldCheck,
 } from 'lucide-react';
-import { AnyRelayLogo } from '@/components/common/AnyRelayLogo';
+import { PivotLogo } from '@/components/common/PivotLogo';
 
 export const SettingsView: React.FC = () => {
   const { setActiveTab, theme, setTheme } = useAppStore();
@@ -91,18 +91,18 @@ export const SettingsView: React.FC = () => {
         <div className="px-5 py-3 border-b border-zinc-100 dark:border-zinc-800/80 bg-zinc-50/50 dark:bg-zinc-850/30 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-bold text-zinc-900 dark:text-zinc-100">
             <ShieldCheck className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-            <span>关于 AnyRelay</span>
+            <span>关于 Pivot</span>
           </div>
         </div>
 
         <div className="p-5 flex items-start gap-4">
           <div className="w-11 h-11 flex items-center justify-center shrink-0 mt-0.5">
-            <AnyRelayLogo className="w-full h-full drop-shadow-md" variant="icon" state="active" />
+            <PivotLogo className="w-full h-full drop-shadow-md" variant="icon" state="active" />
           </div>
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-bold text-zinc-950 dark:text-white">
-                AnyRelay
+                Pivot
               </h3>
               <span className="text-[10px] font-mono font-medium px-1.5 py-0.2 rounded-md bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/60 dark:border-cyan-800/60">
                 v0.1.0-alpha

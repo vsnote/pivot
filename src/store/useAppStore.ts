@@ -71,7 +71,7 @@ const isNativeRuntime = () =>
 
 const getInitialTheme = (): 'dark' | 'light' | 'system' => {
   if (typeof window === 'undefined') return 'system';
-  const saved = localStorage.getItem('omni_theme');
+  const saved = localStorage.getItem('pivot_theme') || localStorage.getItem('omni_theme');
   return saved === 'dark' || saved === 'light' ? saved : 'system';
 };
 
@@ -110,7 +110,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   theme: getInitialTheme(),
   setTheme: (theme) => {
     set({ theme });
-    localStorage.setItem('omni_theme', theme);
+    localStorage.setItem('pivot_theme', theme);
   },
 
   stats: {

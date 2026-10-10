@@ -151,7 +151,7 @@ pub fn create_gateway_router(state: GatewayState) -> Router {
 async fn health_check() -> Json<Value> {
     Json(json!({
         "status": "ok",
-        "service": "OmniSwitch Local Gateway",
+        "service": "Pivot Local Gateway",
         "version": "0.1.0"
     }))
 }

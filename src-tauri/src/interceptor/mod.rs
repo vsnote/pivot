@@ -340,7 +340,7 @@ impl InterceptorManager {
     }
 
     /// Extracts the current custom endpoint from the tool's configuration if it points
-    /// to a third-party service (i.e. neither official upstream nor this OmniSwitch gateway).
+    /// to a third-party service (i.e. neither official upstream nor this Pivot gateway).
     fn detect_third_party_endpoint(&self, tool_id: &str) -> Option<String> {
         self.get_third_party_config(tool_id).map(|tp| tp.endpoint)
     }
@@ -350,7 +350,7 @@ impl InterceptorManager {
         let ep = self.detect_third_party_endpoint(tool_id)?;
         if is_overwritten {
             Some(format!(
-                "检测到当前配置已被第三方工具覆盖（{}）！为避免持续争夺权限，AnyRelay 已停止自动覆盖。建议在外部工具中关闭自动同步，然后重新接管或导入为上游服务商。",
+                "检测到当前配置已被第三方工具覆盖（{}）！为避免持续争夺权限，Pivot 已停止自动覆盖。建议在外部工具中关闭自动同步，然后重新接管或导入为上游服务商。",
                 ep
             ))
         } else {
@@ -371,10 +371,16 @@ impl InterceptorManager {
     }
 
     fn claude_settings_backup_path() -> PathBuf {
-        Self::home_dir()
+        let base = Self::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude")
-            .join("settings.json.omniswitch.bak")
+            .join(".claude");
+        let new_bak = base.join("settings.json.pivot.bak");
+        let legacy_bak = base.join("settings.json.omniswitch.bak");
+        if !new_bak.exists() && legacy_bak.exists() {
+            legacy_bak
+        } else {
+            new_bak
+        }
     }
 
     fn claude_config_path() -> PathBuf {
@@ -384,9 +390,15 @@ impl InterceptorManager {
     }
 
     fn claude_backup_path() -> PathBuf {
-        Self::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude.json.omniswitch.bak")
+        let base = Self::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."));
+        let new_bak = base.join(".claude.json.pivot.bak");
+        let legacy_bak = base.join(".claude.json.omniswitch.bak");
+        if !new_bak.exists() && legacy_bak.exists() {
+            legacy_bak
+        } else {
+            new_bak
+        }
     }
 
     pub fn get_claude_code_status(&self) -> InterceptorInfo {
@@ -593,10 +605,16 @@ impl InterceptorManager {
     }
 
     fn codex_backup_path() -> PathBuf {
-        Self::home_dir()
+        let base = Self::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".codex")
-            .join("config.toml.omniswitch.bak")
+            .join(".codex");
+        let new_bak = base.join("config.toml.pivot.bak");
+        let legacy_bak = base.join("config.toml.omniswitch.bak");
+        if !new_bak.exists() && legacy_bak.exists() {
+            legacy_bak
+        } else {
+            new_bak
+        }
     }
 
     pub fn get_codex_status(&self) -> InterceptorInfo {
@@ -667,7 +685,7 @@ impl InterceptorManager {
         }
     }
 
-    pub const CODEX_CATALOG_FILENAME: &'static str = "omniswitch-model-catalog.json";
+    pub const CODEX_CATALOG_FILENAME: &'static str = "pivot-model-catalog.json";
 
     fn codex_catalog_path() -> PathBuf {
         Self::home_dir()
@@ -820,10 +838,16 @@ impl InterceptorManager {
     }
 
     fn gemini_backup_path() -> PathBuf {
-        Self::home_dir()
+        let base = Self::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".gemini")
-            .join("config.json.omniswitch.bak")
+            .join(".gemini");
+        let new_bak = base.join("config.json.pivot.bak");
+        let legacy_bak = base.join("config.json.omniswitch.bak");
+        if !new_bak.exists() && legacy_bak.exists() {
+            legacy_bak
+        } else {
+            new_bak
+        }
     }
 
     fn gemini_env_path() -> PathBuf {
@@ -834,10 +858,16 @@ impl InterceptorManager {
     }
 
     fn gemini_env_backup_path() -> PathBuf {
-        Self::home_dir()
+        let base = Self::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".gemini")
-            .join(".env.omniswitch.bak")
+            .join(".gemini");
+        let new_bak = base.join(".env.pivot.bak");
+        let legacy_bak = base.join(".env.omniswitch.bak");
+        if !new_bak.exists() && legacy_bak.exists() {
+            legacy_bak
+        } else {
+            new_bak
+        }
     }
 
     pub fn get_gemini_cli_status(&self) -> InterceptorInfo {
@@ -1057,7 +1087,7 @@ fn update_codex_config_toml(
                 .entry(current_provider)
                 .or_insert_with(|| {
                     let mut p = toml::map::Map::new();
-                    p.insert("name".to_string(), toml::Value::String("OmniSwitch".to_string()));
+                    p.insert("name".to_string(), toml::Value::String("Pivot".to_string()));
                     p.insert("wire_api".to_string(), toml::Value::String("responses".to_string()));
                     p.insert("requires_openai_auth".to_string(), toml::Value::Boolean(true));
                     toml::Value::Table(p)
@@ -1432,7 +1462,7 @@ mod tests {
     fn repeated_enable_preserves_original_cli_configuration() {
         let _lock = HOME_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!(
-            "omniswitch-interceptor-{}",
+            "pivot-interceptor-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1512,12 +1542,12 @@ followUpQueueMode = "queue"
         let updated = update_codex_config_toml(
             original,
             "http://127.0.0.1:16888/v1",
-            Some("omniswitch-model-catalog.json"),
+            Some("pivot-model-catalog.json"),
             None,
         )
         .unwrap();
         assert!(updated.contains("http://127.0.0.1:16888/v1"));
-        assert!(updated.contains("model_catalog_json = \"omniswitch-model-catalog.json\""));
+        assert!(updated.contains("model_catalog_json = \"pivot-model-catalog.json\""));
         assert!(updated.contains("[desktop]"));
         assert!(updated.contains("followUpQueueMode = \"queue\""));
         assert!(!updated.contains("https://sub2api.vonote.com"));
@@ -1652,7 +1682,7 @@ followUpQueueMode = "queue"
     fn test_detect_third_party_endpoint_and_conflict() {
         let _lock = HOME_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!(
-            "omniswitch-conflict-test-{}",
+            "pivot-conflict-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

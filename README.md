@@ -1,6 +1,6 @@
-# OmniSwitch
+# Pivot
 
-OmniSwitch 是一个面向 Claude Code、Codex CLI 和 Gemini CLI 的本地 AI 路由网关。它在本机启动一个 OpenAI / Anthropic 兼容接口，将请求转发到已配置的服务商，并提供模型路由、fallback、协议转换、请求日志和 CLI 配置拦截。
+Pivot 是一个面向 Claude Code、Codex CLI 和 Gemini CLI 的本地 AI 路由网关。它在本机启动一个 OpenAI / Anthropic 兼容接口，将请求转发到已配置的服务商，并提供模型路由、fallback、协议转换、请求日志和 CLI 配置拦截。
 
 ## 当前能力
 
@@ -77,7 +77,7 @@ pnpm run test:cli
 
 ## 使用流程
 
-1. 启动 OmniSwitch。首次启动没有任何内置服务商，全部由你添加。
+1. 启动 Pivot。首次启动没有任何内置服务商，全部由你添加。
 2. 在“服务商”页面从预设或自定义添加服务商、API 地址、API Key 和模型。
 3. 指定路由行为：给某家服务商填写「默认模型」并打开「设为默认服务商」，
    请求里没有服务商声明的模型名（例如 Claude Code 的模型名）就会改写成该模型。
@@ -101,10 +101,10 @@ pnpm run test:cli
 所有配置和请求日志保存在本机：
 
 ```text
-~/.omniswitch/omniswitch.db
+~/.pivot/pivot.db
 ```
 
-开启 CLI 拦截前，OmniSwitch 会在对应配置目录写入备份文件；关闭拦截会优先恢复首次开启时的原始配置。
+开启 CLI 拦截前，Pivot 会在对应配置目录写入备份文件；关闭拦截会优先恢复首次开启时的原始配置。
 
 ## 注意事项
 
