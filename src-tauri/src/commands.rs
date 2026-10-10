@@ -3,8 +3,6 @@ use crate::gateway::router as gateway_router;
 use crate::db::{Provider, RequestLog, RouteRule};
 use crate::interceptor::{InterceptorInfo, InterceptorManager};
 use crate::state::AppState;
-use crate::sync::types::{SyncConfig, SyncSessionItem, TestConnectionResult};
-use crate::sync::SyncManager;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -41,7 +39,10 @@ pub async fn get_providers(state: State<'_, AppState>) -> Result<Vec<Provider>, 
 #[tauri::command]
 pub async fn save_provider(state: State<'_, AppState>, mut provider: Provider) -> Result<(), String> {
     crate::provider_models::validate_provider(&mut provider)?;
-    state.db.save_provider(&provider).map_err(|e| e.to_string())
+    state.db.save_provider(&provider).map_err(|e| e.to_string())?;
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    let _ = mgr.sync_codex_catalog_if_intercepted();
+    Ok(())
 }
 
 /// Deletes a provider and returns the routing rules that survive it, because a
@@ -55,6 +56,8 @@ pub async fn delete_provider(
         .db
         .delete_provider(&id)
         .map_err(|_| format!("服务商 {} 不存在或已被删除", id))?;
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    let _ = mgr.sync_codex_catalog_if_intercepted();
     state.db.get_routes().map_err(|e| e.to_string())
 }
 
@@ -161,10 +164,27 @@ pub async fn import_third_party_provider(
         .iter()
         .find(|p| p.base_url.trim_end_matches('/') == third_party.endpoint.trim_end_matches('/'));
 
+    let models = match crate::provider_models::fetch_models(
+        &third_party.protocol,
+        &third_party.endpoint,
+        third_party.auth_token.as_deref().unwrap_or(""),
+    )
+    .await
+    {
+        Ok(fetched) if !fetched.is_empty() => fetched,
+        _ => third_party.models,
+    };
+
     let provider = match found {
         Some(existing) => {
             let mut updated = existing.clone();
             updated.enabled = true;
+            if updated.name.contains("CC-Switch") {
+                updated.name = third_party.suggested_name;
+            }
+            if !models.is_empty() {
+                updated.models = models;
+            }
             state.db.save_provider(&updated).map_err(|e| e.to_string())?;
             updated
         }
@@ -180,7 +200,7 @@ pub async fn import_third_party_provider(
                     .filter(|s| !s.trim().is_empty())
                     .map(|k| vec![k])
                     .unwrap_or_else(|| vec!["default".to_string()]),
-                models: third_party.models,
+                models,
                 default_model: None,
                 is_default: existing_providers.is_empty(),
                 enabled: true,
@@ -234,69 +254,10 @@ pub async fn fetch_provider_models(protocol: String, base_url: String, api_key: 
 
 #[tauri::command]
 pub async fn set_provider_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
-    state.db.set_provider_enabled(&id, enabled).map_err(|e| e.to_string())
+    state.db.set_provider_enabled(&id, enabled).map_err(|e| e.to_string())?;
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    let _ = mgr.sync_codex_catalog_if_intercepted();
+    Ok(())
 }
 
-#[tauri::command]
-pub async fn get_sync_config(state: State<'_, AppState>) -> Result<SyncConfig, String> {
-    state.db.get_sync_config().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn save_sync_config(state: State<'_, AppState>, config: SyncConfig) -> Result<(), String> {
-    state.db.save_sync_config(&config).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn test_sync_connection(state: State<'_, AppState>) -> Result<TestConnectionResult, String> {
-    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
-    let mgr = SyncManager::new(config);
-    mgr.test_connection().await
-}
-
-#[tauri::command]
-pub async fn get_sync_sessions(
-    state: State<'_, AppState>,
-    agent_type: String,
-) -> Result<Vec<SyncSessionItem>, String> {
-    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
-    let mgr = SyncManager::new(config);
-    mgr.get_sessions(&agent_type).await
-}
-
-#[tauri::command]
-pub async fn upload_sync_session(
-    state: State<'_, AppState>,
-    agent_type: String,
-    session_id: String,
-) -> Result<(), String> {
-    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
-    let mgr = SyncManager::new(config);
-    mgr.upload_session(&agent_type, &session_id).await
-}
-
-#[tauri::command]
-pub async fn restore_sync_session(
-    state: State<'_, AppState>,
-    agent_type: String,
-    session_id: String,
-) -> Result<(), String> {
-    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
-    let mgr = SyncManager::new(config);
-    mgr.restore_session(&agent_type, &session_id).await
-}
-
-#[tauri::command]
-pub async fn sync_all_sessions(
-    state: State<'_, AppState>,
-    agent_type: String,
-) -> Result<Value, String> {
-    let config = state.db.get_sync_config().map_err(|e| e.to_string())?;
-    let mgr = SyncManager::new(config);
-    let (uploaded, restored) = mgr.sync_all(&agent_type).await?;
-    Ok(json!({
-        "uploaded": uploaded,
-        "restored": restored,
-    }))
-}
 

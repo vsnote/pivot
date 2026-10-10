@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri_app_lib::db::{Database, Provider, RouteRule};
-use tauri_app_lib::gateway::router::RoutingEngine;
-use tauri_app_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
+use anyrelay_lib::db::{Database, Provider, RouteRule};
+use anyrelay_lib::gateway::router::RoutingEngine;
+use anyrelay_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
 static MOCK_CALL_COUNT_A: AtomicUsize = AtomicUsize::new(0);
 static MOCK_CALL_COUNT_B: AtomicUsize = AtomicUsize::new(0);

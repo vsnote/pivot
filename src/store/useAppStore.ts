@@ -12,9 +12,6 @@ import {
   RequestLog,
   RoutePlan,
   RouteRule,
-  SyncConfig,
-  SyncSessionItem,
-  TestConnectionResult,
 } from '@/types';
 
 interface AppStore {
@@ -48,6 +45,7 @@ interface AppStore {
   // Actions
   fetchInitialData: () => Promise<void>;
   refreshStats: () => Promise<void>;
+  fetchInterceptors: () => Promise<void>;
   saveProvider: (p: Provider) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   testProviderLatency: (id: string) => Promise<number>;
@@ -58,20 +56,6 @@ interface AppStore {
   importThirdPartyProvider: (id: string) => Promise<void>;
   clearLogs: () => Promise<void>;
   initEventListeners: () => Promise<() => void>;
-
-  // Sync
-  syncConfig: SyncConfig | null;
-  syncSessions: SyncSessionItem[];
-  selectedSyncAgent: 'antigravity' | 'codex';
-  isSyncLoading: boolean;
-  setSelectedSyncAgent: (agent: 'antigravity' | 'codex') => void;
-  fetchSyncConfig: () => Promise<SyncConfig>;
-  saveSyncConfig: (config: SyncConfig) => Promise<void>;
-  testSyncConnection: () => Promise<TestConnectionResult>;
-  fetchSyncSessions: (agentType?: 'antigravity' | 'codex') => Promise<void>;
-  uploadSyncSession: (agentType: string, id: string) => Promise<void>;
-  restoreSyncSession: (agentType: string, id: string) => Promise<void>;
-  syncAllSessions: (agentType: string) => Promise<{ uploaded: number; restored: number }>;
 }
 
 const SETTINGS_SECTIONS: SettingsSection[] = ['clients', 'routes', 'gateway', 'logs', 'about'];
@@ -107,10 +91,6 @@ export const applyAppTheme = (theme: 'dark' | 'light' | 'system') => {
 export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'providers',
   setActiveTab: (tab) => {
-    if (tab === 'sync') {
-      set({ activeTab: 'sync' });
-      return;
-    }
     const section = LEGACY_TABS[tab] ?? (tab === 'logs' ? 'logs' : get().settingsSection);
     const activeTab = tab === 'logs' ? 'logs' : tab === 'providers' ? 'providers' : 'settings';
     set({ activeTab, settingsSection: section });
@@ -151,11 +131,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   interceptors: [],
   presets: [],
   logs: [],
-
-  syncConfig: null,
-  syncSessions: [],
-  selectedSyncAgent: 'antigravity',
-  isSyncLoading: false,
 
   isLoading: false,
   initialLoaded: false,
@@ -208,10 +183,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  fetchInterceptors: async () => {
+    try {
+      const interceptors = await invoke<InterceptorStatus[]>('get_interceptor_status');
+      set({ interceptors });
+    } catch {
+      // ignore
+    }
+  },
+
   refreshStats: async () => {
     try {
-      const stats = await invoke<GatewayStats>('get_gateway_status');
-      set({ stats });
+      const [stats, interceptors] = await Promise.all([
+        invoke<GatewayStats>('get_gateway_status').catch(() => get().stats),
+        invoke<InterceptorStatus[]>('get_interceptor_status').catch(() => get().interceptors),
+      ]);
+      set({ stats, interceptors });
     } catch {
       // ignore
     }
@@ -321,124 +308,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ logs: [] });
     } catch (err: unknown) {
       set({ error: String(err) });
-    }
-  },
-
-  setSelectedSyncAgent: (agent: 'antigravity' | 'codex') => {
-    set({ selectedSyncAgent: agent });
-    get().fetchSyncSessions(agent);
-  },
-
-  fetchSyncConfig: async () => {
-    if (isNativeRuntime()) {
-      try {
-        const cfg = await invoke<SyncConfig>('get_sync_config');
-        set({ syncConfig: cfg });
-        return cfg;
-      } catch (err: unknown) {
-        set({ error: `获取同步配置失败: ${String(err)}` });
-        throw err;
-      }
-    }
-    const saved = localStorage.getItem('omni_sync_config');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        set({ syncConfig: parsed });
-        return parsed;
-      } catch {}
-    }
-    const def: SyncConfig = {
-      providerType: 'r2',
-      endpoint: '',
-      region: 'auto',
-      accountId: '',
-      bucket: '',
-      accessKeyId: '',
-      secretAccessKey: '',
-    };
-    set({ syncConfig: def });
-    return def;
-  },
-
-  saveSyncConfig: async (config: SyncConfig) => {
-    if (isNativeRuntime()) {
-      try {
-        await invoke('save_sync_config', { config });
-        set({ syncConfig: config });
-      } catch (err: unknown) {
-        set({ error: `保存同步配置失败: ${String(err)}` });
-        throw err;
-      }
-    } else {
-      localStorage.setItem('omni_sync_config', JSON.stringify(config));
-      set({ syncConfig: config });
-    }
-  },
-
-  testSyncConnection: async () => {
-    if (isNativeRuntime()) {
-      try {
-        return await invoke<TestConnectionResult>('test_sync_connection');
-      } catch (err: unknown) {
-        return { success: false, message: `测试失败: ${String(err)}` };
-      }
-    }
-    return { success: true, message: '模拟连接测试成功', latencyMs: 38 };
-  },
-
-  fetchSyncSessions: async (agentType) => {
-    const agent = agentType || get().selectedSyncAgent;
-    set({ isSyncLoading: true });
-    try {
-      if (isNativeRuntime()) {
-        const sessions = await invoke<SyncSessionItem[]>('get_sync_sessions', { agentType: agent });
-        set({ syncSessions: sessions });
-      } else {
-        set({ syncSessions: [] });
-      }
-    } catch (err: unknown) {
-      set({ error: `加载会话列表失败: ${String(err)}` });
-    } finally {
-      set({ isSyncLoading: false });
-    }
-  },
-
-  uploadSyncSession: async (agentType: string, sessionId: string) => {
-    try {
-      if (isNativeRuntime()) {
-        await invoke('upload_sync_session', { agentType, sessionId });
-        await get().fetchSyncSessions(agentType as 'antigravity' | 'codex');
-      }
-    } catch (err: unknown) {
-      set({ error: `上传会话失败: ${String(err)}` });
-      throw err;
-    }
-  },
-
-  restoreSyncSession: async (agentType: string, sessionId: string) => {
-    try {
-      if (isNativeRuntime()) {
-        await invoke('restore_sync_session', { agentType, sessionId });
-        await get().fetchSyncSessions(agentType as 'antigravity' | 'codex');
-      }
-    } catch (err: unknown) {
-      set({ error: `恢复会话失败: ${String(err)}` });
-      throw err;
-    }
-  },
-
-  syncAllSessions: async (agentType: string) => {
-    try {
-      if (isNativeRuntime()) {
-        const res = await invoke<{ uploaded: number; restored: number }>('sync_all_sessions', { agentType });
-        await get().fetchSyncSessions(agentType as 'antigravity' | 'codex');
-        return res;
-      }
-      return { uploaded: 0, restored: 0 };
-    } catch (err: unknown) {
-      set({ error: `全量同步失败: ${String(err)}` });
-      throw err;
     }
   },
 

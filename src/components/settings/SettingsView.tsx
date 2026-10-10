@@ -1,13 +1,20 @@
 import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { ArrowLeft, Sun, Moon, Laptop, Palette, ShieldCheck } from 'lucide-react';
+import {
+  ArrowLeft,
+  Sun,
+  Moon,
+  Laptop,
+  Palette,
+  ShieldCheck,
+} from 'lucide-react';
 import { AnyRelayLogo } from '@/components/common/AnyRelayLogo';
 
 export const SettingsView: React.FC = () => {
   const { setActiveTab, theme, setTheme } = useAppStore();
 
   return (
-    <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
+    <div className="w-full pb-10 space-y-3 animate-in fade-in duration-150">
       {/* 顶部纯粹的「返回」栏与页面标题 */}
       <div className="flex items-center justify-between pb-1">
         <button

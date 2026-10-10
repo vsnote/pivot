@@ -20,9 +20,9 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri_app_lib::db::{Database, Provider};
-use tauri_app_lib::gateway::router::RoutingEngine;
-use tauri_app_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
+use anyrelay_lib::db::{Database, Provider};
+use anyrelay_lib::gateway::router::RoutingEngine;
+use anyrelay_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
 const GATEWAY_PORT: u16 = 16897;
 const PROXY_ID: &str = "live-proxy";

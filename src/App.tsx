@@ -5,7 +5,6 @@ import { ProviderList } from '@/components/providers/ProviderList';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
 import { RequestLogs } from '@/components/logs/RequestLogs';
 import { SettingsView } from '@/components/settings/SettingsView';
-import { SyncPanel } from '@/components/sync/SyncPanel';
 import { X, AlertCircle } from 'lucide-react';
 import './App.css';
 
@@ -78,9 +77,6 @@ export const App: React.FC = () => {
             }
           >
             <RequestLogs />
-          </div>
-          <div className={activeTab === 'sync' ? 'block' : 'hidden'}>
-            <SyncPanel />
           </div>
           <div className={activeTab === 'settings' && settingsSection !== 'logs' ? 'block' : 'hidden'}>
             <SettingsView />

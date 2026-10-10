@@ -12,9 +12,9 @@ use axum::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri_app_lib::db::{Database, Provider};
-use tauri_app_lib::gateway::router::RoutingEngine;
-use tauri_app_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
+use anyrelay_lib::db::{Database, Provider};
+use anyrelay_lib::gateway::router::RoutingEngine;
+use anyrelay_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
 const ANTIGRAVITY_MODELS: &[&str] = &["gemini-3.8-flash-high"];
 const DEEPSEEK_MODELS: &[&str] = &["deepseek-v4-pro"];
@@ -391,7 +391,7 @@ async fn an_explicit_rule_still_overrides_automatic_routing() {
     .unwrap();
     db.save_provider(&provider("deepseek", "DeepSeek", 17952, DEEPSEEK_MODELS, 5))
         .unwrap();
-    db.save_routes(&[tauri_app_lib::db::RouteRule {
+    db.save_routes(&[anyrelay_lib::db::RouteRule {
         id: "route_deepseek".to_string(),
         pattern: "claude-3-7-*".to_string(),
         target_provider_id: "deepseek".to_string(),

@@ -105,6 +105,7 @@ export interface InterceptorStatus {
   originalEndpoint?: string;
   conflict?: string;
   thirdParty?: ThirdPartyConfig;
+  isOverwritten?: boolean;
 }
 
 export interface Preset {
@@ -120,38 +121,4 @@ export interface Preset {
 
 export type SettingsSection = 'clients' | 'routes' | 'gateway' | 'logs' | 'about';
 
-export type ActiveTab = 'dashboard' | 'providers' | 'routes' | 'interceptor' | 'logs' | 'settings' | 'sync';
-
-export type StorageProviderType = 'r2' | 's3' | 'oss' | 'cos' | 'minio' | 'custom';
-
-export interface SyncConfig {
-  providerType?: StorageProviderType;
-  endpoint: string;
-  region?: string;
-  accountId: string;
-  bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-}
-
-export type SyncStatus = 'synced' | 'local_only' | 'remote_only' | 'modified';
-
-export interface SyncSessionItem {
-  id: string;
-  agentType: 'antigravity' | 'codex';
-  title: string;
-  preview: string;
-  projectName: string;
-  updatedAt: string;
-  stepCount: number;
-  tokensUsed: number;
-  syncStatus: SyncStatus;
-  remoteUpdatedAt?: string | null;
-  sizeBytes?: number | null;
-}
-
-export interface TestConnectionResult {
-  success: boolean;
-  message: string;
-  latencyMs?: number | null;
-}
+export type ActiveTab = 'dashboard' | 'providers' | 'routes' | 'interceptor' | 'logs' | 'settings';
