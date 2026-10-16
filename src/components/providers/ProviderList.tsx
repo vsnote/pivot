@@ -374,16 +374,18 @@ export function ProviderList() {
   return (
     <div className="animate-in fade-in duration-150">
       <section className={panelClass} aria-label="上游服务商">
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-muted/30 border-b border-border">
+        <div className="flex items-center justify-between gap-3 px-4 py-2 bg-muted/30 border-b border-border">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">上游服务商</span>
           <Button
             type="button"
-            variant="secondary"
-            size="xs"
+            variant="ghost"
+            size="icon-sm"
             onClick={() => openProviderEditor(null)}
+            aria-label="添加服务商"
+            title="添加服务商"
+            className="text-muted-foreground hover:text-foreground"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>添加</span>
           </Button>
         </div>
 
