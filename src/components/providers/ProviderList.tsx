@@ -374,8 +374,17 @@ export function ProviderList() {
   return (
     <div className="animate-in fade-in duration-150">
       <section className={panelClass} aria-label="上游服务商">
-        <div className="flex items-center justify-between gap-3 px-4 py-2 bg-muted/30 border-b border-border">
-          <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">上游服务商</span>
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-muted/30 border-b border-border">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className="font-semibold text-zinc-800 dark:text-zinc-200 tracking-wide shrink-0">
+              服务商
+            </span>
+            {providers.length > 0 && (
+              <span className="font-mono text-muted-foreground text-[11px]">
+                · 共 {providers.length} 个
+              </span>
+            )}
+          </div>
           <Button
             type="button"
             variant="ghost"
