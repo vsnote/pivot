@@ -12,12 +12,12 @@ export const SettingsView: React.FC = () => {
   const { theme, setTheme } = useAppStore();
 
   return (
-    <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
-      <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden divide-y divide-border">
+    <div className="w-full pb-10 space-y-3 animate-in fade-in duration-150">
+      <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         {/* 卡片头部 */}
-        <div className="px-4 py-2.5 bg-muted/30">
+        <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            偏好与关于
+            偏好设置
           </span>
         </div>
 
@@ -41,24 +41,22 @@ export const SettingsView: React.FC = () => {
             </TabsList>
           </Tabs>
         </div>
+      </div>
 
-        {/* 关于信息条 */}
-        <div className="p-4 space-y-1 bg-muted/10">
-          <div className="flex items-center gap-2">
-            <h3 className="text-xs font-bold tracking-wider text-zinc-950 dark:text-white font-mono">
-              PIVOT
-            </h3>
-            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200/60 dark:border-zinc-700/60">
-              v0.1.0-alpha
-            </span>
-          </div>
-          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-            面向开发者的本地 AI 智能网关与模型中继器
-          </p>
-          <p className="text-[10px] text-zinc-400 dark:text-zinc-500 pt-0.5">
-            纯本地运行 · 密钥与日志仅保存在本机 · 无云端遥测
-          </p>
+      {/* 关于信息（以普通辅助文字居中展示在卡片下方） */}
+      <div className="pt-2 text-center space-y-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+        <div className="flex items-center justify-center gap-1.5">
+          <span className="text-xs font-bold tracking-wider text-zinc-800 dark:text-zinc-200 font-mono">
+            PIVOT
+          </span>
+          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200/60 dark:border-zinc-700/60">
+            v0.1.0-alpha
+          </span>
         </div>
+        <p>面向开发者的本地 AI 智能网关与模型中继器</p>
+        <p className="text-[10px] text-zinc-400 dark:text-zinc-600 pt-0.5">
+          纯本地运行 · 密钥与日志仅保存在本机 · 无云端遥测
+        </p>
       </div>
     </div>
   );

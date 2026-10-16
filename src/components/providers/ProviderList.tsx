@@ -164,15 +164,24 @@ function CopyAddressButton({ text }: { text: string }) {
   };
 
   return (
-    <Button
+    <button
       type="button"
-      variant="ghost"
-      size="xs"
       onClick={copy}
+      title={copied ? "已复制" : `复制完整地址 (${text})`}
+      aria-label="复制网关地址"
+      className="inline-flex items-center gap-1 p-1 -my-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors cursor-pointer"
     >
-      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-      <span>{copied ? '已复制' : '复制地址'}</span>
-    </Button>
+      {copied ? (
+        <>
+          <Check className="w-3.5 h-3.5 text-emerald-500" />
+          <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-sans select-none">
+            已复制
+          </span>
+        </>
+      ) : (
+        <Copy className="w-3.5 h-3.5" />
+      )}
+    </button>
   );
 }
 
@@ -231,17 +240,15 @@ function IngressCard() {
   return (
     <>
       <section className={panelClass} aria-label="网关与客户端">
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-muted/30 border-b border-border">
-          <div className="flex items-center gap-2 min-w-0 text-xs">
-            <span
-              className={`w-1.5 h-1.5 rounded-full shrink-0 ${gatewayUp ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]' : 'bg-rose-500'}`}
-              aria-hidden
-            />
-            <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide shrink-0">本地网关</span>
-            <span className="font-mono text-zinc-400 dark:text-zinc-500 truncate select-text text-[11px]">
-              {stats.host}:{stats.port}
-            </span>
-          </div>
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/30 border-b border-border text-xs min-w-0">
+          <span
+            className={`w-1.5 h-1.5 rounded-full shrink-0 ${gatewayUp ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]' : 'bg-rose-500'}`}
+            aria-hidden
+          />
+          <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide shrink-0">本地网关</span>
+          <span className="font-mono text-zinc-400 dark:text-zinc-500 truncate select-text text-[11px]">
+            {stats.host}:{stats.port}
+          </span>
           <CopyAddressButton text={address} />
         </div>
 
@@ -303,25 +310,26 @@ function IngressCard() {
           </div>
         )}
 
-        {/* 底部内嵌说明，去除卡片外孤立悬挂 */}
-        <div className="px-4 py-2 bg-zinc-50/40 dark:bg-zinc-900/50 border-t border-zinc-100 dark:border-zinc-800/80 text-[11px] text-zinc-400 dark:text-zinc-500">
-          {notice ? (
-            <span
-              className={
-                notice.tone === 'fault'
-                  ? 'text-rose-500 font-medium'
-                  : notice.tone === 'warn'
-                    ? 'text-amber-600 dark:text-amber-400'
-                    : ''
-              }
-            >
-              {notice.text}
-            </span>
-          ) : (
-            <span>接管后客户端请求将流经 Pivot 分发；未接管则走官方直连。</span>
-          )}
-        </div>
       </section>
+
+      {/* 列表底部说明文字 */}
+      <p className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1 leading-relaxed">
+        {notice ? (
+          <span
+            className={
+              notice.tone === 'fault'
+                ? 'text-destructive font-medium'
+                : notice.tone === 'warn'
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : ''
+            }
+          >
+            {notice.text}
+          </span>
+        ) : (
+          <span>接管后客户端请求将流经 Pivot 分发；未接管则走官方直连。</span>
+        )}
+      </p>
 
       <AgentConflictDialog
         open={conflictConfirmTarget !== null}
@@ -373,6 +381,20 @@ export function ProviderList() {
 
   return (
     <div className="animate-in fade-in duration-150">
+      <div className="flex items-center justify-end -mt-2.5 mb-1 pr-0.5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => openProviderEditor(null)}
+          aria-label="添加服务商"
+          title="添加服务商"
+          className="text-muted-foreground hover:text-foreground"
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </Button>
+      </div>
+
       <section className={panelClass} aria-label="上游服务商">
         {providers.length === 0 ? (
           <div className="px-4 py-10 text-center text-xs text-muted-foreground space-y-2">

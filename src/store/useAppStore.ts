@@ -75,16 +75,23 @@ const getInitialTheme = (): 'dark' | 'light' | 'system' => {
   return saved === 'dark' || saved === 'light' ? saved : 'system';
 };
 
-export const applyAppTheme = (theme: 'dark' | 'light' | 'system') => {
-  const isDark =
-    theme === 'dark' ||
-    (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+export const applyAppTheme = (theme: 'dark' | 'light' | 'system', systemIsDark?: boolean) => {
+  if (typeof window === 'undefined') return;
 
-  document.documentElement.classList.toggle('dark', isDark);
-  document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+  const resolvedSystemIsDark =
+    systemIsDark ?? Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+
+  const isDark = theme === 'dark' || (theme === 'system' && resolvedSystemIsDark);
+
+  if (typeof document !== 'undefined') {
+    document.documentElement.classList.toggle('dark', isDark);
+    document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+  }
 
   if (isNativeRuntime()) {
-    getCurrentWindow().setTheme(isDark ? 'dark' : 'light').catch(() => {});
+    getCurrentWindow()
+      .setTheme(theme === 'system' ? null : theme)
+      .catch(() => {});
   }
 };
 
@@ -114,6 +121,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setTheme: (theme) => {
     set({ theme });
     localStorage.setItem('pivot_theme', theme);
+    applyAppTheme(theme);
   },
 
   stats: {
@@ -345,6 +353,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
           get().setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark');
         });
 
+        let unlistenThemeChanged: (() => void) | undefined;
+        try {
+          unlistenThemeChanged = await getCurrentWindow().onThemeChanged(() => {
+            if (get().theme === 'system') {
+              applyAppTheme('system');
+            }
+          });
+        } catch {
+          // ignore
+        }
+
         // Also set interval to refresh stats every 3 seconds
         const timer = setInterval(() => {
           get().refreshStats();
@@ -355,6 +374,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           unlistenTab();
           unlistenAddProvider();
           unlistenTheme();
+          unlistenThemeChanged?.();
           clearInterval(timer);
         };
       }

@@ -8,12 +8,28 @@ import { SettingsView } from '@/components/settings/SettingsView';
 import { X, AlertCircle } from 'lucide-react';
 import './App.css';
 
-const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
 const subscribeColorScheme = (onChange: () => void) => {
-  colorScheme.addEventListener('change', onChange);
-  return () => colorScheme.removeEventListener('change', onChange);
+  if (typeof window === 'undefined' || !window.matchMedia) return () => {};
+  const mql = window.matchMedia('(prefers-color-scheme: dark)');
+  const listener = () => onChange();
+
+  if (mql.addEventListener) {
+    mql.addEventListener('change', listener);
+  } else if (mql.addListener) {
+    mql.addListener(listener);
+  }
+
+  return () => {
+    if (mql.removeEventListener) {
+      mql.removeEventListener('change', listener);
+    } else if (mql.removeListener) {
+      mql.removeListener(listener);
+    }
+  };
 };
-const getSystemIsDark = () => colorScheme.matches;
+
+const getSystemIsDark = () =>
+  typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches);
 
 export const App: React.FC = () => {
   const {
@@ -26,11 +42,10 @@ export const App: React.FC = () => {
     clearError,
   } = useAppStore();
   const systemIsDark = useSyncExternalStore(subscribeColorScheme, getSystemIsDark);
-  const isDark = theme === 'dark' || (theme === 'system' && systemIsDark);
 
   useEffect(() => {
-    applyAppTheme(isDark ? 'dark' : 'light');
-  }, [isDark]);
+    applyAppTheme(theme, systemIsDark);
+  }, [theme, systemIsDark]);
 
   useEffect(() => {
     fetchInitialData();

@@ -9,9 +9,9 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 let instance = 0;
 
-async function createStore({ native = true, invoke = async () => undefined, listen = async () => () => {} } = {}) {
+async function createStore({ native = true, invoke = async () => undefined, listen = async () => () => {}, onSetTheme } = {}) {
   const key = `omni-store-test-${instance++}`;
-  globalThis[key] = { native, invoke, listen };
+  globalThis[key] = { native, invoke, listen, onSetTheme };
   globalThis.window = { location: { protocol: 'http:' } };
   globalThis.localStorage = { getItem: () => null, setItem: () => {} };
   const tauriMock = `data:text/javascript,${encodeURIComponent(`
@@ -19,12 +19,18 @@ async function createStore({ native = true, invoke = async () => undefined, list
     export const isTauri = () => mock.native;
     export const invoke = (...args) => mock.invoke(...args);
     export const listen = (...args) => mock.listen(...args);
-    export const getCurrentWindow = () => ({ setTheme: async () => {} });
+    export const getCurrentWindow = () => ({
+      setTheme: async (theme) => {
+        if (mock.onSetTheme) mock.onSetTheme(theme);
+      },
+      onThemeChanged: async () => () => {},
+    });
   `)}`;
   const moduleSource = compiled
     .replace(/from ['"]zustand['"]/g, `from ${JSON.stringify(import.meta.resolve('zustand'))}`)
     .replace(/from ['"]@tauri-apps\/api\/(?:core|event|window)['"]/g, `from ${JSON.stringify(tauriMock)}`);
-  const { useAppStore } = await import(`data:text/javascript,${encodeURIComponent(moduleSource)}`);
+  const { useAppStore, applyAppTheme } = await import(`data:text/javascript,${encodeURIComponent(moduleSource)}`);
+  useAppStore.applyAppTheme = applyAppTheme;
   return useAppStore;
 }
 
@@ -186,4 +192,78 @@ test('保存默认服务商后本地列表只有一个默认标记', async () =>
   await store.getState().saveProvider({ ...second, isDefault: true });
   const defaults = store.getState().providers.filter((provider) => provider.isDefault).map((provider) => provider.id);
   assert.deepEqual(defaults, ['provider-b']);
+});
+
+test('切换为跟随系统时向原生窗口传递 null，切换深浅色时传递对应主题名', async () => {
+  const themeCalls = [];
+  const store = await createStore({
+    onSetTheme: (theme) => {
+      themeCalls.push(theme);
+    },
+  });
+
+  store.getState().setTheme('dark');
+  assert.equal(store.getState().theme, 'dark');
+  assert.equal(themeCalls.at(-1), 'dark');
+
+  store.getState().setTheme('light');
+  assert.equal(store.getState().theme, 'light');
+  assert.equal(themeCalls.at(-1), 'light');
+
+  store.getState().setTheme('system');
+  assert.equal(store.getState().theme, 'system');
+  assert.equal(themeCalls.at(-1), null);
+});
+
+test('applyAppTheme 在跟随系统模式下根据系统明暗应用 DOM 类名并解绑原生窗口外观锁定', async () => {
+  const themeCalls = [];
+  const classList = new Set();
+  const style = {};
+  globalThis.document = {
+    documentElement: {
+      classList: {
+        toggle: (cls, force) => {
+          if (force) classList.add(cls);
+          else classList.delete(cls);
+        },
+        contains: (cls) => classList.has(cls),
+      },
+      style,
+    },
+  };
+  globalThis.window.matchMedia = (query) => ({
+    matches: query.includes('dark'),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  });
+
+  const store = await createStore({
+    onSetTheme: (theme) => themeCalls.push(theme),
+  });
+
+  // 系统为深色时，system 主题应给 document 增加 dark 类，并向窗口传 null
+  store.applyAppTheme('system', true);
+  assert.equal(classList.has('dark'), true);
+  assert.equal(style.colorScheme, 'dark');
+  assert.equal(themeCalls.at(-1), null);
+
+  // 系统为浅色时，system 主题应移除 dark 类，并向窗口传 null
+  store.applyAppTheme('system', false);
+  assert.equal(classList.has('dark'), false);
+  assert.equal(style.colorScheme, 'light');
+  assert.equal(themeCalls.at(-1), null);
+
+  // 显式暗色
+  store.applyAppTheme('dark');
+  assert.equal(classList.has('dark'), true);
+  assert.equal(style.colorScheme, 'dark');
+  assert.equal(themeCalls.at(-1), 'dark');
+
+  // 显式浅色
+  store.applyAppTheme('light');
+  assert.equal(classList.has('dark'), false);
+  assert.equal(style.colorScheme, 'light');
+  assert.equal(themeCalls.at(-1), 'light');
+
+  delete globalThis.document;
 });
