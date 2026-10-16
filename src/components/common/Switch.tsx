@@ -1,12 +1,15 @@
-import React from 'react';
+import * as React from 'react';
+import * as SwitchPrimitive from '@radix-ui/react-switch';
+import { cn } from '@/lib/utils';
 
-interface SwitchProps {
+export interface SwitchProps {
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
   ariaLabel: string;
   disabled?: boolean;
   size?: 'sm' | 'md';
   className?: string;
+  id?: string;
 }
 
 export const Switch: React.FC<SwitchProps> = ({
@@ -16,35 +19,38 @@ export const Switch: React.FC<SwitchProps> = ({
   disabled = false,
   size = 'sm',
   className = '',
+  id,
 }) => {
-  const trackSize = size === 'md' ? 'h-6 w-10' : 'h-5 w-9';
-  const thumbSize = size === 'md' ? 'h-5 w-5' : 'h-4 w-4';
+  const isSm = size === 'sm';
+  const trackSize = isSm ? 'h-5 w-9' : 'h-6 w-11';
+  const thumbSize = isSm ? 'h-4 w-4' : 'h-5 w-5';
+  const translate = isSm
+    ? 'data-[state=checked]:translate-x-4'
+    : 'data-[state=checked]:translate-x-5';
 
   return (
-    <label
-      className={`relative inline-flex shrink-0 select-none ${
-        disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
-      } ${className}`}
+    <SwitchPrimitive.Root
+      id={id}
+      checked={checked}
+      onCheckedChange={onCheckedChange}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      className={cn(
+        'peer inline-flex shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-150',
+        'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background',
+        'disabled:cursor-not-allowed disabled:opacity-40',
+        'data-[state=checked]:bg-primary data-[state=unchecked]:bg-input shadow-2xs',
+        trackSize,
+        className
+      )}
     >
-      <input
-        type="checkbox"
-        role="switch"
-        aria-label={ariaLabel}
-        aria-checked={checked}
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onCheckedChange(event.target.checked)}
-        className="peer sr-only"
+      <SwitchPrimitive.Thumb
+        className={cn(
+          'pointer-events-none block rounded-full bg-background shadow-xs ring-0 transition-transform duration-150 data-[state=unchecked]:translate-x-0',
+          translate,
+          thumbSize
+        )}
       />
-      <span
-        className={`${trackSize} rounded-full bg-zinc-200 p-0.5 transition-colors peer-checked:bg-sky-600 dark:peer-checked:bg-cyan-500 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan-500/40 peer-focus-visible:ring-offset-2 dark:bg-zinc-700 dark:peer-focus-visible:ring-offset-zinc-900`}
-      >
-        <span
-          className={`block ${thumbSize} rounded-full border border-black/5 bg-white shadow-sm transition-transform ${
-            checked ? 'translate-x-4' : 'translate-x-0'
-          }`}
-        />
-      </span>
-    </label>
+    </SwitchPrimitive.Root>
   );
 };

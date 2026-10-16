@@ -14,6 +14,7 @@ use gateway::server::{GatewayState, GatewayStatsInternal};
 use state::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Manager;
 
 const DEFAULT_PORT: u16 = 16888;
 
@@ -74,10 +75,10 @@ pub fn run() {
                 tracing::warn!("Failed to setup system tray: {}", e);
             }
 
-            // macOS Native Tab Bar disabled in favor of unified responsive desktop header
-            // if let Some(main_win) = handle.get_webview_window("main") {
-            //     macos_tab::setup_native_tabs(&main_win);
-            // }
+            // macOS Native Toolbar: activates unified titlebar style so traffic lights align with macOS standard (Finder-like)
+            if let Some(main_win) = handle.get_webview_window("main") {
+                macos_tab::setup_unified_toolbar(&main_win);
+            }
 
             // Start Axum HTTP Gateway Server
             let interceptor_mgr = interceptor::InterceptorManager::new(db.clone(), DEFAULT_PORT);
@@ -102,6 +103,7 @@ pub fn run() {
             set_provider_enabled,
             delete_provider,
             test_provider_latency,
+            test_endpoint_latency,
             get_routes,
             save_routes,
             get_logs,

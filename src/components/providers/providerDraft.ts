@@ -6,7 +6,15 @@ export function editablePresetUrl(preset: Preset) {
   return preset.category === '开源 / 本地部署' || preset.baseUrl.includes('YOUR_ACCOUNT_ID');
 }
 
-export function createProviderDraft(provider: Provider | null, presets: Preset[]): Provider {
+/**
+ * `autoDefault` marks a brand new provider as the default one when the library
+ * has none yet, matching the backend's import path (`is_default: existing.is_empty()`).
+ */
+export function createProviderDraft(
+  provider: Provider | null,
+  presets: Preset[],
+  autoDefault = false,
+): Provider {
   if (provider) {
     // Only migrate an unambiguous legacy preset; customized endpoints remain custom.
     const preset = provider.presetId === undefined ? presets.find((p) => p.id === provider.id &&
@@ -16,16 +24,22 @@ export function createProviderDraft(provider: Provider | null, presets: Preset[]
       defaultModel: provider.defaultModel ?? null, isDefault: provider.isDefault ?? false };
   }
   return { id: `prov_${crypto.randomUUID()}`, name: '', protocol: 'openai', baseUrl: '',
-    presetId: null, apiKeys: [], models: [], defaultModel: null, isDefault: false,
+    presetId: null, apiKeys: [], models: [], defaultModel: null, isDefault: autoDefault,
     enabled: true, priority: 10, weight: 1, timeoutSecs: 60 };
 }
 
-export function applyProviderPreset(draft: Provider, preset?: Preset): Provider {
+export function applyProviderPreset(
+  draft: Provider,
+  preset?: Preset,
+  preserveIsDefault = false,
+): Provider {
   // Changing the service clears everything that belonged to the previous one,
-  // including the default model and the catch-all role.
+  // including the default model and the catch-all role. A brand new provider
+  // that is about to become the library's first default keeps that role.
   return { ...draft, presetId: preset?.id ?? null, name: preset?.name ?? '',
     protocol: preset?.protocol ?? 'openai', baseUrl: preset?.baseUrl ?? '',
-    apiKeys: [], models: [], defaultModel: null, isDefault: false, latencyMs: undefined };
+    apiKeys: [], models: [], defaultModel: null,
+    isDefault: preserveIsDefault ? draft.isDefault : false, latencyMs: undefined };
 }
 
 export function validateBaseUrl(value: string): string | null {

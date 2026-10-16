@@ -98,14 +98,14 @@ export const InterceptorPanel: React.FC = () => {
           <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
               <div className="text-[11px] text-zinc-400 mb-0.5">OpenAI 兼容 Base URL</div>
-              <div className="font-mono text-xs font-semibold text-cyan-600 dark:text-cyan-400 truncate">
+              <div className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 http://127.0.0.1:{stats.port}/v1
               </div>
             </div>
             <button
               type="button"
               onClick={() => copyToClipboard('openai-url', `http://127.0.0.1:${stats.port}/v1`)}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer shrink-0"
+              className="shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
               title="复制 OpenAI 兼容地址"
             >
               {copiedKey === 'openai-url' ? (
@@ -119,14 +119,14 @@ export const InterceptorPanel: React.FC = () => {
           <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
               <div className="text-[11px] text-zinc-400 mb-0.5">Anthropic 兼容 Base URL</div>
-              <div className="font-mono text-xs font-semibold text-cyan-600 dark:text-cyan-400 truncate">
+              <div className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 http://127.0.0.1:{stats.port}
               </div>
             </div>
             <button
               type="button"
               onClick={() => copyToClipboard('anthropic-url', `http://127.0.0.1:${stats.port}`)}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer shrink-0"
+              className="shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
               title="复制 Anthropic 兼容地址"
             >
               {copiedKey === 'anthropic-url' ? (
@@ -159,7 +159,7 @@ export const InterceptorPanel: React.FC = () => {
                 isOverwritten
                   ? 'border-amber-500/60 dark:border-amber-500/60 ring-1 ring-amber-500/20'
                   : tool.isIntercepted
-                    ? 'border-cyan-500/60 dark:border-cyan-500/60 ring-1 ring-cyan-500/20'
+                    ? 'border-zinc-900/30 dark:border-zinc-100/30 ring-1 ring-zinc-900/10 dark:ring-zinc-100/10'
                     : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
               }`}
             >
@@ -172,7 +172,7 @@ export const InterceptorPanel: React.FC = () => {
                         isOverwritten
                           ? 'bg-amber-600 dark:bg-amber-600 text-white shadow-xs shadow-amber-500/30'
                           : tool.isIntercepted
-                            ? 'bg-sky-600 dark:bg-cyan-600 text-white shadow-xs shadow-cyan-500/30'
+                            ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shadow-2xs'
                             : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300'
                       }`}
                     >
@@ -209,7 +209,6 @@ export const InterceptorPanel: React.FC = () => {
                     disabled={isToggling}
                     onCheckedChange={(checked) => handleToggle(tool.id, checked)}
                     ariaLabel={`切换 ${tool.name} 代理`}
-                    size="md"
                   />
                 </div>
 
@@ -231,7 +230,7 @@ export const InterceptorPanel: React.FC = () => {
                         isOverwritten
                           ? 'text-amber-600 dark:text-amber-400 font-medium'
                           : tool.isIntercepted
-                            ? 'text-cyan-600 dark:text-cyan-400'
+                            ? 'text-emerald-600 dark:text-emerald-400 font-medium'
                             : 'text-zinc-500 dark:text-zinc-400'
                       }
                     >
@@ -283,7 +282,7 @@ export const InterceptorPanel: React.FC = () => {
             <span className="truncate">{claudeExport}</span>
             <button
               onClick={() => copyToClipboard('claude', claudeExport)}
-              className="ml-2 p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+              className="ml-2 shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white cursor-pointer"
               title="复制"
             >
               {copiedKey === 'claude' ? (
@@ -299,7 +298,7 @@ export const InterceptorPanel: React.FC = () => {
             <span className="truncate">{openaiExport}</span>
             <button
               onClick={() => copyToClipboard('openai', openaiExport)}
-              className="ml-2 p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+              className="ml-2 shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white cursor-pointer"
               title="复制"
             >
               {copiedKey === 'openai' ? (

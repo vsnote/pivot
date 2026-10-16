@@ -1,96 +1,52 @@
 import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
-import { Plus, ScrollText, Settings } from 'lucide-react';
+import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
+
+const tabs = [
+  { id: 'providers', label: '服务商' },
+  { id: 'clients', label: '客户端' },
+  { id: 'logs', label: '日志' },
+  { id: 'settings', label: '设置' },
+] as const;
+
+type TabId = (typeof tabs)[number]['id'];
 
 export const Header: React.FC = () => {
-  const {
-    activeTab,
-    setActiveTab,
-    settingsSection,
-    setSettingsSection,
-    openProviderEditor,
-    isProviderEditorOpen,
-  } = useAppStore();
+  const { activeTab, settingsSection, setActiveTab, setSettingsSection } = useAppStore();
 
-  const isLogsActive = activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs');
-  const isSettingsActive = activeTab === 'settings' && (settingsSection === 'about' || settingsSection === 'clients');
+  const current: TabId =
+    activeTab === 'clients'
+      ? 'clients'
+      : activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')
+        ? 'logs'
+        : activeTab === 'settings'
+          ? 'settings'
+          : 'providers';
 
-  const handleToggleLogs = () => {
-    if (isLogsActive) {
-      setActiveTab('providers');
-    } else {
-      setActiveTab('logs');
-      setSettingsSection('logs');
-    }
-  };
-
-  const handleToggleSettings = () => {
-    if (isSettingsActive) {
-      setActiveTab('providers');
-    } else {
-      setActiveTab('settings');
+  const selectTab = (id: string) => {
+    if (id === 'settings') {
       setSettingsSection('about');
+      return;
     }
+    setActiveTab(id as TabId);
   };
 
   return (
     <header
       data-tauri-drag-region
-      className="relative h-13 sm:h-14 w-full px-4 sm:px-6 select-none shrink-0 z-40 bg-white/80 dark:bg-zinc-950/80 border-b border-zinc-200/80 dark:border-zinc-800/80 backdrop-blur-xl flex items-center justify-between"
+      className="relative h-11 sm:h-12 w-full px-4 select-none shrink-0 z-40 bg-white/60 dark:bg-[#09090b]/60 border-b border-zinc-200/50 dark:border-zinc-800/60 backdrop-blur-md flex items-center justify-center"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
-      {/* 左侧：避开系统红绿灯(约76px)的原生工具栏纯净拖拽区 */}
-      <div className="flex items-center pl-[76px] h-full" data-tauri-drag-region />
-
-      {/* 右侧：极简图标操作区（顺序：添加 -> 日志 -> 设置） */}
-      <div
-        className="flex items-center gap-2"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        {/* 1. 添加服务商 */}
-        <button
-          onClick={() => {
-            setActiveTab('providers');
-            openProviderEditor(null);
-          }}
-          className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
-            isProviderEditorOpen && activeTab === 'providers'
-              ? 'bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/80 dark:border-cyan-800 shadow-2xs'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-          }`}
-          aria-label="添加服务商"
-          title="添加服务商"
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-
-        {/* 3. 日志与指标 */}
-        <button
-          onClick={handleToggleLogs}
-          className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
-            isLogsActive
-              ? 'bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/80 dark:border-cyan-800 shadow-2xs'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-          }`}
-          aria-label="请求日志"
-          title="请求日志"
-        >
-          <ScrollText className="w-4 h-4" />
-        </button>
-
-        {/* 4. 系统设置（包含外观切换与关于） */}
-        <button
-          onClick={handleToggleSettings}
-          className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
-            isSettingsActive
-              ? 'bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/80 dark:border-cyan-800 shadow-2xs'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-          }`}
-          aria-label="系统设置"
-          title="系统设置"
-        >
-          <Settings className="w-4 h-4" />
-        </button>
+      <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        <Tabs value={current} onValueChange={selectTab}>
+          <TabsList aria-label="主要页面导航">
+            {tabs.map((tab) => (
+              <TabsTrigger key={tab.id} value={tab.id}>
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
       </div>
     </header>
   );

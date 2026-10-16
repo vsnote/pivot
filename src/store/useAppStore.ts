@@ -92,10 +92,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'providers',
   setActiveTab: (tab) => {
     const section = LEGACY_TABS[tab] ?? (tab === 'logs' ? 'logs' : get().settingsSection);
-    const activeTab = tab === 'logs' ? 'logs' : tab === 'providers' ? 'providers' : 'settings';
+    const activeTab =
+      tab === 'logs' ? 'logs' : tab === 'providers' || tab === 'clients' ? tab : 'settings';
     set({ activeTab, settingsSection: section });
     if (isNativeRuntime()) {
-      invoke('sync_native_tab', { tab: activeTab === 'providers' ? 'providers' : section })
+      invoke('sync_native_tab', {
+        tab: activeTab === 'providers' || activeTab === 'clients' ? activeTab : section,
+      })
         .catch((error) => console.warn('无法同步原生导航', error));
     }
   },
@@ -327,8 +330,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         // 监听 macOS 原生 NSSegmentedControl 切换事件
         const unlistenTab = await listen<string>('native-tab-selected', (event) => {
           const tabId = event.payload;
-          if (tabId === 'providers') {
-            set({ activeTab: 'providers' });
+          if (tabId === 'providers' || tabId === 'clients') {
+            set({ activeTab: tabId });
           } else if (SETTINGS_SECTIONS.includes(tabId as SettingsSection)) {
             set({ activeTab: 'settings', settingsSection: tabId as SettingsSection });
           }

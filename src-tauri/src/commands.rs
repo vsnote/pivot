@@ -61,6 +61,48 @@ pub async fn delete_provider(
     state.db.get_routes().map_err(|e| e.to_string())
 }
 
+async fn measure_http_latency(
+    client: &reqwest::Client,
+    protocol: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<i64, String> {
+    let url = base_url.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return Err("请输入有效的接口基地址".to_string());
+    }
+
+    let start = Instant::now();
+    let mut req = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5));
+
+    if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
+        if protocol == "anthropic" {
+            req = req.header("x-api-key", key.trim());
+        } else {
+            req = req.header("authorization", format!("Bearer {}", key.trim()));
+        }
+    }
+
+    let res = req.send().await;
+    let latency_ms = start.elapsed().as_millis() as i64;
+
+    match res {
+        Ok(_) => Ok(latency_ms),
+        Err(e) => {
+            if e.is_timeout() {
+                return Err("连接超时 (5s)".to_string());
+            }
+            if e.is_connect() {
+                return Err("无法连接至服务器，请检查地址或网络".to_string());
+            }
+            // 404/401 等 HTTP 状态码表明服务物理可通
+            Ok(latency_ms)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn test_provider_latency(state: State<'_, AppState>, id: String) -> Result<i64, String> {
     let providers = state.db.get_providers().map_err(|e| e.to_string())?;
@@ -69,40 +111,32 @@ pub async fn test_provider_latency(state: State<'_, AppState>, id: String) -> Re
         .find(|p| p.id == id)
         .ok_or_else(|| format!("Provider not found: {}", id))?;
 
-    let start = Instant::now();
-    let url = provider.base_url.trim_end_matches('/').to_string();
-
-    let mut req = state
-        .http_client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(5));
-    if let Some(key) = provider.api_keys.first() {
-        if provider.protocol == "anthropic" {
-            req = req.header("x-api-key", key);
-        } else {
-            req = req.header("authorization", format!("Bearer {}", key));
-        }
-    }
-
-    let res = req.send().await;
-    let latency_ms = start.elapsed().as_millis() as i64;
-
-    // Even if it returns 401 or 404, it means the server is reached and network latency is measured
-    let measured_latency = match res {
-        Ok(_) => latency_ms,
-        Err(e) => {
-            if e.is_timeout() {
-                return Err("Connection timed out (5s)".to_string());
-            }
-            if e.is_connect() {
-                return Err("Connection failed: host unreachable".to_string());
-            }
-            latency_ms
-        }
-    };
+    let measured_latency = measure_http_latency(
+        &state.http_client,
+        &provider.protocol,
+        &provider.base_url,
+        provider.api_keys.first().map(String::as_str),
+    )
+    .await?;
 
     let _ = state.db.update_provider_latency(&id, measured_latency);
     Ok(measured_latency)
+}
+
+#[tauri::command]
+pub async fn test_endpoint_latency(
+    state: State<'_, AppState>,
+    protocol: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<i64, String> {
+    measure_http_latency(
+        &state.http_client,
+        &protocol,
+        &base_url,
+        api_key.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

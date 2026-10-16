@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   ArrowLeft,
@@ -13,13 +13,19 @@ import {
   AlertCircle,
   AlertTriangle,
   HelpCircle,
+  Zap,
 } from 'lucide-react';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import { Button } from '@/components/common/Button';
+import { Input } from '@/components/common/Input';
+import { Badge } from '@/components/common/Badge';
 import {
   ProviderAvatar,
 } from '@/components/common/BrandIcons';
 import { useAppStore } from '@/store/useAppStore';
 import type { Preset, Protocol, Provider } from '@/types';
 import { Select } from '@/components/common/Select';
+import { Switch } from '@/components/common/Switch';
 import {
   applyProviderPreset,
   createProviderDraft,
@@ -39,8 +45,15 @@ const protocols: Record<Protocol, string> = {
 };
 
 export function ProviderEditor() {
-  const { editingProvider, presets, closeProviderEditor, saveProvider, activeTab } = useAppStore();
-  const [initial] = useState(() => createProviderDraft(editingProvider, presets));
+  const { editingProvider, presets, providers, closeProviderEditor, saveProvider, deleteProvider, activeTab } =
+    useAppStore();
+  // 还没有可用的默认服务商时，新添加的第一个服务商默认承担该角色。
+  // 路由只在已启用的服务商里找兜底目标，所以停用的默认不算数；
+  // 与后端第三方导入路径 is_default: existing.is_empty() 保持一致。
+  const [autoDefault] = useState(
+    () => !editingProvider && !providers.some((provider) => provider.isDefault && provider.enabled),
+  );
+  const [initial] = useState(() => createProviderDraft(editingProvider, presets, autoDefault));
   const [draft, setDraft] = useState(initial);
   const [choosing, setChoosing] = useState(!editingProvider);
   const [presetSearch, setPresetSearch] = useState('');
@@ -55,6 +68,10 @@ export function ProviderEditor() {
   const [saving, setSaving] = useState(false);
   const [confirmation, setConfirmation] = useState<{ kind: 'leave' | 'preset'; preset?: Preset } | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [latencyResult, setLatencyResult] = useState<{ success: boolean; ms?: number; error?: string } | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const requestId = useRef(0);
   const drawerRef = useRef<HTMLDivElement>(null);
@@ -167,7 +184,7 @@ export function ProviderEditor() {
     }
     setConfirmation(null);
     invalidateModels();
-    setDraft(applyProviderPreset(draft, next));
+    setDraft(applyProviderPreset(draft, next, autoDefault));
     setShowKeys(false);
     setShowAuthHelp(false);
     setManualModel('');
@@ -186,6 +203,7 @@ export function ProviderEditor() {
       /* ignore */
     }
     invalidateModels();
+    setLatencyResult(null);
     const clearKeys = !sameOrigin && draft.apiKeys.some((key) => key.trim());
     update({ baseUrl, latencyMs: undefined, ...(clearKeys ? { apiKeys: [] } : {}) });
     setNotice(
@@ -193,6 +211,28 @@ export function ProviderEditor() {
         ? '接口主机已更改，原密钥已清除，请填写此服务商的新密钥。'
         : '连接信息已更改，已选模型保留，建议重新获取模型进行验证。',
     );
+  };
+
+  const testConnection = async () => {
+    const error = validateBaseUrl(draft.baseUrl);
+    if (error) {
+      setErrors((prev) => ({ ...prev, baseUrl: error }));
+      return;
+    }
+    setTestingConnection(true);
+    setLatencyResult(null);
+    try {
+      const ms = await invoke<number>('test_endpoint_latency', {
+        protocol: draft.protocol,
+        baseUrl: draft.baseUrl.trim(),
+        apiKey: uniqueValues(draft.apiKeys)[0] ?? null,
+      });
+      setLatencyResult({ success: true, ms });
+    } catch (err) {
+      setLatencyResult({ success: false, error: String(err) });
+    } finally {
+      setTestingConnection(false);
+    }
   };
 
   const fetchModels = async () => {
@@ -220,12 +260,20 @@ export function ProviderEditor() {
     }
   };
 
-  const toggleModel = (model: string) => {
+  const replaceModels = (models: string[]) => {
+    const next = uniqueValues(models);
     update({
-      models: draft.models.includes(model)
-        ? draft.models.filter((m) => m !== model)
-        : [...draft.models, model],
+      models: next,
+      defaultModel: draft.defaultModel && next.includes(draft.defaultModel) ? draft.defaultModel : null,
     });
+  };
+
+  const toggleModel = (model: string) => {
+    replaceModels(
+      draft.models.includes(model)
+        ? draft.models.filter((item) => item !== model)
+        : [...draft.models, model],
+    );
   };
 
   const addManualModel = () => {
@@ -234,7 +282,7 @@ export function ProviderEditor() {
       setErrors({ models: '请输入一个完整的模型 ID，不要包含空格或逗号' });
       return;
     }
-    update({ models: uniqueValues([...draft.models, model]) });
+    replaceModels([...draft.models, model]);
     setManualModel('');
   };
 
@@ -271,90 +319,89 @@ export function ProviderEditor() {
     }
   };
 
-  const matchingPresets = presets.filter((p) =>
-    `${p.name} ${p.id} ${p.category}`.toLowerCase().includes(presetSearch.toLowerCase()),
+  const matchingPresets = useMemo(() => {
+    const q = presetSearch.toLowerCase();
+    return presets.filter((p) =>
+      `${p.name} ${p.id} ${p.category}`.toLowerCase().includes(q)
+    );
+  }, [presets, presetSearch]);
+
+  // 模型池总览：包含从上游拉取的所有模型以及当前已选/手动添加的模型
+  const allModels = useMemo(
+    () => uniqueValues([...(fetched ?? []), ...draft.models]),
+    [fetched, draft.models]
   );
 
-  const candidates = (fetched ?? []).filter((model) =>
-    model.toLowerCase().includes(modelSearch.toLowerCase()),
-  );
+  const filteredModels = useMemo(() => {
+    const q = modelSearch.toLowerCase();
+    return allModels.filter((model) => model.toLowerCase().includes(q));
+  }, [allModels, modelSearch]);
 
-  const invalidModels =
-    fetched && fetched.length > 0
-      ? draft.models.filter((model) => !fetched.includes(model))
-      : [];
+  const selectAllFiltered = () => {
+    replaceModels([...draft.models, ...filteredModels]);
+  };
+
+  const clearAllFiltered = () => {
+    replaceModels(draft.models.filter((m) => !filteredModels.includes(m)));
+  };
+
+  const invalidModels = useMemo(() => {
+    if (!fetched || fetched.length === 0) return [];
+    return draft.models.filter((model) => !fetched.includes(model));
+  }, [fetched, draft.models]);
 
   const removeInvalidModels = () => {
     if (!fetched || fetched.length === 0) return;
-    update({
-      models: draft.models.filter((model) => fetched.includes(model)),
-    });
+    replaceModels(draft.models.filter((model) => fetched.includes(model)));
   };
 
+  const otherDefault = providers.find((provider) => provider.isDefault && provider.id !== draft.id);
+
   return (
-    <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
-      {/* 顶部纯粹的「返回」栏与快捷操作 */}
+    <div className="w-full pb-6 space-y-3 animate-in fade-in duration-150">
+      {/* 顶部面包屑返回导航：去除非弹窗的关闭按钮，清晰指示层级 */}
       <div className="flex items-center justify-between pb-1">
-        <div className="flex items-center gap-2">
-          {confirmation ? (
-            <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
-              <span className="text-xs font-medium text-rose-700 dark:text-rose-300">
-                {confirmation.kind === 'preset'
-                  ? '放弃已填内容并重选预设？'
-                  : '存在未保存的修改，确认放弃？'}
-              </span>
-              <button
-                type="button"
-                onClick={handleConfirmAbandon}
-                className="px-2.5 py-1 rounded-md text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
-              >
-                确认放弃
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmation(null)}
-                className="px-2.5 py-1 rounded-md text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-white dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              >
-                继续编辑
-              </button>
-            </div>
-          ) : (
+        {confirmation ? (
+          <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
+            <span className="text-xs font-medium text-rose-700 dark:text-rose-300">
+              {confirmation.kind === 'preset'
+                ? '放弃已填内容并重选预设？'
+                : '存在未保存的修改，确认放弃？'}
+            </span>
+            <button
+              type="button"
+              onClick={handleConfirmAbandon}
+              className="inline-flex h-7 items-center justify-center rounded-md bg-rose-600 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-rose-700 cursor-pointer"
+            >
+              确认放弃
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmation(null)}
+              className="inline-flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-white dark:text-zinc-400 dark:hover:bg-zinc-800 cursor-pointer"
+            >
+              继续编辑
+            </button>
+          </div>
+        ) : (
+          <nav aria-label="页面层级" className="flex items-center gap-1.5 text-xs">
             <button
               type="button"
               onClick={handleBack}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 -ml-2.5 rounded-lg text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              className="-ml-2 inline-flex h-7 items-center gap-1 rounded-md px-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              title="返回服务商列表"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>返回</span>
+              <span>服务商</span>
             </button>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          {!choosing && (
-            <button
-              type="submit"
-              form="provider-drawer-form"
-              disabled={saving || fetching || draft.models.length === 0}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 dark:bg-cyan-600 dark:hover:bg-cyan-500 disabled:opacity-50 shadow-2xs transition-all active:scale-[0.98] cursor-pointer"
-            >
-              {saving ? (
-                <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Check className="w-3.5 h-3.5" />
-              )}
-              <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '添加并启用'}</span>
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={handleClose}
-            className="p-1 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            title="关闭"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+            <span className="text-zinc-300 dark:text-zinc-700 select-none">/</span>
+            <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[260px]">
+              {choosing
+                ? '选择预设'
+                : draft.name.trim() || (editingProvider ? '未命名服务商' : '新增服务商')}
+            </span>
+          </nav>
+        )}
       </div>
 
       {/* 页面主卡片 */}
@@ -362,7 +409,7 @@ export function ProviderEditor() {
         ref={drawerRef}
         role="region"
         aria-label={editingProvider ? '编辑服务商' : '添加服务商'}
-        className="p-6 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-6"
+        className="p-5 rounded-lg border border-border bg-card text-card-foreground shadow-2xs space-y-4"
       >
         {/* 表单内容 */}
         <div ref={contentRef} className="space-y-6">
@@ -371,13 +418,13 @@ export function ProviderEditor() {
             <div className="space-y-4">
               <div className="relative">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
-                <input
+                <Input
                   autoFocus
                   type="text"
                   placeholder="搜索服务商预设，如 Anthropic, OpenAI, DeepSeek..."
                   value={presetSearch}
                   onChange={(e) => setPresetSearch(e.target.value)}
-                  className="w-full pl-9 pr-3.5 py-2 text-xs rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
+                  className="pl-9 pr-3.5 h-9"
                 />
               </div>
 
@@ -386,12 +433,12 @@ export function ProviderEditor() {
                 <button
                   type="button"
                   onClick={() => choosePreset()}
-                  className="flex items-center gap-2.5 p-3 rounded-md border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-cyan-500 dark:hover:border-cyan-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
+                  className="flex items-center gap-2.5 p-3 rounded-md border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
                 >
-                  <div className="w-7 h-7 rounded-md bg-cyan-50 dark:bg-cyan-950/50 border border-cyan-200/60 dark:border-cyan-800/60 text-cyan-600 dark:text-cyan-400 flex items-center justify-center shrink-0">
+                  <div className="w-7 h-7 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 flex items-center justify-center shrink-0">
                     <Plus className="w-4 h-4" />
                   </div>
-                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate">
+                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-zinc-950 dark:group-hover:text-white truncate">
                     自定义服务商
                   </span>
                 </button>
@@ -403,7 +450,7 @@ export function ProviderEditor() {
                       key={p.id}
                       type="button"
                       onClick={() => choosePreset(p)}
-                      className="flex items-center gap-2.5 p-3 rounded-md border border-zinc-200/80 dark:border-zinc-800 hover:border-cyan-500/80 dark:hover:border-cyan-500/80 bg-white dark:bg-zinc-900/90 hover:bg-cyan-50/20 dark:hover:bg-cyan-950/20 text-left shadow-2xs hover:shadow-xs transition-all duration-150 group cursor-pointer"
+                      className="flex items-center gap-2.5 p-3 rounded-md border border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 bg-white dark:bg-zinc-900/90 hover:bg-zinc-50/60 dark:hover:bg-zinc-850/40 text-left shadow-2xs hover:shadow-xs transition-all duration-150 group cursor-pointer"
                     >
                       <ProviderAvatar
                         name={cleanName}
@@ -411,7 +458,7 @@ export function ProviderEditor() {
                         iconKey={p.icon || p.id}
                         sizeClass="w-7 h-7"
                       />
-                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate">
+                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-zinc-950 dark:group-hover:text-white truncate">
                         {cleanName}
                       </span>
                     </button>
@@ -421,7 +468,7 @@ export function ProviderEditor() {
             </div>
           ) : (
             /* 配置表单 */
-            <form id="provider-drawer-form" onSubmit={submit} className="space-y-6">
+            <form id="provider-drawer-form" onSubmit={submit} className="space-y-4">
               {/* 基础连接设置 */}
               <div className="space-y-3.5">
                 <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
@@ -433,12 +480,11 @@ export function ProviderEditor() {
                   <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
                     服务商名称
                   </label>
-                  <input
+                  <Input
                     type="text"
                     value={draft.name}
                     onChange={(e) => update({ name: e.target.value })}
                     placeholder="例如 Anthropic Claude、DeepSeek 官方"
-                    className="w-full px-3 py-2 text-xs rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
                   />
                   {errors.name && <p className="text-[11px] text-rose-500 mt-1">{errors.name}</p>}
                 </div>
@@ -477,16 +523,63 @@ export function ProviderEditor() {
                   </div>
 
                   <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                      接口基地址 (Base URL)
-                    </label>
-                    <input
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                        接口基地址 (Base URL)
+                      </label>
+                      {draft.baseUrl.trim() && (
+                        <div className="flex items-center gap-1.5 text-xs">
+                          {testingConnection ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+                              <LoaderCircle className="w-3 h-3 animate-spin text-zinc-500" />
+                              <span>测试中…</span>
+                            </span>
+                          ) : latencyResult ? (
+                            <span
+                              className={`inline-flex items-center gap-1 text-[11px] font-mono ${
+                                latencyResult.success
+                                  ? 'text-emerald-600 dark:text-emerald-400 font-medium'
+                                  : 'text-rose-500 dark:text-rose-400'
+                              }`}
+                            >
+                              {latencyResult.success ? (
+                                <>
+                                  <Zap className="w-3 h-3 shrink-0" />
+                                  <span>{latencyResult.ms} ms</span>
+                                </>
+                              ) : (
+                                <span title={latencyResult.error} className="truncate max-w-[130px]">
+                                  {latencyResult.error}
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={testConnection}
+                                className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 underline ml-0.5 cursor-pointer"
+                              >
+                                重测
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={testConnection}
+                              className="text-[11px] text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 flex items-center gap-0.5 cursor-pointer transition-colors"
+                            >
+                              <Zap className="w-3 h-3 shrink-0" />
+                              <span>测试连接</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <Input
                       type="text"
                       value={draft.baseUrl}
                       onChange={(e) => changeUrl(e.target.value)}
                       disabled={!urlEditable}
                       placeholder="https://api.example.com/v1"
-                      className="w-full px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
+                      className="font-mono"
                     />
                     {errors.baseUrl && (
                       <p className="text-[11px] text-rose-500 mt-1">{errors.baseUrl}</p>
@@ -496,23 +589,24 @@ export function ProviderEditor() {
 
                 {/* API 密钥 */}
                 <div>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1.5">
                     <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
                       API 密钥 (Key)
                     </label>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 text-[11px]">
                       <button
                         type="button"
                         onClick={() => setShowAuthHelp(!showAuthHelp)}
-                        className="text-[11px] text-zinc-400 hover:text-cyan-600 dark:hover:text-cyan-400 flex items-center gap-0.5 cursor-pointer"
+                        className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
                       >
                         <HelpCircle className="w-3 h-3" />
                         <span>密钥说明</span>
                       </button>
+                      <span className="text-zinc-300 dark:text-zinc-700">·</span>
                       <button
                         type="button"
                         onClick={() => update({ apiKeys: [...keyInputs, ''] })}
-                        className="text-[11px] text-cyan-600 dark:text-cyan-400 hover:underline cursor-pointer"
+                        className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 font-medium cursor-pointer transition-colors"
                       >
                         + 多密钥轮询
                       </button>
@@ -529,7 +623,7 @@ export function ProviderEditor() {
                     {keyInputs.map((key, index) => (
                       <div key={index} className="flex items-center gap-2">
                         <div className="relative flex-1">
-                          <input
+                          <Input
                             type={showKeys ? 'text' : 'password'}
                             value={key}
                             onChange={(e) => {
@@ -539,7 +633,7 @@ export function ProviderEditor() {
                               update({ apiKeys: keys });
                             }}
                             placeholder={index ? '添加备用密钥' : 'sk-ant-... / sk-...（可留空）'}
-                            className="w-full pl-3 pr-9 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
+                            className="font-mono pr-9"
                           />
                           <button
                             type="button"
@@ -569,45 +663,87 @@ export function ProviderEditor() {
 
                   {notice && <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">{notice}</p>}
                 </div>
+
+                {/* 设为全局默认服务商 */}
+                <div className="pt-3 border-t border-border space-y-2">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <span className="text-xs font-medium text-zinc-800 dark:text-zinc-200">
+                        设为全局默认服务商
+                      </span>
+                      <span className="text-[11px] text-zinc-400 dark:text-zinc-500 ml-1.5">
+                        {otherDefault && !draft.isDefault
+                          ? `(当前由 ${otherDefault.name} 兜底)`
+                          : '(未命中任何已启用服务商时由此接盘)'}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={!!draft.isDefault}
+                      onCheckedChange={(checked) => update({ isDefault: checked })}
+                      ariaLabel="设为全局默认服务商"
+                    />
+                  </div>
+
+                  {draft.isDefault && draft.models.length > 0 && (
+                    <div className="flex items-center justify-between gap-4 pl-0.5">
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        未命中时降级转发为（可选）
+                      </span>
+                      <div className="w-52 max-w-xs shrink-0">
+                        <Select
+                          value={draft.defaultModel ?? ''}
+                          onChange={(event) => update({ defaultModel: event.target.value || null })}
+                          className="w-full text-xs font-mono"
+                        >
+                          <option value="">按原模型名转发</option>
+                          {draft.models.map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {/* 模型选择与声明 */}
-              <div className="space-y-3.5 pt-4 border-t border-zinc-100 dark:border-zinc-800">
+              {/* 模型选择与声明：一体化精简清单 */}
+              <div className="space-y-3 pt-4 border-t border-border">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
-                    <span>可用模型池</span>
-                    <span className="text-[11px] font-normal font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
-                      已选 {draft.models.length}
-                    </span>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
+                      可用模型池
+                    </h3>
+                    <Badge variant="secondary" className="font-mono">
+                      已选 {draft.models.length} {allModels.length > 0 ? `/ 共 ${allModels.length}` : ''}
+                    </Badge>
                     {invalidModels.length > 0 && (
-                      <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[11px] font-normal bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30">
-                        <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                      <Badge variant="warning" className="gap-1">
+                        <AlertTriangle className="w-3 h-3 shrink-0" />
                         <span>{invalidModels.length} 个未在上游提供</span>
                         <button
                           type="button"
                           onClick={removeInvalidModels}
-                          className="ml-1 underline hover:text-amber-800 dark:hover:text-amber-200 cursor-pointer font-medium"
-                          title="从已选模型中移除上游列表中不存在的模型"
+                          className="underline hover:opacity-80 cursor-pointer ml-0.5"
+                          title="从已选模型中移除未在上游提供的模型"
                         >
-                          一键移除
+                          移除
                         </button>
-                      </span>
+                      </Badge>
                     )}
-                  </h3>
+                  </div>
 
-                  <button
+                  <Button
                     type="button"
+                    variant="secondary"
+                    size="sm"
                     onClick={fetchModels}
                     disabled={fetching}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-600 dark:text-cyan-400 bg-cyan-50 dark:bg-cyan-950/50 hover:bg-cyan-100 dark:hover:bg-cyan-900/40 transition-colors disabled:opacity-50 cursor-pointer"
                   >
-                    {fetching ? (
-                      <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                    <span>{fetching ? '获取中…' : fetched ? '刷新上游模型' : '从上游获取模型'}</span>
-                  </button>
+                    <RefreshCw className={`w-3.5 h-3.5 ${fetching ? 'animate-spin' : ''}`} />
+                    <span>{fetching ? '获取中…' : fetched ? '刷新上游' : '获取上游模型'}</span>
+                  </Button>
                 </div>
 
                 {fetchError && (
@@ -617,138 +753,201 @@ export function ProviderEditor() {
                   </div>
                 )}
 
-                {/* 已选模型 Chips */}
-                {draft.models.length > 0 && (
-                  <div className="p-3 rounded-md bg-zinc-50 dark:bg-zinc-850/50 border border-zinc-200/80 dark:border-zinc-800/80">
-                    <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
-                      {draft.models.map((model) => {
-                        const isInvalid = invalidModels.includes(model);
-                        return (
-                          <span
-                            key={model}
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono border transition-colors shadow-2xs ${
-                              isInvalid
-                                ? 'bg-amber-50/80 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 border-amber-300/80 dark:border-amber-800/70'
-                                : 'bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border-zinc-200 dark:border-zinc-700'
-                            }`}
-                            title={isInvalid ? '该模型未在上游接口返回的列表中' : undefined}
-                          >
-                            {isInvalid && <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />}
-                            <span>{model}</span>
+                {/* 一体化清单卡片 */}
+                <div className="rounded-md border border-border bg-background overflow-hidden shadow-2xs">
+                  {/* 顶部搜索与快捷操作 */}
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border bg-muted/30">
+                    <div className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                      <Input
+                        type="text"
+                        placeholder="搜索或过滤模型…"
+                        value={modelSearch}
+                        onChange={(e) => setModelSearch(e.target.value)}
+                        className="pl-8 pr-3 h-7 font-mono"
+                      />
+                    </div>
+
+                    {allModels.length > 0 && (
+                      <div className="flex items-center gap-1 shrink-0 text-xs text-zinc-500 dark:text-zinc-400">
+                        <button
+                          type="button"
+                          onClick={selectAllFiltered}
+                          className="px-2 py-1 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                        >
+                          全选
+                        </button>
+                        <span className="text-zinc-300 dark:text-zinc-700">|</span>
+                        <button
+                          type="button"
+                          onClick={clearAllFiltered}
+                          className="px-2 py-1 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                        >
+                          清空
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 模型紧凑流式列表：按内容自适应宽度，拒绝强行通栏拉长 */}
+                  <div className="max-h-40 overflow-y-auto p-2">
+                    {filteredModels.length === 0 ? (
+                      <div className="py-6 text-center text-xs text-zinc-400">
+                        {allModels.length === 0
+                          ? '暂无模型，点击右上角「获取上游模型」或在下方手动补充'
+                          : '未匹配到相关模型'}
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {filteredModels.map((model) => {
+                          const isSelected = draft.models.includes(model);
+                          const isInvalid = invalidModels.includes(model);
+
+                          return (
                             <button
+                              key={model}
                               type="button"
                               onClick={() => toggleModel(model)}
-                              className="hover:text-rose-500 cursor-pointer"
-                              aria-label={`移除模型 ${model}`}
+                              className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-xs font-mono transition-colors cursor-pointer select-none border ${
+                                isSelected
+                                  ? 'bg-zinc-100/90 dark:bg-zinc-800/90 text-zinc-900 dark:text-zinc-100 border-zinc-300/90 dark:border-zinc-700 font-medium shadow-2xs'
+                                  : 'bg-white/80 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-400 border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-200'
+                              }`}
                             >
-                              <X className="w-3 h-3" />
+                              {/* 正统 shadcn 高反差极简复选框 */}
+                              <span
+                                className={`w-3.5 h-3.5 rounded-[3px] border flex items-center justify-center shrink-0 transition-colors ${
+                                  isSelected
+                                    ? 'bg-zinc-900 border-zinc-900 text-white dark:bg-zinc-100 dark:border-zinc-100 dark:text-zinc-900'
+                                    : 'border-zinc-300/80 dark:border-zinc-600 bg-white dark:bg-zinc-850'
+                                }`}
+                              >
+                                {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                              </span>
+                              <span>{model}</span>
+                              {isInvalid && (
+                                <span title="该模型未在上游接口返回的列表中" className="shrink-0 text-amber-500">
+                                  <AlertTriangle className="w-3 h-3" />
+                                </span>
+                              )}
                             </button>
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* 上游候选模型快速选择 */}
-                {fetched && fetched.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <div className="relative flex-1">
-                        <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
-                        <input
-                          type="text"
-                          placeholder="在获取到的模型中快速筛选…"
-                          value={modelSearch}
-                          onChange={(e) => setModelSearch(e.target.value)}
-                          className="w-full pl-8 pr-3 py-1.5 text-xs font-mono rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                        />
+                          );
+                        })}
                       </div>
-                      {candidates.length > 0 && (
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => update({ models: [...candidates] })}
-                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/50 hover:bg-cyan-100 dark:hover:bg-cyan-900/40 border border-cyan-200 dark:border-cyan-800/60 transition-colors cursor-pointer"
-                            title="将已选模型完全替换为当前匹配的上游真实模型"
-                          >
-                            对齐上游 ({candidates.length})
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => update({ models: uniqueValues([...draft.models, ...candidates]) })}
-                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
-                            title="将匹配的上游模型追加到已选模型中"
-                          >
-                            全选追加
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto p-1.5 rounded-md border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-950/50">
-                      {candidates.map((model) => {
-                        const isSelected = draft.models.includes(model);
-                        return (
-                          <button
-                            key={model}
-                            type="button"
-                            onClick={() => toggleModel(model)}
-                            className={`flex items-center justify-between p-2 rounded-lg text-left text-xs font-mono transition-colors cursor-pointer ${
-                              isSelected
-                                ? 'bg-cyan-50 dark:bg-cyan-950/60 text-cyan-700 dark:text-cyan-300 border border-cyan-200/60 dark:border-cyan-800/60'
-                                : 'hover:bg-white dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
-                            }`}
-                          >
-                            <span className="truncate pr-1">{model}</span>
-                            {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
-                          </button>
-                        );
-                      })}
-                      {candidates.length === 0 && (
-                        <div className="col-span-2 text-center py-4 text-xs text-zinc-400">
-                          未匹配到相关模型
-                        </div>
-                      )}
-                    </div>
+                    )}
                   </div>
-                )}
 
-                {/* 手动添加单个模型 */}
-                <div className="flex gap-2 pt-1">
-                  <input
-                    type="text"
-                    value={manualModel}
-                    onChange={(e) => setManualModel(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        addManualModel();
-                      }
-                    }}
-                    placeholder="手动输入模型 ID，如 claude-3-7-sonnet-20250219"
-                    className="flex-1 px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={addManualModel}
-                    disabled={!manualModel.trim()}
-                    className="px-3 py-2 rounded-md text-xs font-medium text-zinc-700 dark:text-zinc-200 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
-                  >
-                    添加模型
-                  </button>
+                  {/* 底部紧凑手动补充条 */}
+                  <div className="px-3 py-2 border-t border-border bg-muted/20 flex items-center gap-2">
+                    <Input
+                      type="text"
+                      value={manualModel}
+                      onChange={(e) => setManualModel(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addManualModel();
+                        }
+                      }}
+                      placeholder="手动补充模型 ID，如 claude-3-7-sonnet（回车添加）"
+                      className="font-mono h-7"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={addManualModel}
+                      disabled={!manualModel.trim()}
+                    >
+                      添加
+                    </Button>
+                  </div>
                 </div>
                 {errors.models && <p className="text-[11px] text-rose-500 mt-1">{errors.models}</p>}
-                {errors.save && (
-                  <div className="p-3 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300">
-                    保存失败：{errors.save}
-                  </div>
-                )}
+              </div>
+
+
+
+              {errors.save && (
+                <div className="p-3 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300">
+                  保存失败：{errors.save}
+                </div>
+              )}
+
+              {/* 表单自然底部操作区：纯正 shadcn/ui 按钮层级 */}
+              <div className="flex items-center justify-between pt-5 border-t border-border">
+                <div>
+                  {editingProvider && (
+                    <Button
+                      type="button"
+                      variant="destructive-ghost"
+                      size="default"
+                      disabled={saving || deleting}
+                      onClick={() => setConfirmingDelete(true)}
+                    >
+                      删除此服务商
+                    </Button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                    {fetching
+                      ? '正在获取上游模型…'
+                      : draft.models.length === 0
+                        ? '请先选择或添加至少一个模型'
+                        : ''}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="default"
+                    onClick={handleClose}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    type="submit"
+                    variant="default"
+                    size="default"
+                    disabled={saving || deleting || fetching || draft.models.length === 0}
+                  >
+                    {saving ? (
+                      <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Check className="w-3.5 h-3.5" />
+                    )}
+                    <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '添加并启用'}</span>
+                  </Button>
+                </div>
               </div>
             </form>
           )}
         </div>
       </div>
+
+      {editingProvider && (
+        <ConfirmDialog
+          open={confirmingDelete}
+          title={"删除服务商“" + (draft.name || editingProvider.name) + "”？"}
+          details={[
+            '删除后需重新配置。已有请求日志不受影响。',
+            ...(draft.isDefault ? ['该服务商当前是默认服务商，删除后需要重新指定。'] : []),
+          ]}
+          confirmLabel="删除"
+          busy={deleting}
+          onConfirm={async () => {
+            setDeleting(true);
+            try {
+              await deleteProvider(editingProvider.id);
+              closeProviderEditor();
+            } catch {
+              setDeleting(false);
+            }
+          }}
+          onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
     </div>
   );
 }

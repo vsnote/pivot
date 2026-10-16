@@ -254,6 +254,27 @@ pub mod imp {
         }
     }
 
+    pub fn setup_unified_toolbar(window: &WebviewWindow) {
+        unsafe {
+            let ns_window = match window.ns_window() {
+                Ok(w) => w as id,
+                Err(_) => return,
+            };
+
+            let toolbar_identifier = NSString::alloc(nil).init_str("com.pivot.toolbar");
+            let toolbar: id = msg_send![class!(NSToolbar), alloc];
+            let toolbar: id = msg_send![toolbar, initWithIdentifier:toolbar_identifier];
+            let _: () = msg_send![toolbar, setAllowsUserCustomization:NO];
+            let _: () = msg_send![toolbar, setAutosavesConfiguration:NO];
+            let _: () = msg_send![toolbar, setDisplayMode:2usize];
+            let _: () = msg_send![toolbar, setShowsBaselineSeparator:NO];
+
+            let _: () = msg_send![ns_window, setToolbarStyle:3isize];
+            let _: () = msg_send![ns_window, setToolbar:toolbar];
+            let _: () = msg_send![toolbar_identifier, release];
+        }
+    }
+
     pub fn set_selected_tab(tab: &str) {
         if let Some(pos) = TAB_IDS.iter().position(|&t| t == tab) {
             let ptr = SEGMENT_CONTROL.load(Ordering::SeqCst);
@@ -284,8 +305,10 @@ pub mod imp {
 pub mod imp {
     use tauri::WebviewWindow;
     pub fn setup_native_tabs(_window: &WebviewWindow) {}
+    pub fn setup_unified_toolbar(_window: &WebviewWindow) {}
     pub fn set_selected_tab(_tab: &str) {}
     pub fn set_toolbar_enabled(_enabled: bool) {}
 }
 
 pub use imp::*;
+

@@ -121,4 +121,4 @@ export interface Preset {
 
 export type SettingsSection = 'clients' | 'routes' | 'gateway' | 'logs' | 'about';
 
-export type ActiveTab = 'dashboard' | 'providers' | 'routes' | 'interceptor' | 'logs' | 'settings';
+export type ActiveTab = 'dashboard' | 'providers' | 'clients' | 'routes' | 'interceptor' | 'logs' | 'settings';

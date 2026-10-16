@@ -1,17 +1,16 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
-import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import { Button } from '@/components/common/Button';
+import { Badge } from '@/components/common/Badge';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import {
   Plus,
-  Trash2,
-  Zap,
   LoaderCircle,
-  Boxes,
-  ChevronRight,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 import {
@@ -21,349 +20,340 @@ import {
   GeminiLogo,
 } from '@/components/common/BrandIcons';
 
+const panelClass =
+  'rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden';
+
+const CLIENT_LABEL: Record<InterceptorStatus['id'], string> = {
+  claude_code: 'Claude Code',
+  codex_cli: 'Codex CLI',
+  gemini_cli: 'Gemini CLI',
+};
+
+function displayPath(path: string): string {
+  const home = path.match(/^\/(?:Users|home)\/[^/]+/);
+  return home ? `~${path.slice(home[0].length)}` : path;
+}
+
+function ClientMark({ id }: { id: InterceptorStatus['id'] }) {
+  if (id === 'codex_cli') return <OpenAISpiralIcon className="w-full h-full" />;
+  if (id === 'gemini_cli') return <GeminiLogo className="w-full h-full" />;
+  return <ClaudeLogo className="w-full h-full" />;
+}
+
+function clientStatus(client: InterceptorStatus): { label: string; className: string } {
+  if (!client.installed) return { label: '未安装', className: 'text-zinc-400 dark:text-zinc-500' };
+  if (client.isOverwritten) {
+    return { label: '配置已被其他工具改写', className: 'text-amber-600 dark:text-amber-400' };
+  }
+  if (client.isIntercepted) return { label: '已接管', className: 'text-emerald-600 dark:text-emerald-400' };
+  return { label: '未接管', className: 'text-zinc-500 dark:text-zinc-400' };
+}
+
 function ProviderCard({ provider }: { provider: Provider }) {
-  const { openProviderEditor, deleteProvider, toggleProvider, testProviderLatency } =
-    useAppStore(
-      useShallow((state) => ({
-        openProviderEditor: state.openProviderEditor,
-        deleteProvider: state.deleteProvider,
-        toggleProvider: state.toggleProvider,
-        testProviderLatency: state.testProviderLatency,
-      })),
-    );
-  const [pending, setPending] = useState<'test' | 'toggle' | 'delete' | null>(null);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  // 仅在本次测试后展示毫秒，常态不展示历史毫秒
-  const [testedLatency, setTestedLatency] = useState<number | null>(null);
+  const { openProviderEditor, toggleProvider } = useAppStore(
+    useShallow((state) => ({
+      openProviderEditor: state.openProviderEditor,
+      toggleProvider: state.toggleProvider,
+    })),
+  );
+  const [toggling, setToggling] = useState(false);
 
-  const latencyColor =
-    testedLatency == null
-      ? 'text-zinc-400 dark:text-zinc-500'
-      : testedLatency < 0
-        ? 'text-rose-500 dark:text-rose-400'
-        : testedLatency < 300
-          ? 'text-emerald-600 dark:text-emerald-400'
-          : 'text-amber-500 dark:text-amber-400';
-
-  const latencyText =
-    testedLatency == null
-      ? '测速'
-      : testedLatency < 0
-        ? '失败'
-        : `${testedLatency} ms`;
-
-  const runAction = async (action: NonNullable<typeof pending>, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    if (pending) return;
-    setPending(action);
+  const handleToggle = async () => {
+    if (toggling) return;
+    setToggling(true);
     try {
-      if (action === 'test') {
-        const ms = await testProviderLatency(provider.id);
-        setTestedLatency(ms);
-      }
-      if (action === 'toggle') {
-        await toggleProvider(provider.id, !provider.enabled);
-        if (provider.enabled) {
-          setTestedLatency(null);
-        }
-      }
-      if (action === 'delete') {
-        await deleteProvider(provider.id);
-        setConfirmingDelete(false);
-      }
-    } catch {
-      if (action === 'test') setTestedLatency(-1);
+      await toggleProvider(provider.id, !provider.enabled);
     } finally {
-      setPending(null);
+      setToggling(false);
     }
-  };
-
-  const handleRowClick = () => {
-    if (pending !== null) return;
-    openProviderEditor(provider);
   };
 
   return (
     <div
       role="button"
       tabIndex={0}
-      onClick={handleRowClick}
+      onClick={() => openProviderEditor(provider)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          handleRowClick();
+          openProviderEditor(provider);
         }
       }}
-      className={`group flex items-center justify-between gap-3.5 px-4 py-3 sm:py-3.5 transition-colors cursor-pointer select-none ${
+      className={`group flex items-center justify-between gap-3 px-4 py-2.5 transition-colors cursor-pointer select-none ${
         provider.enabled
-          ? 'hover:bg-zinc-50/80 dark:hover:bg-zinc-800/50'
-          : 'opacity-60 bg-zinc-50/30 dark:bg-zinc-900/30 hover:bg-zinc-100/50 dark:hover:bg-zinc-800/40'
+          ? 'hover:bg-accent/50'
+          : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
       }`}
       aria-label={`编辑服务商 ${provider.name}`}
-      aria-busy={pending !== null}
     >
-      {/* 左侧身份与服务商基本信息（精致双行排版） */}
-      <div className="flex items-center gap-3.5 min-w-0 flex-1">
+      <div className="flex items-center gap-3 min-w-0 flex-1">
         <ProviderAvatar
           name={provider.name}
           protocol={provider.protocol}
           iconKey={provider.presetId || undefined}
+          sizeClass="w-8 h-8"
         />
 
-        <div className="min-w-0 flex-1 flex items-center gap-2">
-          <h3 className="text-[14px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
-            {provider.name}
-          </h3>
-          {provider.isDefault && (
-            <span className="text-[10px] font-medium px-1.5 py-0.2 rounded-sm bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/60 dark:border-cyan-800/60 select-none">
-              默认
-            </span>
-          )}
-          <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-mono select-none">
-            · {provider.models.length} 个模型
-          </span>
-        </div>
-      </div>
-
-      {/* 右侧：操作区、启用开关与详情指引 */}
-      <div className="flex items-center gap-1.5 shrink-0">
-        {/* 删除按钮：hover 时显现，排在测速左侧，避免夹在毫秒与开关中间 */}
-        <button
-          type="button"
-          disabled={pending !== null}
-          onClick={(e) => {
-            e.stopPropagation();
-            setConfirmingDelete(true);
-          }}
-          className="p-1.5 rounded-md text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
-          title="删除服务商"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
-
-        {/* 测速按钮 / 测速结果：未测试时 hover 显现测速；测试后展示结果并可再次点击重新测速 */}
-        {provider.enabled && (
-          <div className="flex items-center">
-            {pending === 'test' ? (
-              <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono text-zinc-400">
-                <LoaderCircle className="w-3.5 h-3.5 animate-spin text-cyan-500" />
-                <span>…</span>
-              </div>
-            ) : testedLatency !== null ? (
-              <button
-                type="button"
-                onClick={(e) => runAction('test', e)}
-                className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer ${latencyColor}`}
-                title="点击重新测速"
-              >
-                <Zap className="w-3.5 h-3.5" />
-                <span>{latencyText}</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={(e) => runAction('test', e)}
-                className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
-                title="测试延迟"
-              >
-                <Zap className="w-3.5 h-3.5 text-zinc-400 group-hover:text-amber-500" />
-                <span>测速</span>
-              </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
+              {provider.name}
+            </h3>
+            {provider.isDefault && (
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal bg-zinc-100/80 dark:bg-zinc-800/80 text-zinc-700 dark:text-zinc-300 border-zinc-200/90 dark:border-zinc-700/80">
+                默认
+              </Badge>
             )}
           </div>
-        )}
 
-        {/* 开关：常态自然对齐，去除非 hover 时的空竖线 */}
-        <div
-          className="ml-1 flex items-center"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <Switch
-            checked={provider.enabled}
-            disabled={pending !== null}
-            onCheckedChange={() => runAction('toggle')}
-            ariaLabel="启用服务商"
-          />
-        </div>
-
-        {/* 详情指引箭头 */}
-        <div className="pl-0.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-300 group-hover:translate-x-0.5 transition-all">
-          <ChevronRight className="w-4 h-4" />
+          <div className="flex items-center gap-1.5 mt-1 overflow-hidden">
+            {provider.models.length === 0 ? (
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                未配置模型
+              </span>
+            ) : (
+              <>
+                {provider.models.slice(0, 2).map((m) => (
+                  <Badge
+                    key={m}
+                    variant="secondary"
+                    className="font-mono text-[10px] font-normal truncate max-w-[160px] border border-zinc-200/60 dark:border-zinc-800"
+                    title={m}
+                  >
+                    {m}
+                  </Badge>
+                ))}
+                {provider.models.length > 2 && (
+                  <Badge
+                    variant="secondary"
+                    className="font-mono text-[10px] font-normal text-zinc-400 dark:text-zinc-500"
+                    title={`其他模型：${provider.models.slice(2).join(', ')}`}
+                  >
+                    +{provider.models.length - 2}
+                  </Badge>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
-      <ConfirmDialog
-        open={confirmingDelete}
-        title={`删除服务商“${provider.name}”？`}
-        details={[
-          '删除后需重新配置。已有请求日志不受影响。',
-          ...(provider.isDefault ? ['该服务商当前是默认兜底服务商。'] : []),
-        ]}
-        confirmLabel="删除"
-        busy={pending === 'delete'}
-        onConfirm={() => runAction('delete')}
-        onCancel={() => setConfirmingDelete(false)}
-      />
+      <div className="shrink-0 flex items-center" onClick={(e) => e.stopPropagation()}>
+        <Switch
+          checked={provider.enabled}
+          disabled={toggling}
+          onCheckedChange={handleToggle}
+          ariaLabel={provider.enabled ? `停止 ${provider.name} 参与路由` : `让 ${provider.name} 参与路由`}
+        />
+      </div>
     </div>
   );
 }
 
-const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
-  {
-    id: 'claude_code',
-    name: 'Claude Code',
-    installed: true,
-    configPath: '~/.claude.json',
-    isIntercepted: false,
-  },
-  {
-    id: 'codex_cli',
-    name: 'Codex CLI',
-    installed: true,
-    configPath: '~/.codex/config.json',
-    isIntercepted: false,
-  },
-  {
-    id: 'gemini_cli',
-    name: 'Gemini CLI',
-    installed: false,
-    configPath: '~/.gemini/config.json',
-    isIntercepted: false,
-  },
-];
+function CopyAddressButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
 
-function GatewayQuickBar() {
-  const { interceptors, toggleInterceptor, providers } = useAppStore(
+  const copy = () => {
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1600);
+      },
+      () => {},
+    );
+  };
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      onClick={copy}
+    >
+      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+      <span>{copied ? '已复制' : '复制地址'}</span>
+    </Button>
+  );
+}
+
+function IngressCard() {
+  const { interceptors, toggleInterceptor, providers, stats, initialLoaded } = useAppStore(
     useShallow((state) => ({
       interceptors: state.interceptors,
       toggleInterceptor: state.toggleInterceptor,
       providers: state.providers,
+      stats: state.stats,
+      initialLoaded: state.initialLoaded,
     })),
   );
-
-  const hasEnabledProviders = providers.some((p) => p.enabled);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [conflictConfirmTarget, setConflictConfirmTarget] = useState<InterceptorStatus | null>(null);
-  const clientList = interceptors.length > 0 ? interceptors : DEFAULT_INTERCEPTORS;
 
-  const doToggle = async (id: 'claude_code' | 'codex_cli' | 'gemini_cli', enable: boolean) => {
+  const hasEnabledProviders = providers.some((p) => p.enabled);
+  const address = `http://${stats.host}:${stats.port}`;
+  const gatewayUp = stats.isRunning;
+
+  const doToggle = async (id: InterceptorStatus['id'], enable: boolean) => {
     if (togglingId) return;
     setTogglingId(id);
     try {
       await toggleInterceptor(id, enable);
     } catch {
-      // 全局状态管理处理错误
+      // 全局错误条展示失败原因
     } finally {
       setTogglingId(null);
     }
   };
 
-  const handleToggleClient = async (
-    client: InterceptorStatus,
-    e: React.MouseEvent,
-  ) => {
-    e.stopPropagation();
+  const handleSwitch = (client: InterceptorStatus, enable: boolean) => {
     if (togglingId) return;
-
-    // 若尝试开启或处于被第三方改写争夺状态，且检测到冲突，先弹窗提示
-    if ((!client.isIntercepted || client.isOverwritten) && client.conflict) {
+    if (enable && client.conflict) {
       setConflictConfirmTarget(client);
       return;
     }
-
-    await doToggle(client.id, !client.isIntercepted);
+    void doToggle(client.id, enable);
   };
 
-  const handleConfirmTakeover = async (target: InterceptorStatus) => {
-    setConflictConfirmTarget(null);
-    await doToggle(target.id, true);
-  };
+  const notice = ((): { text: string; tone: 'fault' | 'warn' | 'hint' } | null => {
+    if (!initialLoaded) return null;
+    if (!gatewayUp) return { text: `${stats.port} 未在监听，接管不会生效。`, tone: 'fault' };
+    const takenOver = interceptors.some((client) => client.isIntercepted);
+    if (takenOver && !hasEnabledProviders) {
+      return { text: '已接管的请求还没有可转发的上游。', tone: 'warn' };
+    }
+    const installed = interceptors.some((client) => client.installed);
+    if (hasEnabledProviders && installed && !takenOver) {
+      return { text: 'CLI 仍走官方。手动接入使用上面的网关地址。', tone: 'hint' };
+    }
+    return null;
+  })();
 
   return (
     <>
-      <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-zinc-50/60 dark:bg-zinc-850/40 border-b border-zinc-200/80 dark:border-zinc-800">
-        {/* CLI / Agent 自动代理胶囊 */}
-        <div className="flex items-center gap-3 flex-wrap">
-          <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500 shrink-0 select-none">
-            Agent 代理
-          </span>
+      <section className={panelClass} aria-label="网关与客户端">
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-muted/30 border-b border-border">
+          <div className="flex items-center gap-2 min-w-0 text-xs">
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${gatewayUp ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]' : 'bg-rose-500'}`}
+              aria-hidden
+            />
+            <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide shrink-0">本地网关</span>
+            <span className="font-mono text-zinc-400 dark:text-zinc-500 truncate select-text text-[11px]">
+              {stats.host}:{stats.port}
+            </span>
+          </div>
+          <CopyAddressButton text={address} />
+        </div>
 
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {clientList.map((client) => {
-              const isBusy = togglingId === client.id;
-              const active = client.isIntercepted;
-
-              let icon = <ClaudeLogo className="w-3.5 h-3.5" />;
-              let label = 'Claude';
-              let activeClass =
-                'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30';
-
-              if (client.id === 'codex_cli') {
-                icon = <OpenAISpiralIcon className="w-3.5 h-3.5" />;
-                label = 'Codex';
-                activeClass =
-                  'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30';
-              } else if (client.id === 'gemini_cli') {
-                icon = <GeminiLogo className="w-3.5 h-3.5" />;
-                label = 'Gemini';
-                activeClass =
-                  'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30';
-              }
-
-              const isOverwritten = client.isOverwritten ?? false;
-              let title = `${client.name}: ${
-                active ? '已接管至本地网关 (点击恢复官方配置)' : '未接管 (点击一键配置代理)'
-              }`;
-              if (isOverwritten) {
-                title = `${client.name}: 检测到配置已被第三方工具覆盖修改 (点击解决冲突)`;
-                activeClass = 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 ring-1 ring-amber-500/30';
-              }
+        {interceptors.length === 0 ? (
+          <p className="px-4 py-6 text-center text-xs text-zinc-400">没有读到本机客户端。</p>
+        ) : (
+          <div className="divide-y divide-border">
+            {interceptors.map((client) => {
+              const label = CLIENT_LABEL[client.id] ?? client.name;
+              const status = clientStatus(client);
+              const busy = togglingId === client.id;
+              const path = client.installed && client.configPath ? displayPath(client.configPath) : '';
 
               return (
-                <button
-                  key={client.id}
-                  type="button"
-                  disabled={isBusy}
-                  onClick={(e) => handleToggleClient(client, e)}
-                  className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-all duration-150 cursor-pointer ${
-                    isOverwritten
-                      ? `${activeClass} shadow-2xs`
-                      : active
-                        ? `${activeClass} shadow-2xs`
-                        : 'bg-zinc-100/70 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400 border-transparent hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/60'
-                  }`}
-                  title={title}
-                >
-                  {isBusy ? (
-                    <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    icon
-                  )}
-                  <span className="text-[11px] font-mono">
-                    {label}
-                  </span>
-                  {isOverwritten ? (
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 ring-2 ring-white dark:ring-zinc-900 animate-pulse" />
-                  ) : active ? (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-zinc-900" />
-                  ) : null}
-                </button>
+                <div key={client.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-8 h-8 rounded-md flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-700/60 bg-zinc-50/80 dark:bg-zinc-800/80 p-1.5">
+                      <ClientMark id={client.id} />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                        {label}
+                      </h3>
+                      <p className="text-[11px] truncate mt-0.5">
+                        <span className={status.className}>{status.label}</span>
+                        {path && (
+                          <span className="text-zinc-400 dark:text-zinc-500 select-text font-mono text-[10px]" title={client.configPath}>
+                            {' '}
+                            · {path}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="shrink-0">
+                    {busy ? (
+                      <LoaderCircle className="w-4 h-4 animate-spin text-zinc-400" />
+                    ) : client.isOverwritten ? (
+                      <button
+                        type="button"
+                        onClick={() => setConflictConfirmTarget(client)}
+                        className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/50 cursor-pointer"
+                      >
+                        解决冲突
+                      </button>
+                    ) : client.installed ? (
+                      <Switch
+                        checked={client.isIntercepted}
+                        disabled={togglingId !== null}
+                        onCheckedChange={(checked) => handleSwitch(client, checked)}
+                        ariaLabel={client.isIntercepted ? `恢复 ${label}` : `接管 ${label}`}
+                      />
+                    ) : null}
+                  </div>
+                </div>
               );
             })}
           </div>
-        </div>
-      </div>
+        )}
 
-      {/* 开启前的冲突拦截确认与透明接管弹窗 */}
+        {/* 底部内嵌说明，去除卡片外孤立悬挂 */}
+        <div className="px-4 py-2 bg-zinc-50/40 dark:bg-zinc-900/50 border-t border-zinc-100 dark:border-zinc-800/80 text-[11px] text-zinc-400 dark:text-zinc-500">
+          {notice ? (
+            <span
+              className={
+                notice.tone === 'fault'
+                  ? 'text-rose-500 font-medium'
+                  : notice.tone === 'warn'
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : ''
+              }
+            >
+              {notice.text}
+            </span>
+          ) : (
+            <span>接管后客户端请求将流经 Pivot 分发；未接管则走官方直连。</span>
+          )}
+        </div>
+      </section>
+
       <AgentConflictDialog
         open={conflictConfirmTarget !== null}
         target={conflictConfirmTarget}
         busy={togglingId !== null}
         hasEnabledProviders={hasEnabledProviders}
         onClose={() => setConflictConfirmTarget(null)}
-        onConfirmTakeover={handleConfirmTakeover}
+        onConfirmTakeover={async (target) => {
+          setConflictConfirmTarget(null);
+          await doToggle(target.id, true);
+        }}
       />
     </>
+  );
+}
+
+function LoadingState() {
+  return (
+    <div className="p-12 text-center">
+      <LoaderCircle className="w-6 h-6 text-zinc-600 dark:text-zinc-400 animate-spin mx-auto mb-2" />
+      <p className="text-xs text-zinc-400">载入配置中…</p>
+    </div>
+  );
+}
+
+export function ClientsView() {
+  const dataReady = useAppStore((state) => state.initialLoaded && !state.isLoading);
+  if (!dataReady) return <LoadingState />;
+  return (
+    <div className="space-y-3 animate-in fade-in duration-150">
+      <IngressCard />
+    </div>
   );
 }
 
@@ -379,46 +369,36 @@ export function ProviderList() {
 
   const dataReady = initialLoaded && !isLoading;
 
+  if (!dataReady) return <LoadingState />;
+
   return (
     <div className="animate-in fade-in duration-150">
-      {/* 一体化控制面板：无缝融合 Agent 代理栏与服务商列表，间距归零 */}
-      <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs overflow-hidden">
-        {/* 顶部工具栏：Agent 代理快捷接管 */}
-        <GatewayQuickBar />
+      <section className={panelClass} aria-label="上游服务商">
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-muted/30 border-b border-border">
+          <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">上游服务商</span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="xs"
+            onClick={() => openProviderEditor(null)}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>添加</span>
+          </Button>
+        </div>
 
-        {!dataReady ? (
-          <div className="p-12 text-center">
-            <LoaderCircle className="w-6 h-6 text-cyan-600 dark:text-cyan-400 animate-spin mx-auto mb-2" />
-            <p className="text-xs text-zinc-400">载入配置中…</p>
-          </div>
-        ) : providers.length === 0 ? (
-          <div className="p-10 text-center">
-            <div className="w-12 h-12 rounded-lg bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 flex items-center justify-center mx-auto mb-3">
-              <Boxes className="w-6 h-6" />
-            </div>
-            <h3 className="text-sm font-bold text-zinc-950 dark:text-zinc-100">
-              暂无已配置的服务商
-            </h3>
-            <p className="text-xs text-zinc-400 mt-1 max-w-sm mx-auto">
-              添加上游 API Key 与可用模型，即可通过 Pivot 本地中继分发。
-            </p>
-            <button
-              type="button"
-              onClick={() => openProviderEditor(null)}
-              className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 dark:bg-cyan-600 dark:hover:bg-cyan-500 shadow-xs cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>添加服务商</span>
-            </button>
-          </div>
+        {providers.length === 0 ? (
+          <p className="px-4 py-8 text-center text-xs text-zinc-400">
+            添加上游 API Key 和模型后，接管的请求会转发到这里。
+          </p>
         ) : (
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+          <div className="divide-y divide-border">
             {providers.map((provider) => (
               <ProviderCard key={provider.id} provider={provider} />
             ))}
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }

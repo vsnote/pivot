@@ -33,33 +33,33 @@ export const PivotLogo: React.FC<PivotLogoProps> = ({
         ? 'grayscale opacity-75'
         : '';
 
-  // 1. 系统级应用图标模式: 带有标准 macOS Squircle 磨砂底板与柔和环境阴影
+  // 1. 系统级应用图标模式: 标准 macOS 824/1024 比例圆角底板与投影
   if (variant === 'icon') {
     return (
       <img
         src="/app-icon.png"
         alt={alt}
-        className={`object-contain select-none shrink-0 pointer-events-none drop-shadow-md ${filterClass} ${className}`}
+        className={`object-contain select-none shrink-0 pointer-events-none ${filterClass} ${className}`}
         draggable={false}
       />
     );
   }
 
-  // 2. 默认应用内品牌标模式: 纯透明背景，绝无方块底板，纯净优雅呼应文字
+  // 2. 默认应用内品牌标模式: 纯透明背景像素点阵蛇形标
   return (
     <div className={`relative inline-flex items-center justify-center select-none shrink-0 pointer-events-none ${className}`}>
-      {/* 浅色模式: 纯透明深钴蓝至电气青立体微光 */}
+      {/* 浅色模式 */}
       <img
         src="/brand-mark-light.png"
         alt={alt}
         className={`w-full h-full object-contain dark:hidden ${filterClass}`}
         draggable={false}
       />
-      {/* 深色模式: 纯透明晶莹发光白青霓虹 */}
+      {/* 深色模式 */}
       <img
         src="/brand-mark-dark.png"
         alt={alt}
-        className={`w-full h-full object-contain hidden dark:block drop-shadow-[0_0_8px_rgba(6,182,212,0.45)] ${filterClass}`}
+        className={`w-full h-full object-contain hidden dark:block ${filterClass}`}
         draggable={false}
       />
     </div>

@@ -1,7 +1,7 @@
 import React, { useEffect, useSyncExternalStore } from 'react';
 import { applyAppTheme, useAppStore } from '@/store/useAppStore';
 import { Header } from '@/components/layout/Header';
-import { ProviderList } from '@/components/providers/ProviderList';
+import { ClientsView, ProviderList } from '@/components/providers/ProviderList';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
 import { RequestLogs } from '@/components/logs/RequestLogs';
 import { SettingsView } from '@/components/settings/SettingsView';
@@ -36,8 +36,20 @@ export const App: React.FC = () => {
     fetchInitialData();
   }, []);
 
+  useEffect(() => {
+    const onContextMenu = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]')) {
+        return;
+      }
+      event.preventDefault();
+    };
+    document.addEventListener('contextmenu', onContextMenu);
+    return () => document.removeEventListener('contextmenu', onContextMenu);
+  }, []);
+
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#f8fafc] dark:bg-[#09090b] text-zinc-900 dark:text-zinc-100 antialiased font-sans select-none">
+    <div className="h-screen w-screen flex flex-col overflow-hidden bg-background text-foreground antialiased font-sans select-none">
       {/* 顶部现代化原生标题栏与导航 */}
       <Header />
 
@@ -45,7 +57,7 @@ export const App: React.FC = () => {
       {error && (
         <div
           role="alert"
-          className="mx-4 sm:mx-8 mt-3 flex items-center justify-between gap-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/90 dark:bg-red-950/50 px-4 py-2.5 text-xs text-red-700 dark:text-red-300 shadow-xs animate-in fade-in"
+          className="mx-4 sm:mx-6 mt-3 flex items-center justify-between gap-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/90 dark:bg-red-950/50 px-4 py-2.5 text-xs text-red-700 dark:text-red-300 shadow-xs animate-in fade-in"
         >
           <div className="flex items-center gap-2 min-w-0">
             <AlertCircle className="w-4 h-4 shrink-0 text-red-500 dark:text-red-400" />
@@ -68,6 +80,9 @@ export const App: React.FC = () => {
         <div className="max-w-5xl mx-auto w-full">
           <div className={activeTab === 'providers' ? 'block' : 'hidden'}>
             {isProviderEditorOpen ? <ProviderEditor /> : <ProviderList />}
+          </div>
+          <div className={activeTab === 'clients' ? 'block' : 'hidden'}>
+            <ClientsView />
           </div>
           <div
             className={

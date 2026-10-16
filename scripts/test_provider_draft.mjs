@@ -29,6 +29,21 @@ test('编辑和保存保留隐藏配置及停用状态，规范化密钥和模�
   assert.equal(saved.baseUrl, 'https://example.com/v1');
 });
 
+test('库中没有默认服务商时，新增的第一个服务商默认承担该角色', () => {
+  const first = createProviderDraft(null, [preset], true);
+  assert.equal(first.isDefault, true);
+  assert.equal(createProviderDraft(null, [preset], false).isDefault, false);
+
+  // 选定预设会重建草稿，但仍需保留这个角色
+  assert.equal(applyProviderPreset(first, preset, true).isDefault, true);
+  assert.equal(applyProviderPreset(first, preset, false).isDefault, false);
+  assert.equal(applyProviderPreset(first, preset).models.length, 0);
+
+  // 编辑已有服务商时，该参数不参与判断
+  const existing = { ...first, isDefault: false };
+  assert.equal(createProviderDraft(existing, [preset], true).isDefault, false);
+});
+
 test('显式自定义配置不会被重新锁成预设，本地与账号专属地址可编辑', () => {
   const existing = { ...createProviderDraft(null, []), id: preset.id, name: preset.name, protocol: preset.protocol, baseUrl: preset.baseUrl, presetId: null };
   assert.equal(createProviderDraft(existing, [preset]).presetId, null);
