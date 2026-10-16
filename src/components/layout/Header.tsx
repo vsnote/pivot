@@ -39,7 +39,7 @@ export const Header: React.FC = () => {
     >
       <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <Tabs value={current} onValueChange={selectTab}>
-          <TabsList aria-label="主要页面导航">
+          <TabsList variant="ghost" aria-label="主要页面导航">
             {tabs.map((tab) => (
               <TabsTrigger key={tab.id} value={tab.id}>
                 {tab.label}
