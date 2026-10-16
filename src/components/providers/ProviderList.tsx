@@ -374,34 +374,19 @@ export function ProviderList() {
   return (
     <div className="animate-in fade-in duration-150">
       <section className={panelClass} aria-label="上游服务商">
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-muted/30 border-b border-border">
-          <div className="flex items-center gap-1.5 text-xs">
-            <span className="font-semibold text-zinc-800 dark:text-zinc-200 tracking-wide shrink-0">
-              服务商
-            </span>
-            {providers.length > 0 && (
-              <span className="font-mono text-muted-foreground text-[11px]">
-                · 共 {providers.length} 个
-              </span>
-            )}
-          </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => openProviderEditor(null)}
-            aria-label="添加服务商"
-            title="添加服务商"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </Button>
-        </div>
-
         {providers.length === 0 ? (
-          <p className="px-4 py-8 text-center text-xs text-zinc-400">
-            添加上游 API Key 和模型后，接管的请求会转发到这里。
-          </p>
+          <div className="px-4 py-10 text-center text-xs text-muted-foreground space-y-2">
+            <p>尚未配置任何服务商渠道</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => openProviderEditor(null)}
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>添加服务商</span>
+            </Button>
+          </div>
         ) : (
           <div className="divide-y divide-border">
             {providers.map((provider) => (
