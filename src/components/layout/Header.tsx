@@ -34,7 +34,7 @@ export const Header: React.FC = () => {
   return (
     <header
       data-tauri-drag-region
-      className="relative h-11 sm:h-12 w-full px-4 select-none shrink-0 z-40 bg-white/60 dark:bg-[#09090b]/60 border-b border-zinc-200/50 dark:border-zinc-800/60 backdrop-blur-md flex items-center justify-center"
+      className="relative h-11 sm:h-12 w-full px-4 select-none shrink-0 z-40 bg-background/80 border-b border-border backdrop-blur-md flex items-center justify-center"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>

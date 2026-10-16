@@ -27,7 +27,8 @@ export const TabsTrigger = React.forwardRef<
     ref={ref}
     className={cn(
       'inline-flex h-6 items-center justify-center whitespace-nowrap rounded-md px-3 text-xs font-medium transition-all cursor-pointer select-none',
-      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+      // 彻底消除聚焦时出现的生硬黑色边框
+      'outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 ring-0',
       'disabled:pointer-events-none disabled:opacity-50',
       'data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-2xs',
       'hover:text-foreground',
@@ -45,7 +46,7 @@ export const TabsContent = React.forwardRef<
   <TabsPrimitive.Content
     ref={ref}
     className={cn(
-      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+      'outline-none focus:outline-none focus-visible:outline-none',
       className
     )}
     {...props}
