@@ -11,8 +11,7 @@ export const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      // 方向 B：彻底去掉笨重的外层灰色药丸跑道与外框，回归 100% 透明通透
-      'inline-flex h-8 items-center justify-center gap-1 bg-transparent p-0 text-muted-foreground',
+      'inline-flex h-8 items-center justify-center gap-1 bg-transparent p-0 text-muted-foreground select-none',
       className
     )}
     {...props}
@@ -28,12 +27,16 @@ export const TabsTrigger = React.forwardRef<
     ref={ref}
     className={cn(
       'inline-flex h-7 items-center justify-center whitespace-nowrap rounded-md px-3 text-xs font-medium transition-all duration-150 cursor-pointer select-none',
-      'outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0',
+      // 基础边框占位，消除状态切换时的 1px 抖动
+      'border border-transparent',
+      // 彻底消除 WebKit 下 mousedown/click/focus 时触发的生硬轮廓线
+      'outline-none focus:outline-none focus-visible:outline-none active:outline-none',
+      'ring-0 focus:ring-0 focus-visible:ring-0 active:ring-0',
       'disabled:pointer-events-none disabled:opacity-50',
       // 未激活项：纯净透明，鼠标悬停时平滑浮现极淡微背景
       'hover:text-foreground hover:bg-muted/60',
-      // 激活项：独立的高质感浮动微卡片，带微边框与极轻微投影
-      'data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:border data-[state=active]:border-border/80 data-[state=active]:shadow-2xs font-semibold',
+      // 激活项：独立的高质感浮动微卡片，带微弱柔和边框与轻投影
+      'data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:border-border/80 data-[state=active]:shadow-2xs font-semibold',
       className
     )}
     {...props}

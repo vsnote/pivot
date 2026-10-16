@@ -83,6 +83,18 @@
   --ring: oklch(0.8 0 0);
 }
 
+@layer base {
+  /* 彻底消除 WebKit 下 Tab 与按钮在点击/聚焦时的原生黑框 */
+  [role="tab"],
+  [role="tab"]:focus,
+  [role="tab"]:active,
+  [role="tab"]:focus-visible {
+    outline: none !important;
+    box-shadow: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
 html, body, #root {
   height: 100%;
   width: 100%;
