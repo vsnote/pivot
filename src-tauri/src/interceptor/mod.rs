@@ -1,4 +1,4 @@
-use crate::db::{Database, Provider};
+use crate::db::{Database, Provider, RouteRule};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -464,6 +464,16 @@ impl InterceptorManager {
         let third_party = self.get_third_party_config("claude_code");
         let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
 
+        if is_intercepted {
+            let missing_picker = settings_path.exists()
+                && fs::read_to_string(&settings_path)
+                    .map(|c| !c.contains("replaceBuiltInOptions"))
+                    .unwrap_or(false);
+            if missing_picker {
+                let _ = self.do_sync_claude_settings();
+            }
+        }
+
         InterceptorInfo {
             id: "claude_code".to_string(),
             name: "Claude Code CLI".to_string(),
@@ -485,8 +495,11 @@ impl InterceptorManager {
         let backup_path = Self::claude_backup_path();
 
         if enable {
-            // 提取现有第三方端点作为记录
-            let orig_ep = self.detect_third_party_endpoint("claude_code");
+            // 获取之前已保存的 orig_ep，或提取当前配置的第三方端点
+            let saved_state = self.db.get_interceptor_state("claude_code").ok().flatten();
+            let orig_ep = saved_state
+                .and_then(|s| s.2)
+                .or_else(|| self.detect_third_party_endpoint("claude_code"));
 
             // 1. 接管 ~/.claude/settings.json (现代 Claude Code 全局官方环境变量配置)
             let mut orig_settings = String::new();
@@ -494,10 +507,6 @@ impl InterceptorManager {
                 orig_settings = fs::read_to_string(&settings_path).unwrap_or_default();
             } else if let Some(p) = settings_path.parent() {
                 let _ = fs::create_dir_all(p);
-            }
-
-            if !settings_backup_path.exists() && settings_path.exists() {
-                let _ = atomic_write(&settings_backup_path, &orig_settings);
             }
 
             let mut settings_val: Value =
@@ -508,52 +517,86 @@ impl InterceptorManager {
             if !settings_val["env"].is_object() {
                 settings_val["env"] = json!({});
             }
+            // 仅对 ANTHROPIC_BASE_URL 进行打补丁，其余 permissions / hooks / model / env 完整保留
             settings_val["env"]["ANTHROPIC_BASE_URL"] = json!(self.gateway_url);
+
+            // 确保有有效 token，防止 Claude Code 抛出登录弹窗
+            if settings_val["env"]
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .is_empty()
+            {
+                settings_val["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("pivot");
+            }
+
+            // 清理第三方代理遗留的默认模型重定向环境变量，使 Claude Code 的请求正常流转到 Pivot 的 Agent 槽位与动态路由
+            if let Some(env_obj) = settings_val["env"].as_object_mut() {
+                env_obj.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+                env_obj.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
+                env_obj.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
+                env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+            }
+
+            // 同步生成并注入 modelPicker，使得 Claude Code 的 /model 能够原生列出所有启用的服务商模型
+            if let Ok(providers) = self.db.get_providers() {
+                let routes = self.db.get_routes().unwrap_or_default();
+                let picker = generate_claude_model_picker(&providers, &routes);
+                settings_val["modelPicker"] = picker;
+            }
 
             if let Ok(new_settings) = serde_json::to_string_pretty(&settings_val) {
                 let _ = atomic_write(&settings_path, &new_settings);
             }
 
-            // 2. 同步接管 ~/.claude.json (如果文件存在)
+            // 2. 同步微创接管 ~/.claude.json (如果文件存在)
             if config_path.exists() {
                 let orig_config = fs::read_to_string(&config_path).unwrap_or_default();
-                if !backup_path.exists() {
-                    let _ = atomic_write(&backup_path, &orig_config);
-                }
                 if let Ok(mut config_val) = serde_json::from_str::<Value>(&orig_config) {
                     config_val["anthropicBaseUrl"] = json!(self.gateway_url);
-                    if !config_val["env"].is_object() {
-                        config_val["env"] = json!({});
+                    if let Some(env_obj) = config_val.get_mut("env").and_then(|e| e.as_object_mut()) {
+                        env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(self.gateway_url));
                     }
-                    config_val["env"]["ANTHROPIC_BASE_URL"] = json!(self.gateway_url);
                     if let Ok(new_config) = serde_json::to_string_pretty(&config_val) {
                         let _ = atomic_write(&config_path, &new_config);
                     }
                 }
             }
 
+            // 清理旧版全量备份文件，避免日后污染
+            let _ = fs::remove_file(&settings_backup_path);
+            let _ = fs::remove_file(&backup_path);
+
             let _ = self.db.save_interceptor_state(
                 "claude_code",
                 true,
-                Some(&orig_settings),
+                None,
                 orig_ep.as_deref(),
             );
         } else {
-            // 恢复 ~/.claude/settings.json
-            if settings_backup_path.exists() {
-                if let Ok(orig) = fs::read_to_string(&settings_backup_path) {
-                    let _ = atomic_write(&settings_path, &orig);
-                }
-                let _ = fs::remove_file(&settings_backup_path);
-            } else if settings_path.exists() {
+            let orig_ep = self
+                .db
+                .get_interceptor_state("claude_code")
+                .ok()
+                .flatten()
+                .and_then(|s| s.2);
+
+            // 方案 B：微创增量还原 ~/.claude/settings.json
+            // 重新读取磁盘当前最新内容，绝不覆盖回滚用户在接管期间新授权的命令、hooks 或修改的配置
+            if settings_path.exists() {
                 if let Ok(content) = fs::read_to_string(&settings_path) {
                     if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
                         if let Some(obj) = v.as_object_mut() {
                             obj.remove("anthropicBaseUrl");
+                            obj.remove("modelPicker");
                             if let Some(env_obj) =
                                 obj.get_mut("env").and_then(|e| e.as_object_mut())
                             {
-                                env_obj.remove("ANTHROPIC_BASE_URL");
+                                if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                    env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(ep));
+                                } else {
+                                    env_obj.remove("ANTHROPIC_BASE_URL");
+                                }
                             }
                         }
                         if let Ok(updated) = serde_json::to_string_pretty(&v) {
@@ -563,21 +606,30 @@ impl InterceptorManager {
                 }
             }
 
-            // 恢复 ~/.claude.json
-            if backup_path.exists() {
-                if let Ok(orig) = fs::read_to_string(&backup_path) {
-                    let _ = atomic_write(&config_path, &orig);
-                }
-                let _ = fs::remove_file(&backup_path);
-            } else if config_path.exists() {
+            // 同样微创还原 ~/.claude.json
+            if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
                     if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
                         if let Some(obj) = v.as_object_mut() {
-                            obj.remove("anthropicBaseUrl");
+                            let has_env = obj.get("env").and_then(|e| e.as_object()).is_some();
+                            if !has_env {
+                                if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                    obj.insert("anthropicBaseUrl".to_string(), json!(ep));
+                                } else {
+                                    obj.remove("anthropicBaseUrl");
+                                }
+                            } else {
+                                obj.remove("anthropicBaseUrl");
+                            }
+
                             if let Some(env_obj) =
                                 obj.get_mut("env").and_then(|e| e.as_object_mut())
                             {
-                                env_obj.remove("ANTHROPIC_BASE_URL");
+                                if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                    env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(ep));
+                                } else {
+                                    env_obj.remove("ANTHROPIC_BASE_URL");
+                                }
                             }
                         }
                         if let Ok(updated) = serde_json::to_string_pretty(&v) {
@@ -587,12 +639,48 @@ impl InterceptorManager {
                 }
             }
 
+            let _ = fs::remove_file(&settings_backup_path);
+            let _ = fs::remove_file(&backup_path);
+
             let _ = self
                 .db
                 .save_interceptor_state("claude_code", false, None, None);
         }
 
         Ok(self.get_claude_code_status())
+    }
+
+    fn do_sync_claude_settings(&self) -> Result<(), String> {
+        let settings_path = Self::claude_settings_path();
+        if !settings_path.exists() {
+            return Ok(());
+        }
+        let content = fs::read_to_string(&settings_path).unwrap_or_default();
+        let mut v: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        if !v.is_object() {
+            return Ok(());
+        }
+        let providers = self.db.get_providers().map_err(|e| e.to_string())?;
+        let routes = self.db.get_routes().unwrap_or_default();
+        v["modelPicker"] = generate_claude_model_picker(&providers, &routes);
+        if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
+            env_obj.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+            env_obj.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
+            env_obj.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
+            env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+        }
+        if let Ok(updated) = serde_json::to_string_pretty(&v) {
+            let _ = atomic_write(&settings_path, &updated);
+        }
+        Ok(())
+    }
+
+    pub fn sync_claude_settings_if_intercepted(&self) -> Result<(), String> {
+        let status = self.get_claude_code_status();
+        if status.is_intercepted {
+            self.do_sync_claude_settings()?;
+        }
+        Ok(())
     }
 
     // ================= Codex CLI =================
@@ -735,23 +823,16 @@ impl InterceptorManager {
         let target_endpoint = format!("{}/v1", self.gateway_url);
 
         if enable {
+            let saved_state = self.db.get_interceptor_state("codex_cli").ok().flatten();
+            let orig_ep = saved_state
+                .and_then(|s| s.2)
+                .or_else(|| self.detect_third_party_endpoint("codex_cli"));
+
             let mut original_content = String::new();
             if config_path.exists() {
                 original_content = fs::read_to_string(&config_path).unwrap_or_default();
             } else if let Some(p) = config_path.parent() {
                 let _ = fs::create_dir_all(p);
-            }
-            let saved_state = self
-                .db
-                .get_interceptor_state("codex_cli")
-                .ok()
-                .flatten();
-            let already_intercepted = backup_path.exists()
-                || saved_state.as_ref().map(|state| state.0).unwrap_or(false)
-                || original_content.contains(&target_endpoint);
-
-            if !already_intercepted && config_path.exists() {
-                atomic_write(&backup_path, &original_content).map_err(|e| e.to_string())?;
             }
 
             // 生成并写入 catalog 文件
@@ -788,34 +869,32 @@ impl InterceptorManager {
             )?;
             atomic_write(&config_path, &new_content).map_err(|e| e.to_string())?;
 
-            if !already_intercepted {
-                let _ = self
-                    .db
-                    .save_interceptor_state("codex_cli", true, Some(&original_content), None);
-            }
+            let _ = fs::remove_file(&backup_path);
+            let _ = self
+                .db
+                .save_interceptor_state("codex_cli", true, None, orig_ep.as_deref());
         } else {
-            if backup_path.exists() {
-                if let Ok(orig) = fs::read_to_string(&backup_path) {
-                    let _ = atomic_write(&config_path, &orig);
-                }
-                let _ = fs::remove_file(&backup_path);
-            } else if let Ok(Some((_, Some(backup_content), _))) =
-                self.db.get_interceptor_state("codex_cli")
-            {
-                let _ = atomic_write(&config_path, &backup_content);
-            } else if config_path.exists() {
+            let orig_ep = self
+                .db
+                .get_interceptor_state("codex_cli")
+                .ok()
+                .flatten()
+                .and_then(|s| s.2);
+
+            // 方案 B：微创增量还原 ~/.codex/config.toml
+            if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if let Ok(cleaned) = update_codex_config_toml(
+                    if let Ok(cleaned) = restore_codex_config_toml(
                         &content,
-                        "https://api.openai.com/v1",
-                        None,
-                        None,
+                        orig_ep.as_deref(),
+                        Self::CODEX_CATALOG_FILENAME,
                     ) {
                         let _ = atomic_write(&config_path, &cleaned);
                     }
                 }
             }
 
+            let _ = fs::remove_file(&backup_path);
             if catalog_path.exists() {
                 let _ = fs::remove_file(&catalog_path);
             }
@@ -946,6 +1025,11 @@ impl InterceptorManager {
         let env_backup_path = Self::gemini_env_backup_path();
 
         if enable {
+            let saved_state = self.db.get_interceptor_state("gemini_cli").ok().flatten();
+            let orig_ep = saved_state
+                .and_then(|s| s.2)
+                .or_else(|| self.detect_third_party_endpoint("gemini_cli"));
+
             // 1. 接管 ~/.gemini/.env (Gemini CLI 官方真实环境变量文件)
             let mut orig_env = String::new();
             if env_path.exists() {
@@ -953,62 +1037,66 @@ impl InterceptorManager {
             } else if let Some(p) = env_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
-            if !env_backup_path.exists() && env_path.exists() {
-                let _ = atomic_write(&env_backup_path, &orig_env);
-            }
             let new_env = update_gemini_env(&orig_env, &self.gateway_url);
             let _ = atomic_write(&env_path, &new_env);
 
             // 2. 同时维护 config.json (兼容旧配置和测试用例)
-            let mut original_content = String::new();
             let mut parsed: Value = json!({});
             if config_path.exists() {
-                original_content = fs::read_to_string(&config_path).unwrap_or_default();
+                let original_content = fs::read_to_string(&config_path).unwrap_or_default();
                 if let Ok(v) = serde_json::from_str::<Value>(&original_content) {
                     parsed = v;
                 }
             } else if let Some(p) = config_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
-            if !backup_path.exists() && config_path.exists() {
-                let _ = atomic_write(&backup_path, &original_content);
-            }
             parsed["baseUrl"] = json!(self.gateway_url);
             if let Ok(new_content) = serde_json::to_string_pretty(&parsed) {
                 let _ = atomic_write(&config_path, &new_content);
             }
 
+            let _ = fs::remove_file(&env_backup_path);
+            let _ = fs::remove_file(&backup_path);
+
             let _ = self
                 .db
-                .save_interceptor_state("gemini_cli", true, Some(&orig_env), None);
+                .save_interceptor_state("gemini_cli", true, None, orig_ep.as_deref());
         } else {
-            // 恢复 ~/.gemini/.env
-            if env_backup_path.exists() {
-                if let Ok(orig) = fs::read_to_string(&env_backup_path) {
-                    let _ = atomic_write(&env_path, &orig);
-                }
-                let _ = fs::remove_file(&env_backup_path);
-            } else if env_path.exists() {
+            let orig_ep = self
+                .db
+                .get_interceptor_state("gemini_cli")
+                .ok()
+                .flatten()
+                .and_then(|s| s.2);
+
+            // 方案 B：微创增量还原 ~/.gemini/.env
+            if env_path.exists() {
                 if let Ok(content) = fs::read_to_string(&env_path) {
-                    let cleaned: Vec<&str> = content
-                        .lines()
-                        .filter(|l| {
-                            !l.contains(&self.gateway_url)
-                                && !l.starts_with("GOOGLE_GEMINI_BASE_URL=")
-                                && !l.starts_with("GEMINI_BASE_URL=")
-                        })
-                        .collect();
-                    let _ = atomic_write(&env_path, &(cleaned.join("\n") + "\n"));
+                    let cleaned = restore_gemini_env(&content, orig_ep.as_deref(), &self.gateway_url);
+                    let _ = atomic_write(&env_path, &cleaned);
                 }
             }
 
             // 恢复 config.json
-            if backup_path.exists() {
-                if let Ok(orig) = fs::read_to_string(&backup_path) {
-                    let _ = atomic_write(&config_path, &orig);
+            if config_path.exists() {
+                if let Ok(content) = fs::read_to_string(&config_path) {
+                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                        if let Some(obj) = v.as_object_mut() {
+                            if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                obj.insert("baseUrl".to_string(), json!(ep));
+                            } else {
+                                obj.remove("baseUrl");
+                            }
+                        }
+                        if let Ok(updated) = serde_json::to_string_pretty(&v) {
+                            let _ = atomic_write(&config_path, &updated);
+                        }
+                    }
                 }
-                let _ = fs::remove_file(&backup_path);
             }
+
+            let _ = fs::remove_file(&env_backup_path);
+            let _ = fs::remove_file(&backup_path);
 
             let _ = self
                 .db
@@ -1098,6 +1186,68 @@ fn update_codex_config_toml(
                     "base_url".to_string(),
                     toml::Value::String(target_endpoint.to_string()),
                 );
+            }
+        }
+    }
+
+    toml::to_string_pretty(&doc).map_err(|e| format!("序列化 Codex config.toml 失败: {}", e))
+}
+
+/// Restore Codex config.toml while preserving all other user modifications
+fn restore_codex_config_toml(
+    content: &str,
+    original_endpoint: Option<&str>,
+    catalog_filename: &str,
+) -> Result<String, String> {
+    if content.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let mut doc: toml::Value =
+        toml::from_str(content).map_err(|e| format!("解析 Codex config.toml 失败: {}", e))?;
+
+    if let toml::Value::Table(ref mut map) = doc {
+        // 1. 移除注入的 model_catalog_json
+        if let Some(cat) = map.get("model_catalog_json").and_then(|v| v.as_str()) {
+            if cat == catalog_filename {
+                map.remove("model_catalog_json");
+            }
+        }
+
+        // 2. 还原或移除 base_url
+        if let Some(ep) = original_endpoint.filter(|s| !s.trim().is_empty()) {
+            map.insert("base_url".to_string(), toml::Value::String(ep.to_string()));
+        } else {
+            map.remove("base_url");
+        }
+
+        // 3. 还原 model_providers
+        let current_provider = map
+            .get("model_provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("custom")
+            .to_string();
+
+        if let Some(toml::Value::Table(ref mut providers_map)) = map.get_mut("model_providers") {
+            let mut remove_provider = false;
+            if let Some(toml::Value::Table(ref mut p_map)) = providers_map.get_mut(&current_provider) {
+                if let Some(ep) = original_endpoint.filter(|s| !s.trim().is_empty()) {
+                    p_map.insert("base_url".to_string(), toml::Value::String(ep.to_string()));
+                } else {
+                    p_map.remove("base_url");
+                }
+                // 如果这是 Pivot 自动创建的临时 custom provider 且没有 base_url，清理它
+                if p_map.get("name").and_then(|v| v.as_str()) == Some("Pivot") {
+                    remove_provider = true;
+                }
+            }
+            if remove_provider {
+                providers_map.remove(&current_provider);
+            }
+            if providers_map.is_empty() {
+                map.remove("model_providers");
+                if map.get("model_provider").and_then(|v| v.as_str()) == Some("custom") {
+                    map.remove("model_provider");
+                }
             }
         }
     }
@@ -1241,6 +1391,159 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
     }
 
     json!({ "models": models })
+}
+
+/// Resolve the behavesAs model ID for Claude Code client-side capability mapping
+pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
+    let lower = model_name.to_lowercase();
+    let name = lower.split('/').last().unwrap_or(&lower);
+    if name.contains("opus")
+        || name.contains("thinking")
+        || name.contains("reason")
+        || name.contains("r1")
+        || name.contains("o1")
+        || name.contains("o3")
+    {
+        "claude-3-opus"
+    } else if name.contains("haiku")
+        || name.contains("flash")
+        || name.contains("mini")
+        || name.contains("small")
+        || name.contains("instant")
+    {
+        "claude-3-5-haiku"
+    } else {
+        "claude-3-7-sonnet"
+    }
+}
+
+/// Generates the modelPicker configuration for ~/.claude/settings.json
+pub fn generate_claude_model_picker(
+    providers: &[Provider],
+    routes: &[RouteRule],
+) -> Value {
+    let mut options = Vec::new();
+    let mut seen_models = HashSet::new();
+
+    // 1. Agent 槽位映射行 (Main / Reasoning / Fast)
+    let tier_specs = [
+        (
+            "tier-main",
+            "主力编程 · Agent Main",
+            "claude-3-7-sonnet",
+            "主力槽位动态路由",
+        ),
+        (
+            "tier-reasoning",
+            "深度推理 · Agent Reasoning",
+            "claude-3-opus",
+            "推理槽位动态路由",
+        ),
+        (
+            "tier-fast",
+            "轻量辅助 · Agent Fast",
+            "claude-3-5-haiku",
+            "辅助槽位动态路由",
+        ),
+    ];
+
+    for (tier_id, label, default_model, base_desc) in tier_specs {
+        if let Some(rule) = routes.iter().find(|r| r.id == tier_id && r.enabled) {
+            let target_prov = providers
+                .iter()
+                .find(|p| p.id == rule.target_provider_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("未指定服务商");
+            let target_m = rule.target_model.as_deref().unwrap_or(default_model);
+            let desc = format!("{} (当前: {} via {})", base_desc, target_m, target_prov);
+            options.push(json!({
+                "model": default_model,
+                "label": label,
+                "description": desc,
+                "behavesAs": default_model,
+            }));
+            seen_models.insert(default_model.to_string());
+        }
+    }
+
+    // 2. 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
+    let mut model_provider_count: HashMap<String, HashSet<String>> = HashMap::new();
+    for provider in providers.iter().filter(|p| p.enabled) {
+        let mut prov_models = HashSet::new();
+        for m in &provider.models {
+            let trimmed = m.trim();
+            if !trimmed.is_empty() {
+                prov_models.insert(trimmed.to_string());
+            }
+        }
+        if let Some(ref dm) = provider.default_model {
+            let trimmed = dm.trim();
+            if !trimmed.is_empty() {
+                prov_models.insert(trimmed.to_string());
+            }
+        }
+        for m in prov_models {
+            model_provider_count
+                .entry(m)
+                .or_default()
+                .insert(provider.id.clone());
+        }
+    }
+
+    // 3. 所有已启用服务商的所有可用模型
+    for provider in providers.iter().filter(|p| p.enabled) {
+        let mut provider_models = Vec::new();
+        if let Some(ref dm) = provider.default_model {
+            let dm_trimmed = dm.trim();
+            if !dm_trimmed.is_empty() {
+                provider_models.push(dm_trimmed.to_string());
+            }
+        }
+        for m in &provider.models {
+            let trimmed = m.trim().to_string();
+            if !trimmed.is_empty() && !provider_models.contains(&trimmed) {
+                provider_models.push(trimmed);
+            }
+        }
+
+        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+
+        for model_name in provider_models {
+            let behaves_as = resolve_claude_behaves_as(&model_name);
+            let is_duplicate = model_provider_count
+                .get(&model_name)
+                .map(|s| s.len() > 1)
+                .unwrap_or(false);
+
+            if is_duplicate {
+                let prefixed = format!("{}/{}", provider_prefix, model_name);
+                if !seen_models.contains(&prefixed) {
+                    seen_models.insert(prefixed.clone());
+                    options.push(json!({
+                        "model": prefixed,
+                        "label": format!("{} · {}", model_name, provider.name),
+                        "description": format!("via Pivot ({})", provider.name),
+                        "behavesAs": behaves_as,
+                    }));
+                }
+            } else {
+                if !seen_models.contains(&model_name) {
+                    seen_models.insert(model_name.clone());
+                    options.push(json!({
+                        "model": model_name,
+                        "label": format!("{} · {}", model_name, provider.name),
+                        "description": format!("via Pivot ({})", provider.name),
+                        "behavesAs": behaves_as,
+                    }));
+                }
+            }
+        }
+    }
+
+    json!({
+        "options": options,
+        "replaceBuiltInOptions": true
+    })
 }
 
 /// Accurately resolves supported reasoning levels and default effort for a model
@@ -1437,6 +1740,30 @@ fn update_gemini_env(original: &str, gateway_url: &str) -> String {
     lines.join("\n") + "\n"
 }
 
+/// Restore Gemini CLI official .env file while preserving user API keys and all other variables
+fn restore_gemini_env(content: &str, original_endpoint: Option<&str>, gateway_url: &str) -> String {
+    let mut lines = Vec::new();
+    let clean_orig = original_endpoint.filter(|s| !s.trim().is_empty() && !s.contains(gateway_url));
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("GOOGLE_GEMINI_BASE_URL=") || trimmed.starts_with("GEMINI_BASE_URL=") {
+            if let Some(orig) = clean_orig {
+                if trimmed.starts_with("GOOGLE_GEMINI_BASE_URL=") {
+                    lines.push(format!("GOOGLE_GEMINI_BASE_URL={}", orig));
+                } else {
+                    lines.push(format!("GEMINI_BASE_URL={}", orig));
+                }
+            }
+            // 若原先没有配置，则直接移除，恢复为官方默认直连
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    lines.join("\n") + "\n"
+}
+
 /// Safely write to file via a temporary file + rename to guarantee atomicity and crash-safety
 fn atomic_write<P: AsRef<Path>>(path: P, content: &str) -> std::io::Result<()> {
     let path = path.as_ref();
@@ -1460,7 +1787,7 @@ mod tests {
 
     #[test]
     fn repeated_enable_preserves_original_cli_configuration() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!(
             "pivot-interceptor-{}",
             SystemTime::now()
@@ -1482,10 +1809,9 @@ mod tests {
             manager.toggle_claude_code(true)?;
             manager.toggle_claude_code(true)?;
             manager.toggle_claude_code(false)?;
-            assert_eq!(
-                fs::read_to_string(home.join(".claude.json")).map_err(|e| e.to_string())?,
-                claude_original
-            );
+            let claude_actual: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).map_err(|e| e.to_string())?).unwrap();
+            let claude_expected: Value = serde_json::from_str(claude_original).unwrap();
+            assert_eq!(claude_actual, claude_expected);
 
             let codex_dir = home.join(".codex");
             fs::create_dir_all(&codex_dir).map_err(|e| e.to_string())?;
@@ -1495,10 +1821,9 @@ mod tests {
             manager.toggle_codex(true)?;
             manager.toggle_codex(true)?;
             manager.toggle_codex(false)?;
-            assert_eq!(
-                fs::read_to_string(codex_dir.join("config.toml")).map_err(|e| e.to_string())?,
-                codex_original
-            );
+            let codex_actual: toml::Value = toml::from_str(&fs::read_to_string(codex_dir.join("config.toml")).map_err(|e| e.to_string())?).unwrap();
+            let codex_expected: toml::Value = toml::from_str(codex_original).unwrap();
+            assert_eq!(codex_actual, codex_expected);
 
             let gemini_dir = home.join(".gemini");
             fs::create_dir_all(&gemini_dir).map_err(|e| e.to_string())?;
@@ -1508,11 +1833,9 @@ mod tests {
             manager.toggle_gemini_cli(true)?;
             manager.toggle_gemini_cli(true)?;
             manager.toggle_gemini_cli(false)?;
-            assert_eq!(
-                fs::read_to_string(gemini_dir.join("config.json"))
-                    .map_err(|e| e.to_string())?,
-                gemini_original
-            );
+            let gemini_actual: Value = serde_json::from_str(&fs::read_to_string(gemini_dir.join("config.json")).map_err(|e| e.to_string())?).unwrap();
+            let gemini_expected: Value = serde_json::from_str(gemini_original).unwrap();
+            assert_eq!(gemini_actual, gemini_expected);
             Ok(())
         })();
 
@@ -1680,7 +2003,7 @@ followUpQueueMode = "queue"
 
     #[test]
     fn test_detect_third_party_endpoint_and_conflict() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!(
             "pivot-conflict-test-{}",
             SystemTime::now()
@@ -1806,6 +2129,143 @@ followUpQueueMode = "queue"
         }
         let _ = fs::remove_dir_all(&home);
         result.unwrap();
+    }
+
+    #[test]
+    fn test_claude_settings_incremental_patch_preserves_new_user_configs() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "pivot-inc-patch-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let result = (|| -> Result<(), String> {
+            let db_path = home.join("state.db");
+            let db = Database::new(db_path).map_err(|e| e.to_string())?;
+            let manager = InterceptorManager::new(db, 16888);
+
+            let claude_dir = home.join(".claude");
+            fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
+            let settings_file = claude_dir.join("settings.json");
+
+            // 1. 用户最初的配置
+            let initial = r#"{
+  "permissions": {
+    "allow": ["Bash(git status*)"]
+  },
+  "theme": "dark"
+}"#;
+            fs::write(&settings_file, initial).map_err(|e| e.to_string())?;
+
+            // 2. 开启接管
+            manager.toggle_claude_code(true)?;
+            let intercepted_content = fs::read_to_string(&settings_file).map_err(|e| e.to_string())?;
+            assert!(intercepted_content.contains("http://127.0.0.1:16888"));
+
+            // 3. 模拟用户在接管期间使用 Claude Code，授权了新命令，并新增了 hook
+            let mut v: Value = serde_json::from_str(&intercepted_content).map_err(|e| e.to_string())?;
+            v["permissions"]["allow"] = json!(["Bash(git status*)", "Bash(cargo test*)"]);
+            v["hooks"] = json!({ "PostToolUse": [{ "matcher": "*" }] });
+            fs::write(&settings_file, serde_json::to_string_pretty(&v).unwrap()).map_err(|e| e.to_string())?;
+
+            // 4. 关闭接管
+            manager.toggle_claude_code(false)?;
+            let restored_content = fs::read_to_string(&settings_file).map_err(|e| e.to_string())?;
+            let restored: Value = serde_json::from_str(&restored_content).map_err(|e| e.to_string())?;
+
+            // 验证：网关地址被安全移除
+            assert_eq!(restored.get("env").and_then(|e| e.get("ANTHROPIC_BASE_URL")), None);
+            // 验证：用户在接管期间新授权的命令和新设置的 hooks 100% 完整保留！
+            let allowed = restored["permissions"]["allow"].as_array().unwrap();
+            assert_eq!(allowed.len(), 2);
+            assert_eq!(allowed[1], "Bash(cargo test*)");
+            assert!(restored.get("hooks").is_some());
+            assert_eq!(restored["theme"], "dark");
+
+            Ok(())
+        })();
+
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(&home);
+        result.unwrap();
+    }
+
+    #[test]
+    fn test_generate_claude_model_picker() {
+        let provider1 = Provider {
+            id: "p1".to_string(),
+            name: "DeepSeek".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+            preset_id: None,
+            api_keys: vec!["sk-test".to_string()],
+            models: vec!["deepseek-v4-pro".to_string(), "deepseek-reasoner".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 30,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let provider2 = Provider {
+            id: "p2".to_string(),
+            name: "Work".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://work.example.com".to_string(),
+            preset_id: None,
+            api_keys: vec!["sk-work".to_string()],
+            models: vec!["gpt-6-astra".to_string()],
+            default_model: Some("gpt-6-astra".to_string()),
+            is_default: true,
+            enabled: true,
+            priority: 20,
+            weight: 1,
+            timeout_secs: 30,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+
+        let route1 = RouteRule {
+            id: "tier-main".to_string(),
+            pattern: ".*(sonnet|gpt-4o).*".to_string(),
+            target_provider_id: "p2".to_string(),
+            target_model: Some("gpt-6-astra".to_string()),
+            fallback_provider_ids: vec![],
+            enabled: true,
+            priority: 500,
+            description: Some("Agent Main Tier".to_string()),
+        };
+
+        let picker = generate_claude_model_picker(&[provider1, provider2], &[route1]);
+        assert_eq!(picker["replaceBuiltInOptions"], true);
+        let options = picker["options"].as_array().expect("options must be array");
+
+        // Tier slot row
+        assert_eq!(options[0]["model"], "claude-3-7-sonnet");
+        assert_eq!(options[0]["behavesAs"], "claude-3-7-sonnet");
+        assert!(options[0]["description"].as_str().unwrap().contains("gpt-6-astra via Work"));
+
+        // Models
+        assert_eq!(options[1]["model"], "deepseek-v4-pro");
+        assert_eq!(options[1]["behavesAs"], "claude-3-7-sonnet");
+        assert_eq!(options[2]["model"], "deepseek-reasoner");
+        assert_eq!(options[2]["behavesAs"], "claude-3-opus");
+        assert_eq!(options[3]["model"], "gpt-6-astra");
+        assert_eq!(options[3]["behavesAs"], "claude-3-7-sonnet");
     }
 }
 

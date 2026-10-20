@@ -173,13 +173,10 @@ export function detectProviderBrand(
 }
 
 const AVATAR_PALETTES = [
-  'bg-cyan-500/10 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
-  'bg-sky-500/10 dark:bg-sky-500/20 text-sky-600 dark:text-sky-400 border-sky-500/20',
-  'bg-blue-500/10 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 border-blue-500/20',
-  'bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
-  'bg-teal-500/10 dark:bg-teal-500/20 text-teal-600 dark:text-teal-400 border-teal-500/20',
-  'bg-amber-500/10 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/20',
-  'bg-rose-500/10 dark:bg-rose-500/20 text-rose-600 dark:text-rose-400 border-rose-500/20',
+  'from-zinc-100 to-zinc-200/80 dark:from-zinc-800 dark:to-zinc-900 text-zinc-800 dark:text-zinc-200 border-zinc-200/90 dark:border-zinc-700/80',
+  'from-slate-100 to-slate-200/80 dark:from-slate-800 dark:to-slate-900 text-slate-800 dark:text-slate-200 border-slate-200/90 dark:border-slate-700/80',
+  'from-stone-100 to-stone-200/80 dark:from-stone-800 dark:to-stone-900 text-stone-800 dark:text-stone-200 border-stone-200/90 dark:border-stone-700/80',
+  'from-neutral-100 to-neutral-200/80 dark:from-neutral-800 dark:to-neutral-900 text-neutral-800 dark:text-neutral-200 border-neutral-200/90 dark:border-neutral-700/80',
 ];
 
 function getInitialLetter(name: string): string {
@@ -213,20 +210,20 @@ export const ProviderAvatar: React.FC<{
     if (IconRenderer) {
       return (
         <div
-          className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-700/60 bg-zinc-50/80 dark:bg-zinc-800/80 text-zinc-850 dark:text-zinc-150 p-1.5 transition-colors ${className}`}
+          className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border border-zinc-200/80 dark:border-zinc-700/80 bg-zinc-100/90 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 p-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-colors ${className}`}
         >
-          <IconRenderer className="w-full h-full object-contain" />
+          <IconRenderer className="w-full h-full object-contain drop-shadow-[0_0.5px_1px_rgba(0,0,0,0.08)]" />
         </div>
       );
     }
   }
 
-  // Fallback 字母徽章
+  // Fallback 字母徽章：精工微渐变中性底槽，低饱和度，与品牌 Logo 和谐同构
   const palette = getAvatarPalette(name);
   const letter = getInitialLetter(name);
   return (
     <div
-      className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border font-semibold text-[13px] tracking-tight select-none shadow-2xs ${palette} ${className}`}
+      className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border bg-gradient-to-b font-mono font-semibold text-[13px] tracking-tight select-none shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.25)] ${palette} ${className}`}
     >
       {letter}
     </div>

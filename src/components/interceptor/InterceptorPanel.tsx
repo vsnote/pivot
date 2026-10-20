@@ -95,7 +95,7 @@ export const InterceptorPanel: React.FC = () => {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-          <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
+          <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
               <div className="text-[11px] text-zinc-400 mb-0.5">OpenAI 兼容 Base URL</div>
               <div className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
@@ -116,7 +116,7 @@ export const InterceptorPanel: React.FC = () => {
             </button>
           </div>
 
-          <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-850/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
+          <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
               <div className="text-[11px] text-zinc-400 mb-0.5">Anthropic 兼容 Base URL</div>
               <div className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
@@ -213,7 +213,7 @@ export const InterceptorPanel: React.FC = () => {
                 </div>
 
                 {/* 状态行 */}
-                <div className="py-2 px-3 rounded-md bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">
+                <div className="py-2 px-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">
                   <span className="text-zinc-400">状态</span>
                   <span className="font-semibold flex items-center gap-1.5">
                     <span

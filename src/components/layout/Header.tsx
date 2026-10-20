@@ -1,6 +1,7 @@
 import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
+import { Plus } from 'lucide-react';
 
 const tabs = [
   { id: 'providers', label: '服务商' },
@@ -12,7 +13,14 @@ const tabs = [
 type TabId = (typeof tabs)[number]['id'];
 
 export const Header: React.FC = () => {
-  const { activeTab, settingsSection, setActiveTab, setSettingsSection } = useAppStore();
+  const {
+    activeTab,
+    settingsSection,
+    setActiveTab,
+    setSettingsSection,
+    isProviderEditorOpen,
+    openProviderEditor,
+  } = useAppStore();
 
   const current: TabId =
     activeTab === 'clients'
@@ -53,8 +61,23 @@ export const Header: React.FC = () => {
         </Tabs>
       </div>
 
-      {/* 右侧：对称留白区 */}
-      <div className="w-16 shrink-0 pointer-events-none" />
+      {/* 右侧：对称功能操作区 */}
+      <div
+        className="w-16 shrink-0 flex items-center justify-end"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        {current === 'providers' && !isProviderEditorOpen && (
+          <button
+            type="button"
+            onClick={() => openProviderEditor(null)}
+            title="添加服务商 (⌘N)"
+            aria-label="添加服务商"
+            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors cursor-pointer"
+          >
+            <Plus className="w-4 h-4 stroke-[2.2]" />
+          </button>
+        )}
+      </div>
     </header>
   );
 };

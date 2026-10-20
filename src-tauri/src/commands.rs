@@ -42,6 +42,7 @@ pub async fn save_provider(state: State<'_, AppState>, mut provider: Provider) -
     state.db.save_provider(&provider).map_err(|e| e.to_string())?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_codex_catalog_if_intercepted();
+    let _ = mgr.sync_claude_settings_if_intercepted();
     Ok(())
 }
 
@@ -58,6 +59,7 @@ pub async fn delete_provider(
         .map_err(|_| format!("服务商 {} 不存在或已被删除", id))?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_codex_catalog_if_intercepted();
+    let _ = mgr.sync_claude_settings_if_intercepted();
     state.db.get_routes().map_err(|e| e.to_string())
 }
 
@@ -146,7 +148,10 @@ pub async fn get_routes(state: State<'_, AppState>) -> Result<Vec<RouteRule>, St
 
 #[tauri::command]
 pub async fn save_routes(state: State<'_, AppState>, routes: Vec<RouteRule>) -> Result<(), String> {
-    state.db.save_routes(&routes).map_err(|e| e.to_string())
+    state.db.save_routes(&routes).map_err(|e| e.to_string())?;
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    let _ = mgr.sync_claude_settings_if_intercepted();
+    Ok(())
 }
 
 #[tauri::command]
@@ -291,6 +296,7 @@ pub async fn set_provider_enabled(state: State<'_, AppState>, id: String, enable
     state.db.set_provider_enabled(&id, enabled).map_err(|e| e.to_string())?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_codex_catalog_if_intercepted();
+    let _ = mgr.sync_claude_settings_if_intercepted();
     Ok(())
 }
 

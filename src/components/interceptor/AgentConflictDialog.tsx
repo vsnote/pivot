@@ -117,7 +117,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
               </div>
             </div>
 
-            <div className="p-3 rounded-lg bg-zinc-50/80 dark:bg-zinc-850/50 border border-zinc-200/60 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
+            <div className="p-3 rounded-lg bg-zinc-50/80 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
               开启后，<span className="font-medium text-zinc-800 dark:text-zinc-200">{target.name}</span> 的请求将由 Pivot 网关统一按您的分发规则路由至已启用的服务商渠道。原配置文件将自动安全备份，随时可一键恢复。
             </div>
 

@@ -40,6 +40,9 @@ export const App: React.FC = () => {
     isProviderEditorOpen,
     error,
     clearError,
+    setActiveTab,
+    setSettingsSection,
+    openProviderEditor,
   } = useAppStore();
   const systemIsDark = useSyncExternalStore(subscribeColorScheme, getSystemIsDark);
 
@@ -50,6 +53,47 @@ export const App: React.FC = () => {
   useEffect(() => {
     fetchInitialData();
   }, []);
+
+  // 全局快捷键：⌘1-4 切换主要页面，⌘N 快速打开新增服务商
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest('input, textarea, [contenteditable="true"], select')
+      ) {
+        return;
+      }
+
+      const isMac = navigator.platform.toUpperCase().includes('MAC');
+      const modKey = isMac ? event.metaKey : event.ctrlKey;
+
+      if (modKey && !event.shiftKey && !event.altKey) {
+        if (event.key === '1') {
+          event.preventDefault();
+          setActiveTab('providers');
+        } else if (event.key === '2') {
+          event.preventDefault();
+          setActiveTab('clients');
+        } else if (event.key === '3') {
+          event.preventDefault();
+          setActiveTab('logs');
+        } else if (event.key === '4') {
+          event.preventDefault();
+          setSettingsSection('about');
+          setActiveTab('settings');
+        } else if (event.key.toLowerCase() === 'n') {
+          event.preventDefault();
+          if (activeTab !== 'providers') {
+            setActiveTab('providers');
+          }
+          openProviderEditor(null);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeTab, setActiveTab, setSettingsSection, openProviderEditor]);
 
   useEffect(() => {
     const onContextMenu = (event: MouseEvent) => {
@@ -90,9 +134,15 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* 主视图内容区域：统一定宽与内边距 */}
+      {/* 主视图内容区域：根据当前页面自适应宽度 */}
       <main className="flex-1 min-h-0 w-full overflow-y-auto px-4 sm:px-6 py-4">
-        <div className="max-w-5xl mx-auto w-full">
+        <div
+          className={`mx-auto w-full transition-[max-width] duration-150 ${
+            activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')
+              ? 'max-w-6xl'
+              : 'max-w-5xl'
+          }`}
+        >
           <div className={activeTab === 'providers' ? 'block' : 'hidden'}>
             {isProviderEditorOpen ? <ProviderEditor /> : <ProviderList />}
           </div>

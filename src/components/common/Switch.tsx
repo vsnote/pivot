@@ -39,14 +39,14 @@ export const Switch: React.FC<SwitchProps> = ({
         'peer inline-flex shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-150',
         'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background',
         'disabled:cursor-not-allowed disabled:opacity-40',
-        'data-[state=checked]:bg-primary data-[state=unchecked]:bg-input shadow-2xs',
+        'data-[state=checked]:bg-primary data-[state=unchecked]:bg-zinc-200/90 dark:data-[state=unchecked]:bg-zinc-700/80 shadow-2xs',
         trackSize,
         className
       )}
     >
       <SwitchPrimitive.Thumb
         className={cn(
-          'pointer-events-none block rounded-full bg-background shadow-xs ring-0 transition-transform duration-150 data-[state=unchecked]:translate-x-0',
+          'pointer-events-none block rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.2)] ring-0 transition-transform duration-150 data-[state=unchecked]:translate-x-0',
           translate,
           thumbSize
         )}

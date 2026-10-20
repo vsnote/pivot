@@ -48,7 +48,7 @@ export function ProviderEditor() {
   const { editingProvider, presets, providers, closeProviderEditor, saveProvider, deleteProvider, activeTab } =
     useAppStore();
   // 还没有可用的默认服务商时，新添加的第一个服务商默认承担该角色。
-  // 路由只在已启用的服务商里找兜底目标，所以停用的默认不算数；
+  // 路由只在已启用的服务商里找默认目标，所以停用的默认不算数；
   // 与后端第三方导入路径 is_default: existing.is_empty() 保持一致。
   const [autoDefault] = useState(
     () => !editingProvider && !providers.some((provider) => provider.isDefault && provider.enabled),
@@ -320,10 +320,9 @@ export function ProviderEditor() {
   };
 
   const matchingPresets = useMemo(() => {
-    const q = presetSearch.toLowerCase();
-    return presets.filter((p) =>
-      `${p.name} ${p.id} ${p.category}`.toLowerCase().includes(q)
-    );
+    const q = presetSearch.trim().toLowerCase();
+    if (!q) return presets;
+    return presets.filter((p) => `${p.name} ${p.id}`.toLowerCase().includes(q));
   }, [presets, presetSearch]);
 
   // 模型池总览：包含从上游拉取的所有模型以及当前已选/手动添加的模型
@@ -415,7 +414,7 @@ export function ProviderEditor() {
         <div ref={contentRef} className="space-y-6">
           {choosing ? (
             /* 选择服务商预设 */
-            <div className="space-y-4">
+            <div className="space-y-3">
               <div className="relative">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
                 <Input
@@ -424,47 +423,72 @@ export function ProviderEditor() {
                   placeholder="搜索服务商预设，如 Anthropic, OpenAI, DeepSeek..."
                   value={presetSearch}
                   onChange={(e) => setPresetSearch(e.target.value)}
-                  className="pl-9 pr-3.5 h-9"
+                  className="pl-9 pr-8 h-8.5 text-xs"
                 />
+                {presetSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setPresetSearch('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
+                    title="清空"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                {/* 自定义连接 */}
-                <button
-                  type="button"
-                  onClick={() => choosePreset()}
-                  className="flex items-center gap-2.5 p-3 rounded-md border border-dashed border-zinc-300 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-500 bg-zinc-50/50 dark:bg-zinc-850/30 text-left transition-all group cursor-pointer"
-                >
-                  <div className="w-7 h-7 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200/80 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 flex items-center justify-center shrink-0">
-                    <Plus className="w-4 h-4" />
-                  </div>
-                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-zinc-950 dark:group-hover:text-white truncate">
-                    自定义服务商
-                  </span>
-                </button>
+              {matchingPresets.length === 0 ? (
+                <div className="p-8 text-center space-y-2 rounded-lg border border-border bg-muted/10">
+                  <p className="text-xs text-zinc-400">没有匹配的服务商预设</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => choosePreset()}
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>创建自定义服务商</span>
+                  </Button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {/* 自定义连接 */}
+                  <button
+                    type="button"
+                    onClick={() => choosePreset()}
+                    className="h-11 px-3 rounded-lg border border-dashed border-border hover:border-zinc-400 dark:hover:border-zinc-500 bg-muted/20 hover:bg-muted/40 flex items-center gap-2.5 text-left transition-colors cursor-pointer group"
+                  >
+                    <div className="w-7 h-7 rounded-md bg-muted flex items-center justify-center shrink-0 text-muted-foreground group-hover:text-foreground">
+                      <Plus className="w-4 h-4" />
+                    </div>
+                    <span className="text-xs font-medium text-foreground truncate">
+                      自定义服务商
+                    </span>
+                  </button>
 
-                {matchingPresets.map((p) => {
-                  const cleanName = p.name.replace(/[\(（][^\)）]+[\)）]/g, '').trim();
-                  return (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => choosePreset(p)}
-                      className="flex items-center gap-2.5 p-3 rounded-md border border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 bg-white dark:bg-zinc-900/90 hover:bg-zinc-50/60 dark:hover:bg-zinc-850/40 text-left shadow-2xs hover:shadow-xs transition-all duration-150 group cursor-pointer"
-                    >
-                      <ProviderAvatar
-                        name={cleanName}
-                        protocol={p.protocol}
-                        iconKey={p.icon || p.id}
-                        sizeClass="w-7 h-7"
-                      />
-                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 group-hover:text-zinc-950 dark:group-hover:text-white truncate">
-                        {cleanName}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+                  {matchingPresets.map((p) => {
+                    const cleanName = p.name.replace(/[\(（][^\)）]+[\)）]/g, '').trim();
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => choosePreset(p)}
+                        className="h-11 px-3 rounded-lg border border-border bg-card hover:bg-accent/50 hover:border-zinc-300 dark:hover:border-zinc-700 flex items-center gap-2.5 text-left transition-colors cursor-pointer group shadow-2xs"
+                      >
+                        <ProviderAvatar
+                          name={cleanName}
+                          protocol={p.protocol}
+                          iconKey={p.icon || p.id}
+                          sizeClass="w-7 h-7"
+                        />
+                        <span className="text-xs font-medium text-foreground truncate">
+                          {cleanName}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           ) : (
             /* 配置表单 */
@@ -496,7 +520,7 @@ export function ProviderEditor() {
                       协议格式
                     </label>
                     {preset ? (
-                      <div className="px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-850/50 text-zinc-700 dark:text-zinc-300">
+                      <div className="px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-700 dark:text-zinc-300">
                         {protocols[draft.protocol]}
                       </div>
                     ) : (
@@ -614,7 +638,7 @@ export function ProviderEditor() {
                   </div>
 
                   {showAuthHelp && (
-                    <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-850 text-[11px] text-zinc-600 dark:text-zinc-300 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
+                    <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-300 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
                       密钥保存在本地 SQLite 中。留空时默认沿用客户端传入的密钥；本地模型（如 Ollama）通常无需填写。
                     </div>
                   )}
@@ -665,7 +689,7 @@ export function ProviderEditor() {
                 </div>
 
                 {/* 设为全局默认服务商 */}
-                <div className="pt-3 border-t border-border space-y-2">
+                <div className="pt-3 border-t border-border">
                   <div className="flex items-center justify-between gap-4">
                     <div>
                       <span className="text-xs font-medium text-zinc-800 dark:text-zinc-200">
@@ -673,38 +697,16 @@ export function ProviderEditor() {
                       </span>
                       <span className="text-[11px] text-zinc-400 dark:text-zinc-500 ml-1.5">
                         {otherDefault && !draft.isDefault
-                          ? `(当前由 ${otherDefault.name} 兜底)`
-                          : '(未命中任何已启用服务商时由此接盘)'}
+                          ? `(当前默认: ${otherDefault.name})`
+                          : '(未命中任何规则或声明模型时默认路由至此)'}
                       </span>
                     </div>
                     <Switch
                       checked={!!draft.isDefault}
-                      onCheckedChange={(checked) => update({ isDefault: checked })}
+                      onCheckedChange={(checked) => update({ isDefault: checked, defaultModel: null })}
                       ariaLabel="设为全局默认服务商"
                     />
                   </div>
-
-                  {draft.isDefault && draft.models.length > 0 && (
-                    <div className="flex items-center justify-between gap-4 pl-0.5">
-                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                        未命中时降级转发为（可选）
-                      </span>
-                      <div className="w-52 max-w-xs shrink-0">
-                        <Select
-                          value={draft.defaultModel ?? ''}
-                          onChange={(event) => update({ defaultModel: event.target.value || null })}
-                          className="w-full text-xs font-mono"
-                        >
-                          <option value="">按原模型名转发</option>
-                          {draft.models.map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </Select>
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -819,7 +821,7 @@ export function ProviderEditor() {
                                 className={`w-3.5 h-3.5 rounded-[3px] border flex items-center justify-center shrink-0 transition-colors ${
                                   isSelected
                                     ? 'bg-zinc-900 border-zinc-900 text-white dark:bg-zinc-100 dark:border-zinc-100 dark:text-zinc-900'
-                                    : 'border-zinc-300/80 dark:border-zinc-600 bg-white dark:bg-zinc-850'
+                                    : 'border-zinc-300/80 dark:border-zinc-600 bg-white dark:bg-zinc-800'
                                 }`}
                               >
                                 {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}

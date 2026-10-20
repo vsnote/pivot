@@ -230,6 +230,16 @@ pub fn plan_route(
         });
     }
 
+    // 3.5. Smart normalized match (e.g. date versions, bracketed [1M], latest suffixes)
+    for provider in &active_providers {
+        if let Some(matched) = find_declared_or_normalized_model(provider, incoming_model) {
+            return Ok(RoutePlan {
+                primary: planned(provider, &matched),
+                fallbacks: automatic_fallbacks(&active_providers, &provider.id, &matched),
+            });
+        }
+    }
+
     // 4. Unknown model name: hand it to the default provider.
     let default_provider = active_providers
         .iter()
@@ -263,6 +273,85 @@ fn lists_model(provider: &Provider, model: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(model))
 }
 
+pub fn normalize_model_candidates(model: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return candidates;
+    }
+
+    // 1. Strip brackets like `[1M]`, `[thinking]`
+    let clean = if let Some(idx) = trimmed.find('[') {
+        trimmed[..idx].trim()
+    } else {
+        trimmed
+    };
+
+    // 2. Strip -latest suffix
+    let without_latest = if clean.ends_with("-latest") {
+        &clean[..clean.len() - 7]
+    } else {
+        clean
+    };
+
+    // 3. Strip date suffix -\d{8} or -\d{4}-\d{2}-\d{2}
+    let without_date = if let Ok(re8) = Regex::new(r"-\d{8}$") {
+        if let Some(m) = re8.find(without_latest) {
+            &without_latest[..m.start()]
+        } else if let Ok(re_iso) = Regex::new(r"-\d{4}-\d{2}-\d{2}$") {
+            if let Some(m) = re_iso.find(without_latest) {
+                &without_latest[..m.start()]
+            } else {
+                without_latest
+            }
+        } else {
+            without_latest
+        }
+    } else {
+        without_latest
+    };
+
+    if without_date != trimmed && !without_date.is_empty() {
+        candidates.push(without_date.to_string());
+    }
+
+    // 4. Common shorthands
+    match without_date.to_lowercase().as_str() {
+        "sonnet" => {
+            candidates.push("claude-3-7-sonnet".to_string());
+            candidates.push("claude-3-5-sonnet".to_string());
+        }
+        "haiku" => {
+            candidates.push("claude-3-5-haiku".to_string());
+        }
+        "opus" => {
+            candidates.push("claude-3-opus".to_string());
+        }
+        _ => {}
+    }
+
+    candidates
+}
+
+fn find_declared_or_normalized_model(provider: &Provider, incoming: &str) -> Option<String> {
+    if lists_model(provider, incoming) {
+        return Some(incoming.to_string());
+    }
+    for candidate in normalize_model_candidates(incoming) {
+        if lists_model(provider, &candidate) {
+            return Some(candidate);
+        }
+    }
+    for declared in &provider.models {
+        for candidate in normalize_model_candidates(declared) {
+            if candidate.eq_ignore_ascii_case(incoming) {
+                return Some(declared.clone());
+            }
+        }
+    }
+    None
+}
+
 fn declared_default_model(provider: &Provider) -> Option<String> {
     provider
         .default_model
@@ -273,11 +362,11 @@ fn declared_default_model(provider: &Provider) -> Option<String> {
 }
 
 /// Model name to ask `provider` for when `model` is requested: the name itself
-/// when the provider declares it, otherwise the provider's own default model.
+/// when the provider declares it (or matches via normalization), otherwise the provider's own default model.
 /// `None` means this provider cannot serve the request at all.
 fn candidate_model(provider: &Provider, model: &str) -> Option<String> {
-    if lists_model(provider, model) {
-        Some(model.to_string())
+    if let Some(matched) = find_declared_or_normalized_model(provider, model) {
+        Some(matched)
     } else {
         declared_default_model(provider)
     }
@@ -296,8 +385,8 @@ fn automatic_fallbacks(
     let mut rewritten = Vec::new();
 
     for provider in active_providers.iter().filter(|p| p.id != excluded_id) {
-        if lists_model(provider, model) {
-            same_name.push(planned(provider, model));
+        if let Some(matched) = find_declared_or_normalized_model(provider, model) {
+            same_name.push(planned(provider, &matched));
         } else if let Some(default_model) = declared_default_model(provider) {
             rewritten.push(planned(provider, &default_model));
         }
@@ -607,5 +696,29 @@ mod tests {
         let error = plan_route("claude-3-7-sonnet", &[disabled], &[]).unwrap_err();
 
         assert_eq!(error, "No active providers enabled in Pivot");
+    }
+
+    #[test]
+    fn normalized_model_matching_resolves_dates_and_modifiers() {
+        let providers = vec![
+            provider("anthropic", &["claude-3-7-sonnet"], 20),
+            provider("google", &["gemini-3.8-flash-high"], 15),
+            provider("openai", &["gpt-4o-2024-08-06"], 10),
+        ];
+
+        // 1. Incoming model with date suffix matches provider with canonical base name
+        let plan1 = plan_route("claude-3-7-sonnet-20250219", &providers, &[]).unwrap();
+        assert_eq!(plan1.primary.provider_id, "anthropic");
+        assert_eq!(plan1.primary.model, "claude-3-7-sonnet");
+
+        // 2. Incoming model with bracket modifier matches base name
+        let plan2 = plan_route("gemini-3.8-flash-high[1M]", &providers, &[]).unwrap();
+        assert_eq!(plan2.primary.provider_id, "google");
+        assert_eq!(plan2.primary.model, "gemini-3.8-flash-high");
+
+        // 3. Incoming base model matches provider that declared dated full name
+        let plan3 = plan_route("gpt-4o", &providers, &[]).unwrap();
+        assert_eq!(plan3.primary.provider_id, "openai");
+        assert_eq!(plan3.primary.model, "gpt-4o-2024-08-06");
     }
 }
