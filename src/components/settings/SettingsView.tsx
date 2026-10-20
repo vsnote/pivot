@@ -2,19 +2,11 @@ import React, { useState, useRef } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Button } from '@/components/common/Button';
-import { formatTokens } from '@/utils/pricing';
 import {
-  Copy,
-  Check,
   Download,
   Upload,
-  Radio,
-  Clock,
-  Zap,
-  ShieldCheck,
   CheckCircle2,
   AlertCircle,
-  FileJson,
 } from 'lucide-react';
 
 const themeOptions = [
@@ -23,28 +15,16 @@ const themeOptions = [
   { id: 'system', label: '跟随系统' },
 ] as const;
 
-function formatUptime(secs: number): string {
-  if (!secs || secs <= 0) return '刚启动';
-  const hours = Math.floor(secs / 3600);
-  const minutes = Math.floor((secs % 3600) / 60);
-  if (hours > 0) {
-    return `${hours} 小时 ${minutes} 分钟`;
-  }
-  return `${Math.max(1, minutes)} 分钟`;
-}
-
 export const SettingsView: React.FC = () => {
   const {
     theme,
     setTheme,
-    stats,
     providers,
     routes,
     saveProvider,
     saveRoutes,
   } = useAppStore();
 
-  const [copiedAddress, setCopiedAddress] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [backupNotice, setBackupNotice] = useState<{
     type: 'success' | 'error';
@@ -52,15 +32,6 @@ export const SettingsView: React.FC = () => {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const gatewayAddress = `http://${stats.host}:${stats.port}`;
-  const totalTokens = (stats.totalPromptTokens || 0) + (stats.totalCompletionTokens || 0);
-
-  const copyGatewayAddress = () => {
-    navigator.clipboard.writeText(gatewayAddress);
-    setCopiedAddress(true);
-    setTimeout(() => setCopiedAddress(false), 2000);
-  };
 
   const handleExportBackup = () => {
     try {
@@ -141,10 +112,10 @@ export const SettingsView: React.FC = () => {
       {backupNotice && (
         <div
           role="status"
-          className={`px-4 py-2.5 rounded-lg border text-xs flex items-center justify-between gap-3 shadow-2xs animate-in fade-in duration-150 ${
+          className={`px-4 py-2.5 rounded-lg text-xs flex items-center justify-between gap-3 animate-in fade-in duration-150 ${
             backupNotice.type === 'success'
-              ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
-              : 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60 text-rose-700 dark:text-rose-300'
+              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+              : 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
           }`}
         >
           <div className="flex items-center gap-2">
@@ -184,109 +155,12 @@ export const SettingsView: React.FC = () => {
           <Tabs value={theme} onValueChange={(val) => setTheme(val as 'light' | 'dark' | 'system')}>
             <TabsList aria-label="主题偏好切换">
               {themeOptions.map((opt) => (
-                <TabsTrigger key={opt.id} value={opt.id}>
+                <TabsTrigger key={opt.id} value={opt.id} className="w-[76px]">
                   {opt.label}
                 </TabsTrigger>
               ))}
             </TabsList>
           </Tabs>
-        </div>
-      </div>
-
-      {/* 卡片 2：本地网关状态 */}
-      <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
-        <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Radio className="w-3.5 h-3.5 text-zinc-500" />
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-              本地网关服务
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 text-[11px] font-mono">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                stats.isRunning
-                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]'
-                  : 'bg-rose-500'
-              }`}
-            />
-            <span className={stats.isRunning ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-rose-500 font-medium'}>
-              {stats.isRunning ? '正在运行' : '未就绪'}
-            </span>
-          </div>
-        </div>
-
-        <div className="p-4 space-y-4">
-          {/* 地址展示与复制行 */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-md bg-muted/30 border border-border">
-            <div className="min-w-0">
-              <span className="text-[11px] text-zinc-400 block mb-0.5">网关服务地址</span>
-              <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 select-all">
-                {gatewayAddress}
-              </span>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              onClick={copyGatewayAddress}
-              className="self-start sm:self-center"
-            >
-              {copiedAddress ? (
-                <Check className="w-3.5 h-3.5 text-emerald-500" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )}
-              <span>{copiedAddress ? '已复制' : '复制地址'}</span>
-            </Button>
-          </div>
-
-          {/* 网关指标微栅格 */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
-            <div className="p-2.5 rounded-md bg-zinc-50/70 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800">
-              <span className="text-[10px] text-zinc-400 block flex items-center gap-1">
-                <Clock className="w-3 h-3" />
-                <span>运行时间</span>
-              </span>
-              <span className="font-semibold text-zinc-800 dark:text-zinc-200 mt-1 block">
-                {formatUptime(stats.uptimeSecs)}
-              </span>
-            </div>
-
-            <div className="p-2.5 rounded-md bg-zinc-50/70 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800">
-              <span className="text-[10px] text-zinc-400 block flex items-center gap-1">
-                <Zap className="w-3 h-3" />
-                <span>累计请求</span>
-              </span>
-              <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200 mt-1 block">
-                {stats.totalRequests} 次
-              </span>
-            </div>
-
-            <div className="p-2.5 rounded-md bg-zinc-50/70 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800">
-              <span className="text-[10px] text-zinc-400 block flex items-center gap-1">
-                <FileJson className="w-3 h-3" />
-                <span>累计 Token</span>
-              </span>
-              <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200 mt-1 block">
-                {totalTokens > 0 ? formatTokens(totalTokens) : '0'}
-              </span>
-            </div>
-
-            <div className="p-2.5 rounded-md bg-zinc-50/70 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800">
-              <span className="text-[10px] text-zinc-400 block flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3" />
-                <span>异常请求</span>
-              </span>
-              <span
-                className={`font-mono font-semibold mt-1 block ${
-                  stats.errorCount > 0 ? 'text-rose-500' : 'text-zinc-800 dark:text-zinc-200'
-                }`}
-              >
-                {stats.errorCount} 次
-              </span>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -300,7 +174,7 @@ export const SettingsView: React.FC = () => {
 
         <div className="p-4 space-y-3.5">
           <div className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-            将当前已配置的所有服务商密钥、模型槽位及自定义路由规则导出为加密或纯净 JSON 备份文件，可在重装系统或换机时一键无缝恢复。
+            导出全部服务商、密钥与路由规则为单个 JSON 文件，换机或重装后可据此恢复。备份是明文的，含密钥，请妥善保管。
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 pt-1">

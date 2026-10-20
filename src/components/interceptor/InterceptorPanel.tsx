@@ -3,6 +3,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
+import { PiLogo } from '@/components/common/BrandIcons';
 import {
   Terminal,
   ShieldCheck,
@@ -19,21 +20,28 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
     id: 'claude_code',
     name: 'Claude Code',
     installed: true,
-    configPath: '~/.claude.json',
+    configPath: '~/.claude/settings.json',
     isIntercepted: false,
   },
   {
     id: 'codex_cli',
     name: 'Codex CLI',
     installed: true,
-    configPath: '~/.codex/config.json',
+    configPath: '~/.codex/config.toml',
     isIntercepted: false,
   },
   {
     id: 'gemini_cli',
     name: 'Gemini CLI',
     installed: false,
-    configPath: '~/.gemini/config.json',
+    configPath: '~/.gemini/.env',
+    isIntercepted: false,
+  },
+  {
+    id: 'pi',
+    name: 'Pi Agent',
+    installed: false,
+    configPath: '~/.pi/agent/models.json',
     isIntercepted: false,
   },
 ];
@@ -147,7 +155,7 @@ export const InterceptorPanel: React.FC = () => {
       </div>
 
       {/* 精简卡片网格 */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
         {displayList.map((tool) => {
           const isToggling = togglingId === tool.id;
           const isOverwritten = tool.isOverwritten ?? false;
@@ -180,8 +188,10 @@ export const InterceptorPanel: React.FC = () => {
                         <Terminal className="w-4 h-4" />
                       ) : tool.id === 'codex_cli' ? (
                         <ShieldCheck className="w-4 h-4" />
-                      ) : (
+                      ) : tool.id === 'gemini_cli' ? (
                         <Sparkles className="w-4 h-4" />
+                      ) : (
+                        <PiLogo className="w-4 h-4" />
                       )}
                     </div>
                     <div>

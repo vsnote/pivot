@@ -84,6 +84,7 @@ pub fn run() {
             let interceptor_mgr = interceptor::InterceptorManager::new(db.clone(), DEFAULT_PORT);
             let _ = interceptor_mgr.sync_codex_catalog_if_intercepted();
             let _ = interceptor_mgr.sync_claude_settings_if_intercepted();
+            let _ = interceptor_mgr.sync_pi_models_if_intercepted();
 
             let gw_state = GatewayState {
                 db,

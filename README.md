@@ -1,6 +1,6 @@
 # Pivot
 
-Pivot 是一个面向 Claude Code、Codex CLI 和 Gemini CLI 的本地 AI 路由网关。它在本机启动一个 OpenAI / Anthropic 兼容接口，将请求转发到已配置的服务商，并提供模型路由、fallback、协议转换、请求日志和 CLI 配置拦截。
+Pivot 是一个面向 Claude Code、Codex CLI、Gemini CLI 和 Pi Agent 的本地 AI 路由网关。它在本机启动一个 OpenAI / Anthropic 兼容接口，将请求转发到已配置的服务商，并提供模型路由、fallback、协议转换、请求日志和 CLI 配置拦截。
 
 ## 当前能力
 
@@ -15,7 +15,7 @@ Pivot 是一个面向 Claude Code、Codex CLI 和 Gemini CLI 的本地 AI 路由
 - 规则作为高级覆盖项保留，API Key 会话亲和
 - Anthropic / OpenAI / Gemini 协议转换
 - 非流式请求 Token 统计和请求日志
-- Claude Code、Codex CLI、Gemini CLI 配置备份、拦截和恢复
+- Claude Code、Codex CLI、Gemini CLI、Pi Agent 配置备份、拦截和恢复
 
 ## 开发环境
 

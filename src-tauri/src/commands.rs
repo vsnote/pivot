@@ -43,6 +43,7 @@ pub async fn save_provider(state: State<'_, AppState>, mut provider: Provider) -
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_codex_catalog_if_intercepted();
     let _ = mgr.sync_claude_settings_if_intercepted();
+    let _ = mgr.sync_pi_models_if_intercepted();
     Ok(())
 }
 
@@ -60,6 +61,7 @@ pub async fn delete_provider(
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_codex_catalog_if_intercepted();
     let _ = mgr.sync_claude_settings_if_intercepted();
+    let _ = mgr.sync_pi_models_if_intercepted();
     state.db.get_routes().map_err(|e| e.to_string())
 }
 
@@ -151,6 +153,7 @@ pub async fn save_routes(state: State<'_, AppState>, routes: Vec<RouteRule>) -> 
     state.db.save_routes(&routes).map_err(|e| e.to_string())?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_claude_settings_if_intercepted();
+    let _ = mgr.sync_pi_models_if_intercepted();
     Ok(())
 }
 
@@ -297,6 +300,7 @@ pub async fn set_provider_enabled(state: State<'_, AppState>, id: String, enable
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     let _ = mgr.sync_codex_catalog_if_intercepted();
     let _ = mgr.sync_claude_settings_if_intercepted();
+    let _ = mgr.sync_pi_models_if_intercepted();
     Ok(())
 }
 

@@ -32,6 +32,8 @@ function formatClientType(type: string) {
       return 'Codex CLI';
     case 'gemini_cli':
       return 'Gemini CLI';
+    case 'pi':
+      return 'Pi Agent';
     case 'openai_api':
       return 'OpenAI API';
     case 'anthropic_api':
@@ -214,14 +216,14 @@ const LogInspector: React.FC<LogInspectorProps> = ({
       <div className="p-4 space-y-4 max-h-[calc(100vh-180px)] overflow-y-auto">
         {/* 核心指标栅格 */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          <div className="p-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800">
+          <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05]">
             <span className="text-[10px] text-zinc-400 block mb-0.5">响应耗时</span>
             <span className="text-sm font-mono font-bold text-zinc-900 dark:text-zinc-100">
               {log.latencyMs} ms
             </span>
           </div>
 
-          <div className="p-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800">
+          <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05]">
             <span className="text-[10px] text-zinc-400 block mb-0.5">Token 总量</span>
             <span className="text-sm font-mono font-bold text-zinc-900 dark:text-zinc-100">
               {totalToks > 0 ? formatTokens(totalToks) : '-'}
@@ -233,7 +235,7 @@ const LogInspector: React.FC<LogInspectorProps> = ({
             )}
           </div>
 
-          <div className="p-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800">
+          <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05]">
             <span className="text-[10px] text-zinc-400 block mb-0.5">预估成本</span>
             <span className="text-sm font-mono font-bold text-emerald-600 dark:text-emerald-400">
               {cost > 0 ? formatCurrency(cost) : '¥0.00'}
@@ -241,7 +243,7 @@ const LogInspector: React.FC<LogInspectorProps> = ({
             <span className="text-[9px] text-zinc-400 block mt-0.5">公价费率</span>
           </div>
 
-          <div className="p-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800">
+          <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05]">
             <span className="text-[10px] text-zinc-400 block mb-0.5">来源客户端</span>
             <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate block">
               {formatClientType(log.clientType)}
@@ -254,7 +256,7 @@ const LogInspector: React.FC<LogInspectorProps> = ({
           <h4 className="text-[11px] font-bold text-zinc-800 dark:text-zinc-200 uppercase tracking-wider">
             请求路由决策
           </h4>
-          <div className="p-3.5 rounded-md bg-zinc-50/80 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800 space-y-2 text-xs font-mono">
+          <div className="p-3.5 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05] space-y-2 text-xs font-mono">
             <div className="flex justify-between items-center gap-2">
               <span className="text-zinc-400 text-[11px]">请求模型</span>
               <span className="font-semibold text-zinc-900 dark:text-zinc-100 truncate max-w-[240px]">
@@ -287,7 +289,7 @@ const LogInspector: React.FC<LogInspectorProps> = ({
               {log.attempts.map((att, index) => (
                 <div
                   key={index}
-                  className="p-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800 text-xs font-mono space-y-1"
+                  className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05] text-xs font-mono space-y-1"
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-zinc-900 dark:text-zinc-100">
@@ -585,6 +587,7 @@ export const RequestLogs: React.FC = () => {
                 <option value="claude_code">Claude Code</option>
                 <option value="codex_cli">Codex CLI</option>
                 <option value="gemini_cli">Gemini CLI</option>
+                <option value="pi">Pi Agent</option>
                 <option value="openai_api">OpenAI API</option>
                 <option value="anthropic_api">Anthropic API</option>
                 <option value="generic">通用客户端</option>

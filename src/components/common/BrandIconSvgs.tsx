@@ -172,4 +172,9 @@ export const BrandIconRenderers: Record<string, React.FC<{ className?: string }>
       <path clipRule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z" fill="#D97757" fillRule="evenodd"></path>
     </svg>
   ),
+  "pi": ({ className = 'w-4 h-4' }) => (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M4.5 4.5C4.5 3.67 5.17 3 6 3H18C18.83 3 19.5 3.67 19.5 4.5C19.5 5.33 18.83 6 18 6H16V16C16 17.66 17.34 19 19 19C19.55 19 20 19.45 20 20C20 20.55 19.55 21 19 21C16.24 21 14 18.76 14 16V6H10V18C10 18.83 9.33 19.5 8.5 19.5C7.67 19.5 7 18.83 7 18V6H6C5.17 6 4.5 5.33 4.5 4.5Z" />
+    </svg>
+  ),
 };

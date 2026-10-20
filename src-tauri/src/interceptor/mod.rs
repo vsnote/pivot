@@ -67,6 +67,7 @@ impl InterceptorManager {
             self.get_claude_code_status(),
             self.get_codex_status(),
             self.get_gemini_cli_status(),
+            self.get_pi_status(),
         ]
     }
 
@@ -334,6 +335,74 @@ impl InterceptorManager {
                     protocol: "gemini".to_string(),
                     models: vec!["gemini-2.0-flash".to_string(), "gemini-2.5-pro".to_string()],
                 })
+            }
+            "pi" => {
+                let models_path = Self::pi_models_path();
+                if !models_path.exists() {
+                    return None;
+                }
+                let content = fs::read_to_string(&models_path).ok()?;
+                let val = serde_json::from_str::<Value>(&content).ok()?;
+                let providers_obj = val.get("providers").and_then(|p| p.as_object())?;
+
+                for (p_id, p_val) in providers_obj {
+                    if p_id == "pivot" {
+                        continue;
+                    }
+                    let ep = p_val.get("baseUrl").and_then(|u| u.as_str())?;
+                    let clean_ep = ep.trim().trim_end_matches('/').to_string();
+                    if clean_ep.is_empty() || clean_ep.contains(&self.gateway_url) {
+                        continue;
+                    }
+
+                    let token = p_val
+                        .get("apiKey")
+                        .and_then(|k| k.as_str())
+                        .map(|s| s.to_string());
+                    let api = p_val
+                        .get("api")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("openai-completions");
+                    let protocol = if api == "anthropic-messages" {
+                        "anthropic".to_string()
+                    } else {
+                        "openai".to_string()
+                    };
+
+                    let host = if clean_ep.contains("127.0.0.1") || clean_ep.contains("localhost") {
+                        let port = clean_ep.rsplit(':').next().unwrap_or("代理");
+                        format!("本地代理 ({})", port)
+                    } else {
+                        let h = clean_ep
+                            .trim_start_matches("http://")
+                            .trim_start_matches("https://")
+                            .split('/')
+                            .next()
+                            .unwrap_or(p_id);
+                        format!("Pi 渠道 ({})", h)
+                    };
+
+                    let mut models = Vec::new();
+                    if let Some(m_arr) = p_val.get("models").and_then(|m| m.as_array()) {
+                        for item in m_arr {
+                            if let Some(mid) = item.get("id").and_then(|i| i.as_str()) {
+                                models.push(mid.to_string());
+                            }
+                        }
+                    }
+                    if models.is_empty() {
+                        models = vec!["gpt-4o".to_string(), "claude-3-7-sonnet".to_string()];
+                    }
+
+                    return Some(ThirdPartyConfig {
+                        endpoint: clean_ep,
+                        auth_token: token,
+                        suggested_name: host,
+                        protocol,
+                        models,
+                    });
+                }
+                None
             }
             _ => None,
         }
@@ -1106,11 +1175,337 @@ impl InterceptorManager {
         Ok(self.get_gemini_cli_status())
     }
 
+    // ================= Pi Agent =================
+
+    fn pi_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
+            let p = PathBuf::from(dir);
+            if !p.as_os_str().is_empty() {
+                return p;
+            }
+        }
+        Self::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".pi")
+            .join("agent")
+    }
+
+    fn pi_models_path() -> PathBuf {
+        Self::pi_dir().join("models.json")
+    }
+
+    fn pi_models_backup_path() -> PathBuf {
+        let base = Self::pi_dir();
+        let new_bak = base.join("models.json.pivot.bak");
+        let legacy_bak = base.join("models.json.omniswitch.bak");
+        if !new_bak.exists() && legacy_bak.exists() {
+            legacy_bak
+        } else {
+            new_bak
+        }
+    }
+
+    fn pi_settings_path() -> PathBuf {
+        Self::pi_dir().join("settings.json")
+    }
+
+    pub fn get_pi_status(&self) -> InterceptorInfo {
+        let models_path = Self::pi_models_path();
+        let models_backup_path = Self::pi_models_backup_path();
+        let settings_path = Self::pi_settings_path();
+
+        let installed = Self::is_binary_installed("pi")
+            || models_path.exists()
+            || settings_path.exists()
+            || Self::pi_dir().exists()
+            || Self::home_dir()
+                .map(|h| h.join(".pi").exists())
+                .unwrap_or(false);
+
+        let mut db_is_intercepted = false;
+        let mut original_endpoint = None;
+
+        if let Ok(Some((db_intercepted, _, orig_ep))) = self.db.get_interceptor_state("pi") {
+            db_is_intercepted = db_intercepted;
+            original_endpoint = orig_ep;
+        }
+
+        let mut file_intercepted = false;
+        if models_path.exists() {
+            if let Ok(content) = fs::read_to_string(&models_path) {
+                if content.contains(&self.gateway_url) {
+                    file_intercepted = true;
+                }
+            }
+        }
+
+        let is_intercepted = if models_path.exists() {
+            file_intercepted
+        } else {
+            db_is_intercepted
+        };
+
+        let is_overwritten = db_is_intercepted && !file_intercepted;
+
+        if is_intercepted {
+            let _ = self.do_sync_pi_models();
+        }
+
+        let third_party = self.get_third_party_config("pi");
+        let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
+
+        InterceptorInfo {
+            id: "pi".to_string(),
+            name: "Pi Agent".to_string(),
+            installed,
+            config_path: models_path.to_string_lossy().to_string(),
+            is_intercepted,
+            backup_path: if models_backup_path.exists() {
+                Some(models_backup_path.to_string_lossy().to_string())
+            } else {
+                None
+            },
+            original_endpoint,
+            conflict: self.check_third_party_conflict("pi", is_overwritten),
+            third_party,
+            is_overwritten,
+        }
+    }
+
+    fn do_sync_pi_models(&self) -> Result<(), String> {
+        let models_path = Self::pi_models_path();
+        if !models_path.exists() {
+            return Ok(());
+        }
+        let content = fs::read_to_string(&models_path).unwrap_or_default();
+        let mut v: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        if !v.is_object() || !v["providers"].is_object() {
+            return Ok(());
+        }
+        if v["providers"].get("pivot").is_none() {
+            return Ok(());
+        }
+
+        let providers = self.db.get_providers().map_err(|e| e.to_string())?;
+        let routes = self.db.get_routes().unwrap_or_default();
+        let (pi_models, preferred_model) = generate_pi_models_list(&providers, &routes);
+
+        let target_endpoint = format!("{}/v1", self.gateway_url);
+        v["providers"]["pivot"] = json!({
+            "baseUrl": target_endpoint,
+            "api": "openai-completions",
+            "apiKey": "pivot",
+            "models": pi_models,
+        });
+
+        if let Ok(serialized) = serde_json::to_string_pretty(&v) {
+            let _ = atomic_write(&models_path, &serialized);
+        }
+
+        let settings_path = Self::pi_settings_path();
+        if settings_path.exists() {
+            if let Ok(content) = fs::read_to_string(&settings_path) {
+                if let Ok(mut sv) = serde_json::from_str::<Value>(&content) {
+                    if sv.get("defaultProvider").and_then(|p| p.as_str()) == Some("pivot") {
+                        if let Some(ref pm) = preferred_model {
+                            sv["defaultModel"] = json!(pm);
+                            if let Ok(serialized) = serde_json::to_string_pretty(&sv) {
+                                let _ = atomic_write(&settings_path, &serialized);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn sync_pi_models_if_intercepted(&self) -> Result<(), String> {
+        let status = self.get_pi_status();
+        if status.is_intercepted {
+            self.do_sync_pi_models()?;
+        }
+        Ok(())
+    }
+
+    pub fn toggle_pi(&self, enable: bool) -> Result<InterceptorInfo, String> {
+        let models_path = Self::pi_models_path();
+        let models_backup_path = Self::pi_models_backup_path();
+        let settings_path = Self::pi_settings_path();
+        let target_endpoint = format!("{}/v1", self.gateway_url);
+
+        if enable {
+            let saved_state = self.db.get_interceptor_state("pi").ok().flatten();
+            let orig_ep = saved_state
+                .as_ref()
+                .and_then(|s| s.2.clone())
+                .or_else(|| self.detect_third_party_endpoint("pi"));
+
+            if let Some(p) = models_path.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+
+            // 1. 读取或初始化 models.json
+            let mut models_val: Value = if models_path.exists() {
+                let content = fs::read_to_string(&models_path).unwrap_or_default();
+                serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+            } else {
+                json!({})
+            };
+            if !models_val.is_object() {
+                models_val = json!({});
+            }
+            if !models_val["providers"].is_object() {
+                models_val["providers"] = json!({});
+            }
+
+            // 2. 生成 pivot provider 的 models 列表
+            let providers = self.db.get_providers().unwrap_or_default();
+            let routes = self.db.get_routes().unwrap_or_default();
+            let (pi_models, preferred_model) = generate_pi_models_list(&providers, &routes);
+
+            models_val["providers"]["pivot"] = json!({
+                "baseUrl": target_endpoint,
+                "api": "openai-completions",
+                "apiKey": "pivot",
+                "models": pi_models,
+            });
+
+            if let Ok(serialized) = serde_json::to_string_pretty(&models_val) {
+                atomic_write(&models_path, &serialized).map_err(|e| e.to_string())?;
+            }
+
+            // 3. 更新 settings.json 的 defaultProvider 和 defaultModel
+            let prev_backup = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
+
+            let mut orig_default_provider = prev_backup
+                .as_ref()
+                .and_then(|b| b.get("orig_default_provider"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let mut orig_default_model = prev_backup
+                .as_ref()
+                .and_then(|b| b.get("orig_default_model"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let mut settings_val: Value = if settings_path.exists() {
+                let content = fs::read_to_string(&settings_path).unwrap_or_default();
+                serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+            } else {
+                json!({})
+            };
+            if !settings_val.is_object() {
+                settings_val = json!({});
+            }
+            if orig_default_provider.is_none() {
+                if let Some(dp) = settings_val.get("defaultProvider").and_then(|v| v.as_str()) {
+                    if dp != "pivot" {
+                        orig_default_provider = Some(dp.to_string());
+                    }
+                }
+            }
+            if orig_default_model.is_none() {
+                if let Some(dm) = settings_val.get("defaultModel").and_then(|v| v.as_str()) {
+                    orig_default_model = Some(dm.to_string());
+                }
+            }
+
+            settings_val["defaultProvider"] = json!("pivot");
+            if let Some(ref pm) = preferred_model {
+                settings_val["defaultModel"] = json!(pm);
+            }
+            if let Ok(serialized) = serde_json::to_string_pretty(&settings_val) {
+                let _ = atomic_write(&settings_path, &serialized);
+            }
+
+            let _ = fs::remove_file(&models_backup_path);
+
+            let backup_info = json!({
+                "orig_default_provider": orig_default_provider,
+                "orig_default_model": orig_default_model,
+            });
+            let _ = self.db.save_interceptor_state(
+                "pi",
+                true,
+                Some(&backup_info.to_string()),
+                orig_ep.as_deref(),
+            );
+        } else {
+            let saved_state = self.db.get_interceptor_state("pi").ok().flatten();
+            let orig_ep = saved_state.as_ref().and_then(|s| s.2.clone());
+            let backup_val = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
+
+            // 1. 还原 models.json
+            if models_path.exists() {
+                if let Ok(content) = fs::read_to_string(&models_path) {
+                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                        if let Some(providers_obj) = v.get_mut("providers").and_then(|p| p.as_object_mut()) {
+                            providers_obj.remove("pivot");
+                        }
+                        let remaining_keys = v.as_object().map(|o| o.keys().count()).unwrap_or(0);
+                        let providers_empty = v.get("providers")
+                            .and_then(|p| p.as_object())
+                            .map(|p| p.is_empty())
+                            .unwrap_or(false);
+
+                        if remaining_keys == 1 && providers_empty {
+                            let _ = fs::remove_file(&models_path);
+                        } else if let Ok(serialized) = serde_json::to_string_pretty(&v) {
+                            let _ = atomic_write(&models_path, &serialized);
+                        }
+                    }
+                }
+            }
+
+            // 2. 还原 settings.json
+            if settings_path.exists() {
+                if let Ok(content) = fs::read_to_string(&settings_path) {
+                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                        if v.get("defaultProvider").and_then(|p| p.as_str()) == Some("pivot") {
+                            if let Some(ref b) = backup_val {
+                                if let Some(orig_p) = b.get("orig_default_provider").and_then(|p| p.as_str()) {
+                                    v["defaultProvider"] = json!(orig_p);
+                                } else if let Some(obj) = v.as_object_mut() {
+                                    obj.remove("defaultProvider");
+                                }
+                                if let Some(orig_m) = b.get("orig_default_model").and_then(|m| m.as_str()) {
+                                    v["defaultModel"] = json!(orig_m);
+                                } else if let Some(obj) = v.as_object_mut() {
+                                    obj.remove("defaultModel");
+                                }
+                            } else if let Some(obj) = v.as_object_mut() {
+                                obj.remove("defaultProvider");
+                                obj.remove("defaultModel");
+                            }
+                        }
+                        if let Ok(serialized) = serde_json::to_string_pretty(&v) {
+                            let _ = atomic_write(&settings_path, &serialized);
+                        }
+                    }
+                }
+            }
+
+            let _ = fs::remove_file(&models_backup_path);
+            let _ = self.db.save_interceptor_state("pi", false, None, orig_ep.as_deref());
+        }
+
+        Ok(self.get_pi_status())
+    }
+
     pub fn toggle_tool(&self, id: &str, enable: bool) -> Result<InterceptorInfo, String> {
         match id {
             "claude_code" => self.toggle_claude_code(enable),
             "codex_cli" => self.toggle_codex(enable),
             "gemini_cli" => self.toggle_gemini_cli(enable),
+            "pi" => self.toggle_pi(enable),
             _ => Err(format!("Unknown tool id: {}", id)),
         }
     }
@@ -1546,6 +1941,154 @@ pub fn generate_claude_model_picker(
     })
 }
 
+/// Generate Pi models list and preferred model from configured providers and routes
+pub fn generate_pi_models_list(
+    providers: &[Provider],
+    routes: &[RouteRule],
+) -> (Vec<Value>, Option<String>) {
+    let mut models = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    // 1. Tier 槽位模型
+    let tier_specs = [
+        ("tier-main", "主力编程 (Main)", "claude-3-7-sonnet"),
+        ("tier-reasoning", "深度推理 (Reasoning)", "claude-3-opus"),
+        ("tier-fast", "轻量辅助 (Fast)", "claude-3-5-haiku"),
+    ];
+
+    for (tier_id, label, default_model) in tier_specs {
+        if let Some(rule) = routes.iter().find(|r| r.id == tier_id && r.enabled) {
+            let target_m = rule.target_model.as_deref().unwrap_or(default_model);
+            let id = default_model.to_string();
+            if !seen_ids.contains(&id) {
+                seen_ids.insert(id.clone());
+                let (levels, default_lvl) = resolve_model_reasoning_spec(target_m);
+                let is_reasoning = !levels.is_empty() && default_lvl != "none";
+                let (ctx, _) = resolve_model_context_window(target_m);
+                models.push(json!({
+                    "id": id,
+                    "name": format!("{} · Pivot 动态路由", label),
+                    "reasoning": is_reasoning,
+                    "input": ["text", "image"],
+                    "contextWindow": ctx,
+                    "maxTokens": 16384,
+                }));
+            }
+        }
+    }
+
+    // 2. 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
+    let mut model_provider_count: HashMap<String, HashSet<String>> = HashMap::new();
+    for provider in providers.iter().filter(|p| p.enabled) {
+        let mut prov_models = HashSet::new();
+        for m in &provider.models {
+            let trimmed = m.trim();
+            if !trimmed.is_empty() {
+                prov_models.insert(trimmed.to_string());
+            }
+        }
+        if let Some(ref dm) = provider.default_model {
+            let trimmed = dm.trim();
+            if !trimmed.is_empty() {
+                prov_models.insert(trimmed.to_string());
+            }
+        }
+        for m in prov_models {
+            model_provider_count
+                .entry(m)
+                .or_default()
+                .insert(provider.id.clone());
+        }
+    }
+
+    // 3. 所有已启用服务商的所有可用模型
+    let mut preferred_model = None;
+
+    if let Some(def_prov) = providers.iter().find(|p| p.is_default && p.enabled) {
+        let prefix = def_prov.name.to_lowercase().replace(' ', "-");
+        if let Some(dm) = def_prov.default_model.as_deref().or_else(|| def_prov.models.first().map(|s| s.as_str())) {
+            let trimmed = dm.trim();
+            if !trimmed.is_empty() {
+                preferred_model = Some(if trimmed.to_lowercase().starts_with(&format!("{}/", prefix)) {
+                    trimmed.to_string()
+                } else {
+                    format!("{}/{}", prefix, trimmed)
+                });
+            }
+        }
+    }
+
+    for provider in providers.iter().filter(|p| p.enabled) {
+        let mut provider_models = Vec::new();
+        if let Some(ref dm) = provider.default_model {
+            let dm_trimmed = dm.trim();
+            if !dm_trimmed.is_empty() {
+                provider_models.push(dm_trimmed.to_string());
+            }
+        }
+        for m in &provider.models {
+            let trimmed = m.trim().to_string();
+            if !trimmed.is_empty() && !provider_models.contains(&trimmed) {
+                provider_models.push(trimmed);
+            }
+        }
+
+        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+
+        for model_name in provider_models {
+            let is_duplicate = model_provider_count
+                .get(&model_name)
+                .map(|s| s.len() > 1)
+                .unwrap_or(false);
+
+            let slug = if model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
+                model_name.clone()
+            } else if is_duplicate {
+                format!("{}/{}", provider_prefix, model_name)
+            } else {
+                model_name.clone()
+            };
+
+            if !seen_ids.contains(&slug) {
+                seen_ids.insert(slug.clone());
+                let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
+                let is_reasoning = !levels.is_empty() && default_lvl != "none";
+                let (ctx, _) = resolve_model_context_window(&model_name);
+                models.push(json!({
+                    "id": slug,
+                    "name": format!("{} ({})", model_name, provider.name),
+                    "reasoning": is_reasoning,
+                    "input": ["text", "image"],
+                    "contextWindow": ctx,
+                    "maxTokens": 16384,
+                }));
+            }
+
+            let prefixed = format!("{}/{}", provider_prefix, model_name);
+            if !seen_ids.contains(&prefixed) {
+                seen_ids.insert(prefixed.clone());
+                let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
+                let is_reasoning = !levels.is_empty() && default_lvl != "none";
+                let (ctx, _) = resolve_model_context_window(&model_name);
+                models.push(json!({
+                    "id": prefixed,
+                    "name": format!("{} ({})", model_name, provider.name),
+                    "reasoning": is_reasoning,
+                    "input": ["text", "image"],
+                    "contextWindow": ctx,
+                    "maxTokens": 16384,
+                }));
+            }
+        }
+    }
+
+    if preferred_model.is_none() {
+        preferred_model = models.first().and_then(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+    }
+
+    (models, preferred_model)
+}
+
 /// Accurately resolves supported reasoning levels and default effort for a model
 pub fn resolve_model_reasoning_spec(model_name: &str) -> (Vec<Value>, &'static str) {
     let lower = model_name.to_lowercase();
@@ -1836,6 +2379,32 @@ mod tests {
             let gemini_actual: Value = serde_json::from_str(&fs::read_to_string(gemini_dir.join("config.json")).map_err(|e| e.to_string())?).unwrap();
             let gemini_expected: Value = serde_json::from_str(gemini_original).unwrap();
             assert_eq!(gemini_actual, gemini_expected);
+
+            let pi_dir = home.join(".pi").join("agent");
+            fs::create_dir_all(&pi_dir).map_err(|e| e.to_string())?;
+            let pi_models_original = r#"{"providers":{"other":{"baseUrl":"https://pi.example","api":"openai-completions","apiKey":"sk-other"}}}"#;
+            let pi_settings_original = r#"{"defaultProvider":"other","defaultModel":"gpt-4o"}"#;
+            fs::write(pi_dir.join("models.json"), pi_models_original).map_err(|e| e.to_string())?;
+            fs::write(pi_dir.join("settings.json"), pi_settings_original).map_err(|e| e.to_string())?;
+
+            manager.toggle_pi(true)?;
+            let pi_intercepted = manager.get_pi_status();
+            assert!(pi_intercepted.is_intercepted);
+            let models_content = fs::read_to_string(pi_dir.join("models.json")).unwrap();
+            assert!(models_content.contains("http://127.0.0.1:16888/v1"));
+            let settings_content = fs::read_to_string(pi_dir.join("settings.json")).unwrap();
+            assert!(settings_content.contains("\"defaultProvider\": \"pivot\""));
+
+            manager.toggle_pi(true)?;
+            manager.toggle_pi(false)?;
+
+            let pi_models_actual: Value = serde_json::from_str(&fs::read_to_string(pi_dir.join("models.json")).unwrap()).unwrap();
+            let pi_models_expected: Value = serde_json::from_str(pi_models_original).unwrap();
+            assert_eq!(pi_models_actual, pi_models_expected);
+
+            let pi_settings_actual: Value = serde_json::from_str(&fs::read_to_string(pi_dir.join("settings.json")).unwrap()).unwrap();
+            let pi_settings_expected: Value = serde_json::from_str(pi_settings_original).unwrap();
+            assert_eq!(pi_settings_actual, pi_settings_expected);
             Ok(())
         })();
 
@@ -1929,6 +2498,34 @@ followUpQueueMode = "queue"
         let levels = models[2]["supported_reasoning_levels"].as_array().unwrap();
         assert_eq!(levels.len(), 6);
         assert_eq!(levels[5]["effort"], "ultra");
+    }
+
+    #[test]
+    fn test_generate_pi_models_list() {
+        let provider1 = Provider {
+            id: "p1".to_string(),
+            name: "Anthropic".to_string(),
+            protocol: "anthropic".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            preset_id: None,
+            api_keys: vec!["sk-ant".to_string()],
+            models: vec!["claude-3-7-sonnet".to_string()],
+            default_model: Some("claude-3-7-sonnet".to_string()),
+            is_default: true,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 30,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+
+        let (models, preferred_model) = generate_pi_models_list(&[provider1], &[]);
+        assert!(!models.is_empty());
+        assert_eq!(preferred_model, Some("anthropic/claude-3-7-sonnet".to_string()));
+        let has_sonnet = models.iter().any(|m| m["id"] == "claude-3-7-sonnet" || m["id"] == "anthropic/claude-3-7-sonnet");
+        assert!(has_sonnet);
     }
 
     #[test]
@@ -2118,6 +2715,27 @@ followUpQueueMode = "queue"
             let gemini_tp = manager.get_third_party_config("gemini_cli").unwrap();
             assert_eq!(gemini_tp.endpoint, "https://gemini-proxy.com");
             assert_eq!(gemini_tp.protocol, "gemini");
+
+            // 4. Pi Agent
+            let pi_dir = home.join(".pi").join("agent");
+            fs::create_dir_all(&pi_dir).map_err(|e| e.to_string())?;
+            fs::write(
+                pi_dir.join("models.json"),
+                r#"{"providers":{"thirdparty":{"baseUrl":"https://pi-proxy.example.com/v1","apiKey":"sk-pi-123"}}}"#,
+            )
+            .map_err(|e| e.to_string())?;
+            assert_eq!(
+                manager.detect_third_party_endpoint("pi"),
+                Some("https://pi-proxy.example.com/v1".to_string())
+            );
+            assert!(manager
+                .check_third_party_conflict("pi", false)
+                .unwrap()
+                .contains("https://pi-proxy.example.com/v1"));
+            let pi_tp = manager.get_third_party_config("pi").unwrap();
+            assert_eq!(pi_tp.endpoint, "https://pi-proxy.example.com/v1");
+            assert_eq!(pi_tp.auth_token, Some("sk-pi-123".to_string()));
+            assert_eq!(pi_tp.protocol, "openai");
 
             Ok(())
         })();

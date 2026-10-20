@@ -20,6 +20,7 @@ import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { Badge } from '@/components/common/Badge';
 import {
+  ICON_SLOT,
   ProviderAvatar,
 } from '@/components/common/BrandIcons';
 import { useAppStore } from '@/store/useAppStore';
@@ -414,22 +415,22 @@ export function ProviderEditor() {
         <div ref={contentRef} className="space-y-6">
           {choosing ? (
             /* 选择服务商预设 */
-            <div className="space-y-3">
+            <div className="space-y-2">
               <div className="relative">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
                 <Input
                   autoFocus
                   type="text"
-                  placeholder="搜索服务商预设，如 Anthropic, OpenAI, DeepSeek..."
+                  placeholder="搜索预设：Anthropic、OpenAI、DeepSeek…"
                   value={presetSearch}
                   onChange={(e) => setPresetSearch(e.target.value)}
-                  className="pl-9 pr-8 h-8.5 text-xs"
+                  className="pl-8 pr-8 h-8 text-xs bg-zinc-500/[0.05] dark:bg-white/[0.05] border-transparent shadow-none focus-visible:border-transparent focus-visible:ring-zinc-400/40 dark:focus-visible:ring-zinc-500/40"
                 />
                 {presetSearch && (
                   <button
                     type="button"
                     onClick={() => setPresetSearch('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
                     title="清空"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -438,7 +439,7 @@ export function ProviderEditor() {
               </div>
 
               {matchingPresets.length === 0 ? (
-                <div className="p-8 text-center space-y-2 rounded-lg border border-border bg-muted/10">
+                <div className="py-10 text-center space-y-2">
                   <p className="text-xs text-zinc-400">没有匹配的服务商预设</p>
                   <Button
                     type="button"
@@ -451,17 +452,17 @@ export function ProviderEditor() {
                   </Button>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {/* 自定义连接 */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                  {/* 自定义连接：与品牌条目同构，仅图标槽换为加号 */}
                   <button
                     type="button"
                     onClick={() => choosePreset()}
-                    className="h-11 px-3 rounded-lg border border-dashed border-border hover:border-zinc-400 dark:hover:border-zinc-500 bg-muted/20 hover:bg-muted/40 flex items-center gap-2.5 text-left transition-colors cursor-pointer group"
+                    className="h-10 px-2 rounded-md flex items-center gap-2.5 text-left transition-colors cursor-pointer hover:bg-accent/60"
                   >
-                    <div className="w-7 h-7 rounded-md bg-muted flex items-center justify-center shrink-0 text-muted-foreground group-hover:text-foreground">
-                      <Plus className="w-4 h-4" />
-                    </div>
-                    <span className="text-xs font-medium text-foreground truncate">
+                    <span className={`w-6 h-6 shrink-0 flex items-center justify-center ${ICON_SLOT} text-zinc-500 dark:text-zinc-400`}>
+                      <Plus className="w-3.5 h-3.5" />
+                    </span>
+                    <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 truncate">
                       自定义服务商
                     </span>
                   </button>
@@ -473,13 +474,14 @@ export function ProviderEditor() {
                         key={p.id}
                         type="button"
                         onClick={() => choosePreset(p)}
-                        className="h-11 px-3 rounded-lg border border-border bg-card hover:bg-accent/50 hover:border-zinc-300 dark:hover:border-zinc-700 flex items-center gap-2.5 text-left transition-colors cursor-pointer group shadow-2xs"
+                        className="h-10 px-2 rounded-md flex items-center gap-2.5 text-left transition-colors cursor-pointer hover:bg-accent/60"
                       >
                         <ProviderAvatar
                           name={cleanName}
                           protocol={p.protocol}
                           iconKey={p.icon || p.id}
-                          sizeClass="w-7 h-7"
+                          sizeClass="w-6 h-6"
+                          dense
                         />
                         <span className="text-xs font-medium text-foreground truncate">
                           {cleanName}
@@ -689,24 +691,22 @@ export function ProviderEditor() {
                 </div>
 
                 {/* 设为全局默认服务商 */}
-                <div className="pt-3 border-t border-border">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <span className="text-xs font-medium text-zinc-800 dark:text-zinc-200">
-                        设为全局默认服务商
-                      </span>
-                      <span className="text-[11px] text-zinc-400 dark:text-zinc-500 ml-1.5">
-                        {otherDefault && !draft.isDefault
-                          ? `(当前默认: ${otherDefault.name})`
-                          : '(未命中任何规则或声明模型时默认路由至此)'}
-                      </span>
+                <div className="flex items-start justify-between gap-4 pt-3 border-t border-border">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                      设为全局默认服务商
                     </div>
-                    <Switch
-                      checked={!!draft.isDefault}
-                      onCheckedChange={(checked) => update({ isDefault: checked, defaultModel: null })}
-                      ariaLabel="设为全局默认服务商"
-                    />
+                    <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 leading-relaxed">
+                      {otherDefault && !draft.isDefault
+                        ? `当前默认是 ${otherDefault.name}，打开后由本服务商接管`
+                        : '未命中任何规则、且没有任何服务商声明的模型，转发到这里'}
+                    </div>
                   </div>
+                  <Switch
+                    checked={!!draft.isDefault}
+                    onCheckedChange={(checked) => update({ isDefault: checked, defaultModel: null })}
+                    ariaLabel="设为全局默认服务商"
+                  />
                 </div>
               </div>
 
@@ -756,9 +756,9 @@ export function ProviderEditor() {
                 )}
 
                 {/* 一体化清单卡片 */}
-                <div className="rounded-md border border-border bg-background overflow-hidden shadow-2xs">
+                <div className="rounded-md bg-zinc-500/[0.045] dark:bg-white/[0.045] overflow-hidden">
                   {/* 顶部搜索与快捷操作 */}
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border bg-muted/30">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border/60">
                     <div className="relative flex-1">
                       <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
                       <Input
@@ -810,10 +810,10 @@ export function ProviderEditor() {
                               key={model}
                               type="button"
                               onClick={() => toggleModel(model)}
-                              className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-xs font-mono transition-colors cursor-pointer select-none border ${
+                              className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-xs font-mono transition-colors cursor-pointer select-none ${
                                 isSelected
-                                  ? 'bg-zinc-100/90 dark:bg-zinc-800/90 text-zinc-900 dark:text-zinc-100 border-zinc-300/90 dark:border-zinc-700 font-medium shadow-2xs'
-                                  : 'bg-white/80 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-400 border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-200'
+                                  ? 'bg-background text-zinc-900 dark:text-zinc-100 font-medium shadow-2xs'
+                                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-background/70 hover:text-zinc-900 dark:hover:text-zinc-200'
                               }`}
                             >
                               {/* 正统 shadcn 高反差极简复选框 */}
@@ -840,7 +840,7 @@ export function ProviderEditor() {
                   </div>
 
                   {/* 底部紧凑手动补充条 */}
-                  <div className="px-3 py-2 border-t border-border bg-muted/20 flex items-center gap-2">
+                  <div className="px-3 py-2 border-t border-border/60 flex items-center gap-2">
                     <Input
                       type="text"
                       value={manualModel}

@@ -254,6 +254,25 @@ fn extract_client_api_key(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+fn detect_client_type(headers: &HeaderMap, default_type: &str) -> String {
+    if let Some(ua) = headers.get("user-agent").and_then(|v| v.to_str().ok()) {
+        let ua_lower = ua.to_lowercase();
+        if ua_lower.contains("pi (") || ua_lower.starts_with("pi/") || ua_lower == "pi" {
+            return "pi".to_string();
+        }
+        if ua_lower.contains("claude-code") || ua_lower.contains("claudecode") {
+            return "claude_code".to_string();
+        }
+        if ua_lower.contains("codex") {
+            return "codex_cli".to_string();
+        }
+        if ua_lower.contains("gemini") {
+            return "gemini_cli".to_string();
+        }
+    }
+    default_type.to_string()
+}
+
 /// Handler for Claude Code and Anthropic clients calling `/v1/messages`
 async fn handle_messages(
     State(state): State<GatewayState>,
@@ -265,6 +284,7 @@ async fn handle_messages(
     state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
+    let client_type = detect_client_type(&headers, "claude_code");
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
@@ -289,7 +309,7 @@ async fn handle_messages(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         method: "POST".to_string(),
                         path: "/v1/messages".to_string(),
-                        client_type: "claude_code".to_string(),
+                        client_type: client_type.clone(),
                         incoming_model: req.model.clone(),
                         routed_provider_id: "none".to_string(),
                         routed_provider_name: None,
@@ -368,7 +388,7 @@ async fn handle_messages(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         method: "POST".to_string(),
                         path: "/v1/messages".to_string(),
-                        client_type: "claude_code".to_string(),
+                        client_type: client_type.clone(),
                         incoming_model: req.model.clone(),
                         routed_provider_id: cand.provider.id.clone(),
                         routed_provider_name: Some(cand.provider.name.clone()),
@@ -414,7 +434,7 @@ async fn handle_messages(
             timestamp: chrono::Utc::now().to_rfc3339(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
-            client_type: "claude_code".to_string(),
+            client_type,
             incoming_model: req.model.clone(),
             routed_provider_id: "none".to_string(),
             routed_provider_name: None,
@@ -911,6 +931,7 @@ async fn handle_chat_completions(
     state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
+    let client_type = detect_client_type(&headers, "codex_cli");
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
@@ -933,7 +954,7 @@ async fn handle_chat_completions(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         method: "POST".to_string(),
                         path: "/v1/chat/completions".to_string(),
-                        client_type: "codex_cli".to_string(),
+                        client_type: client_type.clone(),
                         incoming_model: req.model.clone(),
                         routed_provider_id: "none".to_string(),
                         routed_provider_name: None,
@@ -1011,7 +1032,7 @@ async fn handle_chat_completions(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         method: "POST".to_string(),
                         path: "/v1/chat/completions".to_string(),
-                        client_type: "codex_cli".to_string(),
+                        client_type: client_type.clone(),
                         incoming_model: req.model.clone(),
                         routed_provider_id: cand.provider.id.clone(),
                         routed_provider_name: Some(cand.provider.name.clone()),
@@ -1056,7 +1077,7 @@ async fn handle_chat_completions(
             timestamp: chrono::Utc::now().to_rfc3339(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
-            client_type: "codex_cli".to_string(),
+            client_type,
             incoming_model: req.model.clone(),
             routed_provider_id: "none".to_string(),
             routed_provider_name: None,
@@ -1106,6 +1127,7 @@ async fn handle_responses(
     state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
+    let client_type = detect_client_type(&headers, "codex_cli");
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
@@ -1207,7 +1229,7 @@ async fn handle_responses(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         method: "POST".to_string(),
                         path: "/v1/responses".to_string(),
-                        client_type: "codex_cli".to_string(),
+                        client_type: client_type.clone(),
                         incoming_model: req.model.clone(),
                         routed_provider_id: cand.provider.id.clone(),
                         routed_provider_name: Some(cand.provider.name.clone()),
@@ -1299,7 +1321,7 @@ async fn handle_responses(
             timestamp: chrono::Utc::now().to_rfc3339(),
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
-            client_type: "codex_cli".to_string(),
+            client_type,
             incoming_model: req.model,
             routed_provider_id: "none".to_string(),
             routed_provider_name: None,

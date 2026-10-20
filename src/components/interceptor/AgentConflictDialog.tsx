@@ -45,6 +45,9 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
   } else if (target.id === 'gemini_cli') {
     gatewayEndpoint = 'http://127.0.0.1:16888';
     exportCommand = `export GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:16888`;
+  } else if (target.id === 'pi') {
+    gatewayEndpoint = 'http://127.0.0.1:16888/v1';
+    exportCommand = `export OPENAI_BASE_URL=http://127.0.0.1:16888/v1`;
   }
 
   const handleCopy = async () => {

@@ -32,7 +32,7 @@ export interface RouteRule {
   description?: string;
 }
 
-export type ClientType = 'claude_code' | 'codex_cli' | 'gemini_cli' | 'openai_api' | 'anthropic_api' | 'generic';
+export type ClientType = 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi' | 'openai_api' | 'anthropic_api' | 'generic';
 
 export interface LogAttempt {
   providerId: string;
@@ -96,7 +96,7 @@ export interface ThirdPartyConfig {
 }
 
 export interface InterceptorStatus {
-  id: 'claude_code' | 'codex_cli' | 'gemini_cli';
+  id: 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi';
   name: string;
   installed: boolean;
   configPath: string;

@@ -36,6 +36,11 @@ export const OpenRouterLogo: React.FC<{ className?: string }> = ({ className = '
   return Component ? <Component className={className} /> : null;
 };
 
+export const PiLogo: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => {
+  const Component = BrandIconRenderers.pi;
+  return Component ? <Component className={className} /> : null;
+};
+
 export type BrandType =
   | 'openai'
   | 'anthropic'
@@ -45,6 +50,7 @@ export type BrandType =
   | 'deepseek'
   | 'openrouter'
   | 'ollama'
+  | 'pi'
   | 'groq'
   | 'mistral'
   | 'siliconflow'
@@ -112,6 +118,7 @@ export function detectProviderBrand(
   if (n.includes('deepseek') || n.includes('深度求索')) return 'deepseek';
   if (n.includes('claudecode') || n.includes('claude code')) return 'claudecode';
   if (n.includes('claude')) return 'claude';
+  if (n.includes('pi agent') || n === 'pi' || n.startsWith('pi ') || n.startsWith('pi-')) return 'pi';
   if (n.includes('anthropic') || p === 'anthropic') return 'anthropic';
   if (n.includes('gemini') || n.includes('google') || p === 'gemini') return 'gemini';
   if (n.includes('mistral') || n.includes('codestral')) return 'mistral';
@@ -172,29 +179,17 @@ export function detectProviderBrand(
   return 'custom';
 }
 
-const AVATAR_PALETTES = [
-  'from-zinc-100 to-zinc-200/80 dark:from-zinc-800 dark:to-zinc-900 text-zinc-800 dark:text-zinc-200 border-zinc-200/90 dark:border-zinc-700/80',
-  'from-slate-100 to-slate-200/80 dark:from-slate-800 dark:to-slate-900 text-slate-800 dark:text-slate-200 border-slate-200/90 dark:border-slate-700/80',
-  'from-stone-100 to-stone-200/80 dark:from-stone-800 dark:to-stone-900 text-stone-800 dark:text-stone-200 border-stone-200/90 dark:border-stone-700/80',
-  'from-neutral-100 to-neutral-200/80 dark:from-neutral-800 dark:to-neutral-900 text-neutral-800 dark:text-neutral-200 border-neutral-200/90 dark:border-neutral-700/80',
-];
-
 function getInitialLetter(name: string): string {
   if (!name) return 'AI';
-  const trimmed = name.trim();
-  const firstChar = trimmed[0].toUpperCase();
-  return firstChar;
+  return name.trim()[0].toUpperCase();
 }
 
-function getAvatarPalette(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = (hash << 5) - hash + name.charCodeAt(i);
-    hash |= 0;
-  }
-  const index = Math.abs(hash) % AVATAR_PALETTES.length;
-  return AVATAR_PALETTES[index];
-}
+// 无边界的软底槽：用 7% 中性底 + 1px 内描边替代硬边框，避免在浅色卡片上出现生硬的轮廓线
+export const ICON_SLOT =
+  'rounded-md bg-zinc-500/[0.07] dark:bg-white/[0.07] ' +
+  'shadow-[inset_0_0_0_1px_rgba(0,0,0,0.045)] dark:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.07)]';
+
+export const AVATAR_SHELL = `flex items-center justify-center shrink-0 transition-colors ${ICON_SLOT}`;
 
 export const ProviderAvatar: React.FC<{
   name: string;
@@ -202,7 +197,9 @@ export const ProviderAvatar: React.FC<{
   iconKey?: string;
   className?: string;
   sizeClass?: string;
-}> = ({ name, protocol, iconKey, className = '', sizeClass = 'w-9 h-9' }) => {
+  /** 24px 及以下的小槽位：收紧内边距与字母字号，避免图形被挤压、字母撑满 */
+  dense?: boolean;
+}> = ({ name, protocol, iconKey, className = '', sizeClass = 'w-9 h-9', dense = false }) => {
   const brand = detectProviderBrand(name, protocol, iconKey);
 
   if (brand !== 'custom') {
@@ -210,22 +207,20 @@ export const ProviderAvatar: React.FC<{
     if (IconRenderer) {
       return (
         <div
-          className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border border-zinc-200/80 dark:border-zinc-700/80 bg-zinc-100/90 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 p-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-colors ${className}`}
+          className={`${sizeClass} ${AVATAR_SHELL} ${dense ? 'p-[3px]' : 'p-1.5'} text-zinc-900 dark:text-zinc-100 ${className}`}
         >
-          <IconRenderer className="w-full h-full object-contain drop-shadow-[0_0.5px_1px_rgba(0,0,0,0.08)]" />
+          <IconRenderer className="w-full h-full object-contain" />
         </div>
       );
     }
   }
 
-  // Fallback 字母徽章：精工微渐变中性底槽，低饱和度，与品牌 Logo 和谐同构
-  const palette = getAvatarPalette(name);
-  const letter = getInitialLetter(name);
+  // Fallback 字母徽章：与品牌图标共用同一底槽，保持列表内视觉重量一致
   return (
     <div
-      className={`${sizeClass} rounded-md flex items-center justify-center shrink-0 border bg-gradient-to-b font-mono font-semibold text-[13px] tracking-tight select-none shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.25)] ${palette} ${className}`}
+      className={`${sizeClass} ${AVATAR_SHELL} font-mono font-medium ${dense ? 'text-[11px]' : 'text-[12px]'} select-none text-zinc-600 dark:text-zinc-400 ${className}`}
     >
-      {letter}
+      {getInitialLetter(name)}
     </div>
   );
 };

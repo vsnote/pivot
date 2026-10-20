@@ -5,23 +5,26 @@ import { useAppStore } from '@/store/useAppStore';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
-import { Badge } from '@/components/common/Badge';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
+import { formatTokens } from '@/utils/pricing';
 import {
   Plus,
   LoaderCircle,
   Copy,
   Check,
   Code2,
+  ChevronDown,
   Zap,
   Brain,
 } from 'lucide-react';
 
 import {
+  ICON_SLOT,
   ProviderAvatar,
   OpenAISpiralIcon,
   ClaudeLogo,
   GeminiLogo,
+  PiLogo,
 } from '@/components/common/BrandIcons';
 
 const panelClass =
@@ -31,6 +34,7 @@ const CLIENT_LABEL: Record<InterceptorStatus['id'], string> = {
   claude_code: 'Claude Code',
   codex_cli: 'Codex CLI',
   gemini_cli: 'Gemini CLI',
+  pi: 'Pi Agent',
 };
 
 function displayPath(path: string): string {
@@ -41,6 +45,7 @@ function displayPath(path: string): string {
 function ClientMark({ id }: { id: InterceptorStatus['id'] }) {
   if (id === 'codex_cli') return <OpenAISpiralIcon className="w-full h-full" />;
   if (id === 'gemini_cli') return <GeminiLogo className="w-full h-full" />;
+  if (id === 'pi') return <PiLogo className="w-full h-full" />;
   return <ClaudeLogo className="w-full h-full" />;
 }
 
@@ -256,7 +261,7 @@ function ModelChip({ provider, model }: { provider: Provider; model: string }) {
         ref={buttonRef}
         type="button"
         onClick={handleOpen}
-        className={`group/chip inline-flex shrink-0 items-center gap-1.5 px-2 py-0.5 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer border select-none ${
+        className={`group/chip inline-flex shrink-0 items-center gap-1 px-1.5 py-px rounded-[5px] text-[11px] leading-4 font-mono transition-all cursor-pointer border select-none ${
           tierInfo
             ? `${tierInfo.chipClass} shadow-2xs`
             : 'bg-zinc-100/70 hover:bg-zinc-100/90 text-zinc-600 hover:text-zinc-900 border-zinc-200/70 hover:border-zinc-300 dark:bg-zinc-800/40 dark:hover:bg-zinc-800/70 dark:text-zinc-400 dark:hover:text-zinc-200 dark:border-zinc-700/50 dark:hover:border-zinc-600'
@@ -544,7 +549,7 @@ function ProviderModelList({ provider }: { provider: Provider }) {
   }
 
   return (
-    <div className="relative min-w-0 max-w-full mt-1.5" onClick={(e) => e.stopPropagation()}>
+    <div className="relative min-w-0 flex-1" onClick={(e) => e.stopPropagation()}>
       <div
         ref={scrollRef}
         onScroll={updateScrollState}
@@ -601,35 +606,42 @@ function ProviderCard({ provider }: { provider: Provider }) {
           openProviderEditor(provider);
         }
       }}
-      className={`group flex items-center justify-between gap-3 px-4 py-3 transition-colors cursor-pointer select-none ${
+      className={`group flex items-center justify-between gap-3 px-4 py-2 transition-colors cursor-pointer select-none ${
         provider.enabled
           ? 'hover:bg-accent/50'
           : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
       }`}
       aria-label={`编辑服务商 ${provider.name}`}
     >
-      <div className="flex items-center gap-3 min-w-0 flex-1">
+      <div className="flex items-center gap-2.5 min-w-0 flex-1">
         <ProviderAvatar
           name={provider.name}
           protocol={provider.protocol}
           iconKey={provider.presetId || undefined}
-          sizeClass="w-8 h-8"
+          sizeClass="w-6 h-6"
+          dense
         />
 
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <h3 className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
-              {provider.name}
-            </h3>
-            {provider.isDefault && (
-              <Badge
-                variant="outline"
-                className="text-[10px] px-1.5 py-0 font-normal bg-zinc-100/90 dark:bg-zinc-800/90 text-zinc-600 dark:text-zinc-400 border-zinc-200/90 dark:border-zinc-700/80"
-              >
-                {provider.enabled ? '默认服务商' : '默认 (已停用)'}
-              </Badge>
-            )}
-          </div>
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <h3 className="min-w-0 shrink text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
+            {provider.name}
+          </h3>
+          {provider.isDefault && (
+            <span
+              title={
+                provider.enabled
+                  ? `未在任何服务商声明的模型会转发到 ${provider.defaultModel || provider.models[0] || '它的默认模型'}`
+                  : '默认服务商已停用，未声明的模型将无法路由'
+              }
+              className={`shrink-0 text-[10px] leading-none ${
+                provider.enabled
+                  ? 'text-zinc-400 dark:text-zinc-500'
+                  : 'text-amber-600 dark:text-amber-400'
+              }`}
+            >
+              默认
+            </span>
+          )}
 
           <ProviderModelList provider={provider} />
         </div>
@@ -698,6 +710,7 @@ function IngressCard() {
   const hasEnabledProviders = providers.some((p) => p.enabled);
   const address = `http://${stats.host}:${stats.port}`;
   const gatewayUp = stats.isRunning;
+  const totalTokens = (stats.totalPromptTokens || 0) + (stats.totalCompletionTokens || 0);
 
   const doToggle = async (id: InterceptorStatus['id'], enable: boolean) => {
     if (togglingId) return;
@@ -747,6 +760,17 @@ function IngressCard() {
             {stats.host}:{stats.port}
           </span>
           <CopyAddressButton text={address} />
+          <span className="ml-auto shrink-0 hidden sm:flex items-center gap-1.5 font-mono text-[10px] text-zinc-400 dark:text-zinc-500">
+            <span>{stats.totalRequests} 次</span>
+            <span className="text-zinc-300 dark:text-zinc-600">·</span>
+            <span>{formatTokens(totalTokens)} tok</span>
+            {stats.errorCount > 0 && (
+              <>
+                <span className="text-zinc-300 dark:text-zinc-600">·</span>
+                <span className="text-rose-500">{stats.errorCount} 失败</span>
+              </>
+            )}
+          </span>
         </div>
 
         {interceptors.length === 0 ? (
@@ -762,7 +786,7 @@ function IngressCard() {
               return (
                 <div key={client.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-8 h-8 rounded-md flex items-center justify-center shrink-0 border border-zinc-200/70 dark:border-zinc-700/60 bg-zinc-50/80 dark:bg-zinc-800/80 p-1.5">
+                    <div className={`w-8 h-8 shrink-0 flex items-center justify-center p-1.5 ${ICON_SLOT}`}>
                       <ClientMark id={client.id} />
                     </div>
                     <div className="min-w-0">
@@ -855,6 +879,7 @@ function LoadingState() {
 function UniversalClientCard() {
   const stats = useAppStore((state) => state.stats);
   const [copiedType, setCopiedType] = useState<'openai' | 'anthropic' | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   const openaiUrl = `http://${stats.host}:${stats.port}/v1`;
   const anthropicUrl = `http://${stats.host}:${stats.port}`;
@@ -867,16 +892,29 @@ function UniversalClientCard() {
 
   return (
     <section className={panelClass} aria-label="通用客户端手动接入">
-      <div className="flex items-center justify-between px-4 py-2.5 bg-muted/30 border-b border-border text-xs">
+      <button
+        type="button"
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+        className={`w-full flex items-center justify-between px-4 py-2.5 text-xs cursor-pointer transition-colors hover:bg-accent/40 ${
+          expanded ? 'bg-muted/30 border-b border-border' : ''
+        }`}
+      >
         <div className="flex items-center gap-2">
           <Code2 className="w-3.5 h-3.5 text-zinc-500" />
           <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
             通用客户端接入指南
           </span>
         </div>
-        <span className="text-[11px] text-zinc-400 font-mono">Cursor / Aider / Continue / 脚本</span>
-      </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-zinc-400 font-mono">Cursor / Aider / Continue / 脚本</span>
+          <ChevronDown
+            className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
+          />
+        </div>
+      </button>
 
+      {expanded && (
       <div className="p-4 space-y-3 text-xs">
         <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
           在任意支持自定义 API 的开发工具中填入下方 Base URL，API Key 可填任意字符串（如 <code className="font-mono px-1 py-0.5 rounded bg-muted text-foreground">pivot</code>），Pivot 将根据请求的模型智能分发到对应的上游服务商。
@@ -884,7 +922,7 @@ function UniversalClientCard() {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
           {/* OpenAI 兼容配置 */}
-          <div className="p-3 rounded-md bg-muted/30 border border-border flex flex-col justify-between gap-2.5">
+          <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05] flex flex-col justify-between gap-2.5">
             <div>
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-[12px]">
@@ -913,7 +951,7 @@ function UniversalClientCard() {
           </div>
 
           {/* Anthropic 兼容配置 */}
-          <div className="p-3 rounded-md bg-muted/30 border border-border flex flex-col justify-between gap-2.5">
+          <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05] flex flex-col justify-between gap-2.5">
             <div>
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-[12px]">
@@ -942,6 +980,7 @@ function UniversalClientCard() {
           </div>
         </div>
       </div>
+      )}
     </section>
   );
 }
@@ -971,6 +1010,9 @@ export function ProviderList() {
 
   if (!dataReady) return <LoadingState />;
 
+  const hasDefault = providers.some((p) => p.isDefault && p.enabled);
+  const anyEnabled = providers.some((p) => p.enabled);
+
   return (
     <div className="animate-in fade-in duration-150">
       <section className={panelClass} aria-label="服务商">
@@ -995,6 +1037,12 @@ export function ProviderList() {
           </div>
         )}
       </section>
+
+      {anyEnabled && !hasDefault && (
+        <p className="px-1 pt-2 text-[11px] text-amber-600 dark:text-amber-400">
+          没有启用的默认服务商：所有服务商都未声明的模型将无法路由。
+        </p>
+      )}
     </div>
   );
 }
