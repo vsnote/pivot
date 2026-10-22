@@ -13,9 +13,9 @@ const tabsListVariants = cva(
   {
     variants: {
       variant: {
-        // 表单内分段控件（如设置页）：无边界软底槽，靠内阴影而非描边呈现凹陷感
+        // 表单内分段控件（如设置页）：精致内嵌底槽，带微边框与内凹感
         default:
-          'h-7.5 rounded-md bg-zinc-500/[0.06] dark:bg-white/[0.06] p-0.5 shadow-[inset_0_1px_2px_rgba(0,0,0,0.055)] dark:shadow-[inset_0_1px_2px_rgba(0,0,0,0.3)]',
+          'h-7.5 rounded-md bg-zinc-500/[0.08] dark:bg-white/[0.08] p-0.5 border border-border/40 shadow-[inset_0_1px_1px_rgba(0,0,0,0.04)] dark:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2)]',
         // 顶栏无底槽（如页面大导航）：通透无底框，幽灵浮动卡片
         ghost: 'h-8 bg-transparent p-0 gap-1',
       },
@@ -63,8 +63,8 @@ export const TabsTrigger = React.forwardRef<
         isGhost
           ? // 顶栏幽灵风格：带透明占位边框，激活时带微边框浮动
             'h-7 rounded-md px-3 font-medium border border-transparent hover:text-foreground hover:bg-muted/60 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:border-border/80 data-[state=active]:shadow-2xs font-semibold'
-          : // 槽内分段控件风格：槽内纯净卡片，深浅模式下选中项都必须是“凸起”而非凹陷
-            'h-6.5 rounded-[5px] px-3 font-medium hover:text-foreground data-[state=active]:bg-background dark:data-[state=active]:bg-zinc-700 data-[state=active]:text-foreground data-[state=active]:shadow-2xs',
+          : // 槽内分段控件风格：原生微浮雕分段卡片，浅色白底、深色深灰、带微弱外边框与投影浮起
+            'h-6.5 rounded-[5px] px-3 font-medium text-zinc-600 dark:text-zinc-400 hover:text-foreground data-[state=active]:bg-white dark:data-[state=active]:bg-zinc-700 data-[state=active]:text-zinc-900 dark:data-[state=active]:text-zinc-100 data-[state=active]:border data-[state=active]:border-black/5 dark:data-[state=active]:border-white/10 data-[state=active]:shadow-xs font-semibold',
         className
       )}
       {...props}

@@ -638,15 +638,12 @@ function UniversalClientCard() {
         <div className="flex items-center gap-2">
           <Code2 className="w-3.5 h-3.5 text-zinc-500" />
           <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            通用客户端接入指南
+            通用客户端手动接入
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-zinc-400 font-mono">Cursor / Aider / Continue / 脚本</span>
-          <ChevronDown
-            className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
-          />
-        </div>
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
+        />
       </button>
 
       {expanded && (

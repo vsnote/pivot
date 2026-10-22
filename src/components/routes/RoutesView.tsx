@@ -1,7 +1,6 @@
 import { LoaderCircle } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { AgentTiersHero } from './AgentTiersHero';
-import { ModelRoutingCard } from './ModelRoutingCard';
 
 export function RoutesView() {
   const dataReady = useAppStore((state) => state.initialLoaded && !state.isLoading);
@@ -16,12 +15,8 @@ export function RoutesView() {
   }
 
   return (
-    <div className="space-y-3 animate-in fade-in duration-150">
-      {/* 1. Agent 核心角色 3 宫格控制台 */}
+    <div className="animate-in fade-in duration-150">
       <AgentTiersHero />
-
-      {/* 2. 模型统一路由表 (集成主备决策、实时路由试算 Trace、别名抽屉与未知兜底) */}
-      <ModelRoutingCard />
     </div>
   );
 }

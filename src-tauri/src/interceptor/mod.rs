@@ -911,16 +911,20 @@ impl InterceptorManager {
                 let _ = atomic_write(&catalog_path, &catalog_str);
             }
 
+            let model_provider_count = count_model_providers(&providers);
             let preferred_model = providers
                 .iter()
                 .find(|p| p.is_default && p.enabled)
                 .and_then(|p| {
                     let prefix = p.name.to_lowercase().replace(' ', "-");
                     let m = p.default_model.as_deref().or_else(|| p.models.first().map(|s| s.as_str()))?;
+                    let is_duplicate = model_provider_count.get(m).copied().unwrap_or(0) > 1;
                     Some(if m.to_lowercase().starts_with(&format!("{}/", prefix)) {
                         m.to_string()
-                    } else {
+                    } else if is_duplicate {
                         format!("{}/{}", prefix, m)
+                    } else {
+                        m.to_string()
                     })
                 })
                 .or_else(|| {
@@ -1566,21 +1570,36 @@ fn update_codex_config_toml(
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
 
         if let toml::Value::Table(ref mut providers_map) = model_providers {
-            let provider_table = providers_map
-                .entry(current_provider)
-                .or_insert_with(|| {
-                    let mut p = toml::map::Map::new();
-                    p.insert("name".to_string(), toml::Value::String("Pivot".to_string()));
-                    p.insert("wire_api".to_string(), toml::Value::String("responses".to_string()));
-                    p.insert("requires_openai_auth".to_string(), toml::Value::Boolean(true));
-                    toml::Value::Table(p)
-                });
+            for (p_key, p_val) in providers_map.iter_mut() {
+                if let toml::Value::Table(ref mut p_tbl) = p_val {
+                    if p_key == &current_provider {
+                        p_tbl.insert(
+                            "base_url".to_string(),
+                            toml::Value::String(target_endpoint.to_string()),
+                        );
+                        p_tbl.insert(
+                            "supports_websockets".to_string(),
+                            toml::Value::Boolean(false),
+                        );
+                    } else if let Some(bu) = p_tbl.get("base_url").and_then(|v| v.as_str()) {
+                        if bu.contains("127.0.0.1:16888") || bu.contains("localhost:16888") {
+                            p_tbl.insert(
+                                "supports_websockets".to_string(),
+                                toml::Value::Boolean(false),
+                            );
+                        }
+                    }
+                }
+            }
 
-            if let toml::Value::Table(ref mut p_map) = provider_table {
-                p_map.insert(
-                    "base_url".to_string(),
-                    toml::Value::String(target_endpoint.to_string()),
-                );
+            if !providers_map.contains_key(&current_provider) {
+                let mut p = toml::map::Map::new();
+                p.insert("name".to_string(), toml::Value::String("Pivot".to_string()));
+                p.insert("base_url".to_string(), toml::Value::String(target_endpoint.to_string()));
+                p.insert("wire_api".to_string(), toml::Value::String("responses".to_string()));
+                p.insert("requires_openai_auth".to_string(), toml::Value::Boolean(true));
+                p.insert("supports_websockets".to_string(), toml::Value::Boolean(false));
+                providers_map.insert(current_provider, toml::Value::Table(p));
             }
         }
     }
@@ -1799,14 +1818,23 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
     let mut seen_slugs = HashSet::new();
     let mut priority = 1000;
 
+    let model_provider_count = count_model_providers(providers);
+
     for provider in providers.iter().filter(|p| p.enabled) {
         let all_models = provider_declared_models(provider);
         let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
         for model_name in all_models {
+            let is_duplicate = model_provider_count
+                .get(&model_name)
+                .copied()
+                .unwrap_or(0) > 1;
+
             let slug = if model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
                 model_name.clone()
-            } else {
+            } else if is_duplicate {
                 format!("{}/{}", provider_prefix, model_name)
+            } else {
+                model_name.clone()
             };
 
             if seen_slugs.contains(&slug) {
@@ -1814,8 +1842,8 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
             }
             seen_slugs.insert(slug.clone());
 
-            let display_name = slug.clone();
-            let description = format!("{} via {}", slug, provider.name);
+            let display_name = format!("{} · {}", model_name, provider.name);
+            let description = format!("via Pivot ({})", provider.name);
 
             let lower = model_name.to_lowercase();
             let base_name = lower.split('/').last().unwrap_or(&lower);
@@ -1912,19 +1940,19 @@ pub fn generate_claude_model_picker(
     let tier_specs = [
         (
             "tier-main",
-            "主力编程 · Agent Main",
+            "主力模型 · Main",
             "claude-3-7-sonnet",
             "主力槽位动态路由",
         ),
         (
             "tier-reasoning",
-            "深度推理 · Agent Reasoning",
+            "推理模型 · Reasoning",
             "claude-3-opus",
             "推理槽位动态路由",
         ),
         (
             "tier-fast",
-            "轻量辅助 · Agent Fast",
+            "快速模型 · Fast",
             "claude-3-5-haiku",
             "辅助槽位动态路由",
         ),
@@ -2005,9 +2033,9 @@ pub fn generate_pi_models_list(
 
     // 1. Tier 槽位模型
     let tier_specs = [
-        ("tier-main", "主力编程 (Main)", "claude-3-7-sonnet"),
-        ("tier-reasoning", "深度推理 (Reasoning)", "claude-3-opus"),
-        ("tier-fast", "轻量辅助 (Fast)", "claude-3-5-haiku"),
+        ("tier-main", "主力模型 (Main)", "claude-3-7-sonnet"),
+        ("tier-reasoning", "推理模型 (Reasoning)", "claude-3-opus"),
+        ("tier-fast", "快速模型 (Fast)", "claude-3-5-haiku"),
     ];
 
     for (tier_id, label, default_model) in tier_specs {
@@ -2083,7 +2111,7 @@ pub fn generate_pi_models_list(
             let (ctx, _) = resolve_model_context_window(&model_name);
             models.push(json!({
                 "id": id,
-                "name": format!("{} ({})", model_name, provider.name),
+                "name": format!("{} · {}", model_name, provider.name),
                 "reasoning": is_reasoning,
                 "input": resolve_model_input_modalities(&model_name),
                 "contextWindow": ctx,
@@ -2470,6 +2498,7 @@ followUpQueueMode = "queue"
         assert!(updated.contains("[desktop]"));
         assert!(updated.contains("followUpQueueMode = \"queue\""));
         assert!(!updated.contains("https://sub2api.vonote.com"));
+        assert!(updated.contains("supports_websockets = false"));
     }
 
     #[test]
@@ -2514,12 +2543,13 @@ followUpQueueMode = "queue"
         let catalog = generate_codex_catalog_json(&[provider1, provider2]);
         let models = catalog["models"].as_array().expect("models must be array");
         assert_eq!(models.len(), 3);
-        assert_eq!(models[0]["slug"], "deepseek/deepseek-v4-pro");
-        assert_eq!(models[0]["display_name"], "deepseek/deepseek-v4-pro");
-        assert_eq!(models[1]["slug"], "deepseek/deepseek-reasoner");
+        assert_eq!(models[0]["slug"], "deepseek-v4-pro");
+        assert_eq!(models[0]["display_name"], "deepseek-v4-pro · DeepSeek");
+        assert_eq!(models[1]["slug"], "deepseek-reasoner");
+        assert_eq!(models[1]["display_name"], "deepseek-reasoner · DeepSeek");
         assert_eq!(models[1]["default_reasoning_level"], "high");
-        assert_eq!(models[2]["slug"], "work/gpt-6-astra");
-        assert_eq!(models[2]["display_name"], "work/gpt-6-astra");
+        assert_eq!(models[2]["slug"], "gpt-6-astra");
+        assert_eq!(models[2]["display_name"], "gpt-6-astra · Work");
         assert_eq!(models[2]["context_window"], 272000);
         assert_eq!(models[2]["max_context_window"], 872000);
         let levels = models[2]["supported_reasoning_levels"].as_array().unwrap();

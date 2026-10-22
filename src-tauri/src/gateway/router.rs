@@ -296,13 +296,18 @@ fn plan_route_inner(
         // A rule pins the provider, but every candidate is still asked for the
         // model name its own configuration knows, and providers that know none
         // are dropped instead of being handed a name they would reject.
-        let fallbacks: Vec<PlannedCandidate> = rule
+        let mut fallbacks: Vec<PlannedCandidate> = rule
             .fallback_provider_ids
             .iter()
             .filter_map(|id| provider_map.get(id.as_str()).copied())
             .filter(|p| p.id != primary_provider.id)
             .filter_map(|p| candidate_model(p, &desired_model).map(|model| planned(p, &model)))
             .collect();
+
+        // 当没有手动指定回退渠道时，自动按其他声明/支持该模型的渠道优先级作为容灾回退队列
+        if fallbacks.is_empty() {
+            fallbacks = automatic_fallbacks(&active_providers, &primary_provider.id, &desired_model);
+        }
 
         let layer = if rule.id.starts_with("tier-") {
             "role"

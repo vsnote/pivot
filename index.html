@@ -10,17 +10,26 @@
   <body oncontextmenu="return true;">
     <div id="root"></div>
     <script>
-      window.addEventListener('error', function(e) {
-        var el = document.createElement('pre');
-        el.style.cssText = 'color:red;background:white;padding:20px;font-size:14px;z-index:999999;position:fixed;top:0;left:0;right:0;max-height:80vh;overflow:auto;border:2px solid red;';
-        el.innerText = 'Global Error: ' + e.message + '\n' + e.filename + ':' + e.lineno + ':' + e.colno + '\n' + (e.error ? e.error.stack : '');
+      function showErrorOverlay(title, text) {
+        var existing = document.getElementById('pivot-global-error-overlay');
+        if (existing) existing.remove();
+        var el = document.createElement('div');
+        el.id = 'pivot-global-error-overlay';
+        el.style.cssText = 'color:#dc2626;background:#fef2f2;padding:16px;font-size:12px;font-family:monospace;z-index:999999;position:fixed;top:0;left:0;right:0;max-height:60vh;overflow:auto;border-bottom:2px solid #ef4444;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);';
+        el.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-weight:bold;">' +
+          '<span>' + title + '</span>' +
+          '<button onclick="this.parentElement.parentElement.remove()" style="background:#fee2e2;border:1px solid #f87171;color:#b91c1c;padding:2px 8px;border-radius:4px;cursor:pointer;">关闭 ✕</button>' +
+          '</div><pre style="margin:0;white-space:pre-wrap;word-break:break-all;">' + text + '</pre>';
         document.body.appendChild(el);
+      }
+      window.addEventListener('error', function(e) {
+        // 忽略浏览器扩展或 Vite 热更瞬时取消的异常
+        if (!e.message || e.message.includes('ResizeObserver') || e.message.includes('Importing a module script failed')) return;
+        showErrorOverlay('运行时异常 (Global Error)', e.message + '\n' + e.filename + ':' + e.lineno + ':' + e.colno + '\n' + (e.error ? e.error.stack : ''));
       });
       window.addEventListener('unhandledrejection', function(e) {
-        var el = document.createElement('pre');
-        el.style.cssText = 'color:red;background:white;padding:20px;font-size:14px;z-index:999999;position:fixed;top:0;left:0;right:0;max-height:80vh;overflow:auto;border:2px solid red;';
-        el.innerText = 'Unhandled Rejection: ' + e.reason + '\n' + (e.reason && e.reason.stack ? e.reason.stack : '');
-        document.body.appendChild(el);
+        if (!e.reason) return;
+        showErrorOverlay('未捕获 Promise 异常', String(e.reason) + '\n' + (e.reason && e.reason.stack ? e.reason.stack : ''));
       });
     </script>
     <script type="module" src="/src/main.tsx"></script>

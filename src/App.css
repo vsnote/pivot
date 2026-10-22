@@ -102,7 +102,6 @@
   [role="tab"]:active,
   [role="tab"]:focus-visible {
     outline: none !important;
-    box-shadow: none;
     -webkit-tap-highlight-color: transparent;
   }
 }
