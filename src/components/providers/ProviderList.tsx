@@ -2,11 +2,12 @@ import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
-import { Provider, InterceptorStatus } from '@/types';
+import { AGENT_TIERS, AGENT_TIER_KEYS, AGENT_TIER_IDS } from './agentTiers';
+import { panelClass } from '@/components/common/panelStyles';
+import { Provider, InterceptorStatus, RouteRule } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
-import { formatTokens } from '@/utils/pricing';
 import {
   Plus,
   LoaderCircle,
@@ -14,8 +15,7 @@ import {
   Check,
   Code2,
   ChevronDown,
-  Zap,
-  Brain,
+  GripVertical,
 } from 'lucide-react';
 
 import {
@@ -26,9 +26,6 @@ import {
   GeminiLogo,
   PiLogo,
 } from '@/components/common/BrandIcons';
-
-const panelClass =
-  'rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden';
 
 const CLIENT_LABEL: Record<InterceptorStatus['id'], string> = {
   claude_code: 'Claude Code',
@@ -58,138 +55,16 @@ function clientStatus(client: InterceptorStatus): { label: string; className: st
   return { label: '未接管', className: 'text-zinc-500 dark:text-zinc-400' };
 }
 
-type AgentTierKey = 'main' | 'fast' | 'reasoning';
-
-const AGENT_TIERS: Record<
-  AgentTierKey,
-  {
-    id: string;
-    label: string;
-    shortLabel: string;
-    icon: typeof Code2;
-    pattern: string;
-    description: string;
-    chipClass: string;
-    iconClass: string;
-  }
-> = {
-  main: {
-    id: 'tier-main',
-    label: '主力编程',
-    shortLabel: '主力',
-    icon: Code2,
-    pattern: '.*(sonnet|gpt-4o|claude-3-7|claude-4|fable).*',
-    description: 'Agent 主力编程槽位 (Sonnet/4o/主力任务)',
-    chipClass: 'bg-blue-50/80 text-blue-900 border-blue-200/90 dark:bg-blue-950/40 dark:text-blue-200 dark:border-blue-800/70 font-medium',
-    iconClass: 'text-blue-600 dark:text-blue-400',
-  },
-  fast: {
-    id: 'tier-fast',
-    label: '轻量快速',
-    shortLabel: '快速',
-    icon: Zap,
-    pattern: '.*(haiku|flash|mini|small|instant).*',
-    description: 'Agent 轻量辅助槽位 (Haiku/Flash/子任务)',
-    chipClass: 'bg-amber-50/80 text-amber-900 border-amber-200/90 dark:bg-amber-950/40 dark:text-amber-200 dark:border-amber-800/70 font-medium',
-    iconClass: 'text-amber-600 dark:text-amber-400',
-  },
-  reasoning: {
-    id: 'tier-reasoning',
-    label: '深度推理',
-    shortLabel: '推理',
-    icon: Brain,
-    pattern: '.*(opus|thinking|reasoner|r1|o1|o3).*',
-    description: 'Agent 深度推理槽位 (Opus/Thinking/o-series)',
-    chipClass: 'bg-purple-50/80 text-purple-900 border-purple-200/90 dark:bg-purple-950/40 dark:text-purple-200 dark:border-purple-800/70 font-medium',
-    iconClass: 'text-purple-600 dark:text-purple-400',
-  },
-};
-
-interface PopoverPortalProps {
-  open: boolean;
-  onClose: () => void;
-  triggerRect: DOMRect | null;
-  children: React.ReactNode;
-}
-
-function PopoverPortal({ open, onClose, triggerRect, children }: PopoverPortalProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    const handleScroll = (e: Event) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    document.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('scroll', handleScroll, true);
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('scroll', handleScroll, true);
-    };
-  }, [open, onClose]);
-
-  if (!open || !triggerRect) return null;
-
-  const menuWidth = 220;
-  const spaceBelow = window.innerHeight - triggerRect.bottom;
-  const spaceAbove = triggerRect.top;
-
-  // 只要下方空间不足且上方空间更大，向上弹出
-  const showAbove = spaceBelow < 180 && spaceAbove > spaceBelow;
-  const maxAvailable = showAbove ? spaceAbove - 16 : spaceBelow - 16;
-  const maxHeight = Math.max(140, Math.min(360, maxAvailable));
-
-  const top = showAbove ? undefined : triggerRect.bottom + 6;
-  const bottom = showAbove ? window.innerHeight - triggerRect.top + 6 : undefined;
-
-  let left = triggerRect.left;
-  if (left + menuWidth > window.innerWidth - 12) {
-    left = window.innerWidth - menuWidth - 12;
-  }
-  if (left < 12) left = 12;
-
-  return createPortal(
-    <div
-      ref={menuRef}
-      role="menu"
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        position: 'fixed',
-        top: top !== undefined ? `${top}px` : undefined,
-        bottom: bottom !== undefined ? `${bottom}px` : undefined,
-        left: `${left}px`,
-        maxHeight: `${maxHeight}px`,
-        zIndex: 9999,
-      }}
-      className="w-55 rounded-lg border border-border/80 bg-popover text-popover-foreground shadow-lg p-1 animate-in fade-in zoom-in-95 duration-100 text-xs text-left overflow-hidden no-scrollbar"
-    >
-      {children}
-    </div>,
-    document.body
-  );
-}
-
-function ModelChip({ provider, model }: { provider: Provider; model: string }) {
-  const { routes, saveRoutes } = useAppStore(
-    useShallow((state) => ({
-      routes: state.routes,
-      saveRoutes: state.saveRoutes,
-    })),
-  );
-
-  const [open, setOpen] = useState(false);
-  const [triggerRect, setTriggerRect] = useState<DOMRect | null>(null);
-  const [copied, setCopied] = useState(false);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-
-  const activeTier = (Object.keys(AGENT_TIERS) as AgentTierKey[]).find((tierKey) => {
+function ModelChip({
+  provider,
+  model,
+  routes,
+}: {
+  provider: Provider;
+  model: string;
+  routes: RouteRule[];
+}) {
+  const activeTier = AGENT_TIER_KEYS.find((tierKey) => {
     const tier = AGENT_TIERS[tierKey];
     return routes.some(
       (r) =>
@@ -200,143 +75,21 @@ function ModelChip({ provider, model }: { provider: Provider; model: string }) {
     );
   });
 
-  const handleOpen = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (buttonRef.current) {
-      setTriggerRect(buttonRef.current.getBoundingClientRect());
-    }
-    setOpen((prev) => !prev);
-  };
-
-  // 严格互斥与原子性槽位分配
-  const handleToggleTier = async (tierKey: AgentTierKey) => {
-    const tier = AGENT_TIERS[tierKey];
-    const isCurrentlyThisTier = activeTier === tierKey;
-    const allTierIds = Object.values(AGENT_TIERS).map((t) => t.id);
-
-    // 1. 移除目标槽位原有的绑定（槽位全局单一）
-    // 2. 移除当前模型在其他槽位的绑定（模型单槽位）
-    const nextRoutes = routes.filter((r) => {
-      if (r.id === tier.id) return false;
-      if (allTierIds.includes(r.id) && r.targetProviderId === provider.id && r.targetModel === model) {
-        return false;
-      }
-      return true;
-    });
-
-    if (!isCurrentlyThisTier) {
-      nextRoutes.unshift({
-        id: tier.id,
-        pattern: tier.pattern,
-        targetProviderId: provider.id,
-        targetModel: model,
-        fallbackProviderIds: [],
-        enabled: true,
-        priority: 500,
-        description: tier.description,
-      });
-    }
-
-    try {
-      await saveRoutes(nextRoutes);
-      setOpen(false);
-    } catch {
-      // 错误由 store 统一捕获
-    }
-  };
-
-  const copyModelName = () => {
-    void navigator.clipboard.writeText(model).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
   const tierInfo = activeTier ? AGENT_TIERS[activeTier] : null;
   const TierIcon = tierInfo ? tierInfo.icon : null;
 
   return (
-    <div className="relative inline-flex shrink-0" onClick={(e) => e.stopPropagation()}>
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={handleOpen}
-        className={`group/chip inline-flex shrink-0 items-center gap-1 px-1.5 py-px rounded-[5px] text-[11px] leading-4 font-mono transition-all cursor-pointer border select-none ${
-          tierInfo
-            ? `${tierInfo.chipClass} shadow-2xs`
-            : 'bg-zinc-100/70 hover:bg-zinc-100/90 text-zinc-600 hover:text-zinc-900 border-zinc-200/70 hover:border-zinc-300 dark:bg-zinc-800/40 dark:hover:bg-zinc-800/70 dark:text-zinc-400 dark:hover:text-zinc-200 dark:border-zinc-700/50 dark:hover:border-zinc-600'
-        } ${open ? 'ring-1 ring-ring/80 border-ring' : ''}`}
-        title={`点击管理 ${model} 槽位或复制模型名称`}
-      >
-        {tierInfo && TierIcon && (
-          <span className="shrink-0 flex items-center" title={tierInfo.description}>
-            <TierIcon className={`w-3 h-3 ${tierInfo.iconClass} stroke-[2.2]`} />
-          </span>
-        )}
-        <span className="truncate max-w-[180px]">{model}</span>
-      </button>
-
-      <PopoverPortal open={open} onClose={() => setOpen(false)} triggerRect={triggerRect}>
-        {/* 顶部标题与一键复制模型名称 */}
-        <div className="px-2.5 py-1.5 border-b border-border/60 flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="font-mono font-medium text-[11px] truncate text-foreground leading-tight">
-              {model}
-            </div>
-            <div className="text-[10px] text-muted-foreground truncate mt-0.5">
-              {provider.name} · {provider.protocol}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={copyModelName}
-            title="复制模型名称"
-            className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-          >
-            {copied ? (
-              <Check className="w-3.5 h-3.5 text-emerald-500" />
-            ) : (
-              <Copy className="w-3.5 h-3.5" />
-            )}
-          </button>
-        </div>
-
-        {/* 分配 Agent 角色槽位 */}
-        <div className="p-1 space-y-0.5">
-          <div className="px-2 pt-1 pb-0.5 text-[10px] font-medium text-muted-foreground">
-            分配 Agent 槽位
-          </div>
-          {(Object.keys(AGENT_TIERS) as AgentTierKey[]).map((tierKey) => {
-            const tier = AGENT_TIERS[tierKey];
-            const isSelected = activeTier === tierKey;
-            const Icon = tier.icon;
-
-            return (
-              <button
-                key={tierKey}
-                type="button"
-                onClick={() => handleToggleTier(tierKey)}
-                className={`w-full flex items-center justify-between px-2 py-1.5 rounded-md text-left transition-colors cursor-pointer ${
-                  isSelected
-                    ? 'bg-accent font-medium text-accent-foreground'
-                    : 'hover:bg-accent/60 text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                <div className="flex items-center gap-2 text-[11px] min-w-0">
-                  <Icon className={`w-3.5 h-3.5 shrink-0 ${isSelected ? tier.iconClass : 'text-muted-foreground'}`} />
-                  <span className="truncate">{tier.label}槽位</span>
-                </div>
-                {isSelected ? (
-                  <Check className="w-3.5 h-3.5 shrink-0 text-foreground stroke-[2.5]" />
-                ) : (
-                  <span className="text-[10px] text-muted-foreground/50 shrink-0">点击绑定</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </PopoverPortal>
-    </div>
+    <span
+      className="inline-flex shrink-0 items-center gap-1 px-1.5 py-px rounded-[5px] text-[11px] leading-4 font-mono select-none bg-zinc-500/[0.055] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-400"
+      title={tierInfo ? `${model} · 承担${tierInfo.label}槽位` : model}
+    >
+      {tierInfo && TierIcon && (
+        <span className="shrink-0 flex items-center" title={tierInfo.description}>
+          <TierIcon className={`w-3 h-3 ${tierInfo.iconClass} stroke-[2.2]`} />
+        </span>
+      )}
+      <span className="truncate max-w-[180px]">{model}</span>
+    </span>
   );
 }
 
@@ -360,11 +113,10 @@ function ProviderModelList({ provider }: { provider: Provider }) {
   const velocityRef = useRef(0);
   const rafIdRef = useRef<number | null>(null);
 
-  const allTierIds = Object.values(AGENT_TIERS).map((t) => t.id);
   const isPriorityModel = (m: string) => {
     return routes.some(
       (r) =>
-        allTierIds.includes(r.id) &&
+        AGENT_TIER_IDS.includes(r.id) &&
         r.enabled &&
         r.targetProviderId === provider.id &&
         r.targetModel === m,
@@ -549,9 +301,10 @@ function ProviderModelList({ provider }: { provider: Provider }) {
   }
 
   return (
-    <div className="relative min-w-0 flex-1" onClick={(e) => e.stopPropagation()}>
+    <div className="relative min-w-0 flex-1">
       <div
         ref={scrollRef}
+        data-no-row-drag=""
         onScroll={updateScrollState}
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
@@ -569,14 +322,46 @@ function ProviderModelList({ provider }: { provider: Provider }) {
         }`}
       >
         {sortedModels.map((m) => (
-          <ModelChip key={m} provider={provider} model={m} />
+          <ModelChip key={m} provider={provider} model={m} routes={routes} />
         ))}
       </div>
     </div>
   );
 }
 
-function ProviderCard({ provider }: { provider: Provider }) {
+interface PressState {
+  id: string;
+  row: HTMLDivElement;
+  startX: number;
+  startY: number;
+  inScroll: boolean;
+  grabOffset: number;
+  rowLeft: number;
+  rowWidth: number;
+  listTop: number;
+  rowHeight: number;
+}
+
+interface DragState extends PressState {
+  pointerY: number;
+  previewIds: string[];
+}
+
+interface ProviderCardProps {
+  provider: Provider;
+  isDragged: boolean;
+  onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onRowClick: () => void;
+  shouldSuppressClick: () => boolean;
+}
+
+function ProviderCard({
+  provider,
+  isDragged,
+  onPointerDown,
+  onRowClick,
+  shouldSuppressClick,
+}: ProviderCardProps) {
   const { openProviderEditor, toggleProvider } = useAppStore(
     useShallow((state) => ({
       openProviderEditor: state.openProviderEditor,
@@ -599,20 +384,32 @@ function ProviderCard({ provider }: { provider: Provider }) {
     <div
       role="button"
       tabIndex={0}
-      onClick={() => openProviderEditor(provider)}
+      onClick={onRowClick}
+      onClickCapture={(event) => {
+        // 拖动结束后浏览器仍会补发 click，这里拦掉复制/开关等附带动作
+        if (!shouldSuppressClick()) return;
+        event.stopPropagation();
+        event.preventDefault();
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           openProviderEditor(provider);
         }
       }}
-      className={`group flex items-center justify-between gap-3 px-4 py-2 transition-colors cursor-pointer select-none ${
+      onPointerDown={onPointerDown}
+      className={`group relative flex items-center justify-between gap-3 px-4 py-2 transition-colors cursor-pointer select-none ${
         provider.enabled
           ? 'hover:bg-accent/50'
           : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
-      }`}
+      } ${isDragged ? 'opacity-25' : ''}`}
       aria-label={`编辑服务商 ${provider.name}`}
     >
+      <GripVertical
+        aria-hidden
+        className="pointer-events-none absolute left-0.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-70 dark:text-zinc-500"
+      />
+
       <div className="flex items-center gap-2.5 min-w-0 flex-1">
         <ProviderAvatar
           name={provider.name}
@@ -659,41 +456,6 @@ function ProviderCard({ provider }: { provider: Provider }) {
   );
 }
 
-function CopyAddressButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = () => {
-    void navigator.clipboard.writeText(text).then(
-      () => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1600);
-      },
-      () => {},
-    );
-  };
-
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      title={copied ? "已复制" : `复制完整地址 (${text})`}
-      aria-label="复制网关地址"
-      className="inline-flex items-center gap-1 p-1 -my-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors cursor-pointer"
-    >
-      {copied ? (
-        <>
-          <Check className="w-3.5 h-3.5 text-emerald-500" />
-          <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-sans select-none">
-            已复制
-          </span>
-        </>
-      ) : (
-        <Copy className="w-3.5 h-3.5" />
-      )}
-    </button>
-  );
-}
-
 function IngressCard() {
   const { interceptors, toggleInterceptor, providers, stats, initialLoaded } = useAppStore(
     useShallow((state) => ({
@@ -708,9 +470,7 @@ function IngressCard() {
   const [conflictConfirmTarget, setConflictConfirmTarget] = useState<InterceptorStatus | null>(null);
 
   const hasEnabledProviders = providers.some((p) => p.enabled);
-  const address = `http://${stats.host}:${stats.port}`;
   const gatewayUp = stats.isRunning;
-  const totalTokens = (stats.totalPromptTokens || 0) + (stats.totalCompletionTokens || 0);
 
   const doToggle = async (id: InterceptorStatus['id'], enable: boolean) => {
     if (togglingId) return;
@@ -742,37 +502,14 @@ function IngressCard() {
     }
     const installed = interceptors.some((client) => client.installed);
     if (hasEnabledProviders && installed && !takenOver) {
-      return { text: 'CLI 仍走官方。手动接入使用上面的网关地址。', tone: 'hint' };
+      return { text: '没有客户端被接管，请求仍直连官方；手动接入请展开下方指南。', tone: 'hint' };
     }
     return null;
   })();
 
   return (
     <>
-      <section className={panelClass} aria-label="网关与客户端">
-        <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/30 border-b border-border text-xs min-w-0">
-          <span
-            className={`w-1.5 h-1.5 rounded-full shrink-0 ${gatewayUp ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]' : 'bg-rose-500'}`}
-            aria-hidden
-          />
-          <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide shrink-0">本地网关</span>
-          <span className="font-mono text-zinc-400 dark:text-zinc-500 truncate select-text text-[11px]">
-            {stats.host}:{stats.port}
-          </span>
-          <CopyAddressButton text={address} />
-          <span className="ml-auto shrink-0 hidden sm:flex items-center gap-1.5 font-mono text-[10px] text-zinc-400 dark:text-zinc-500">
-            <span>{stats.totalRequests} 次</span>
-            <span className="text-zinc-300 dark:text-zinc-600">·</span>
-            <span>{formatTokens(totalTokens)} tok</span>
-            {stats.errorCount > 0 && (
-              <>
-                <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                <span className="text-rose-500">{stats.errorCount} 失败</span>
-              </>
-            )}
-          </span>
-        </div>
-
+      <section className={panelClass} aria-label="客户端列表">
         {interceptors.length === 0 ? (
           <p className="px-4 py-6 text-center text-xs text-zinc-400">没有读到本机客户端。</p>
         ) : (
@@ -784,25 +521,23 @@ function IngressCard() {
               const path = client.installed && client.configPath ? displayPath(client.configPath) : '';
 
               return (
-                <div key={client.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className={`w-8 h-8 shrink-0 flex items-center justify-center p-1.5 ${ICON_SLOT}`}>
+                <div key={client.id} className="flex items-center justify-between gap-3 px-4 py-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className={`w-6 h-6 shrink-0 flex items-center justify-center p-1 ${ICON_SLOT}`}>
                       <ClientMark id={client.id} />
                     </div>
-                    <div className="min-w-0">
-                      <h3 className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                        {label}
-                      </h3>
-                      <p className="text-[11px] truncate mt-0.5">
-                        <span className={status.className}>{status.label}</span>
-                        {path && (
-                          <span className="text-zinc-400 dark:text-zinc-500 select-text font-mono text-[10px]" title={client.configPath}>
-                            {' '}
-                            · {path}
-                          </span>
-                        )}
-                      </p>
-                    </div>
+                    <h3 className="shrink-0 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
+                      {label}
+                    </h3>
+                    <p className="min-w-0 text-[11px] truncate">
+                      <span className={status.className}>{status.label}</span>
+                      {path && (
+                        <span className="text-zinc-400 dark:text-zinc-500 select-text font-mono text-[10px]" title={client.configPath}>
+                          {' '}
+                          · {path}
+                        </span>
+                      )}
+                    </p>
                   </div>
 
                   <div className="shrink-0">
@@ -997,18 +732,169 @@ export function ClientsView() {
 }
 
 export function ProviderList() {
-  const { providers, initialLoaded, isLoading, openProviderEditor } = useAppStore(
+  const { providers, initialLoaded, isLoading, openProviderEditor, reorderProviders } = useAppStore(
     useShallow((state) => ({
       providers: state.providers,
       initialLoaded: state.initialLoaded,
       isLoading: state.isLoading,
       openProviderEditor: state.openProviderEditor,
+      reorderProviders: state.reorderProviders,
     })),
   );
+
+  const listRef = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const pressRef = useRef<PressState | null>(null);
+  const suppressClickRef = useRef(false);
+  const providersRef = useRef(providers);
+  providersRef.current = providers;
+
+  const handleRowPointerDown = (event: React.PointerEvent<HTMLDivElement>, provider: Provider) => {
+    if (event.button !== 0) return;
+    // 开关等表单控件保持原生语义；模型条里的标签允许以纵向拖动启动整行拖动
+    const target = event.target as HTMLElement;
+    const inScroll = Boolean(target.closest('[data-no-row-drag]'));
+    if (target.closest('[role="switch"], input, select, a')) return;
+    if (!inScroll && target.closest('button')) return;
+
+    const listRect = listRef.current?.getBoundingClientRect();
+    if (!listRect) return;
+    const rowRect = event.currentTarget.getBoundingClientRect();
+    pressRef.current = {
+      id: provider.id,
+      row: event.currentTarget,
+      startX: event.clientX,
+      startY: event.clientY,
+      inScroll,
+      grabOffset: event.clientY - rowRect.top,
+      rowLeft: rowRect.left,
+      rowWidth: rowRect.width,
+      listTop: listRect.top,
+      rowHeight: rowRect.height,
+    };
+  };
+
+  const shouldSuppressClick = () => {
+    if (!suppressClickRef.current) return false;
+    suppressClickRef.current = false;
+    return true;
+  };
+
+  const handleRowClick = (provider: Provider) => {
+    openProviderEditor(provider);
+  };
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const press = pressRef.current;
+      if (!press) return;
+
+      const current = dragRef.current;
+      if (!current) {
+        const dx = event.clientX - press.startX;
+        const dy = event.clientY - press.startY;
+
+        if (press.inScroll) {
+          // 模型条上的手势：横向交给它自己滚动，纵向才接管为整行拖动
+          if (Math.abs(dx) > 4 && Math.abs(dx) > Math.abs(dy)) {
+            pressRef.current = null;
+            return;
+          }
+          if (Math.abs(dy) <= 6 || Math.abs(dy) < Math.abs(dx)) return;
+        } else if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+          return;
+        }
+
+        // 确认是整行拖动后才捕获指针，避免一开始就抢走模型条的横向滑动
+        try {
+          press.row.setPointerCapture(event.pointerId);
+        } catch {
+          // ignore
+        }
+        suppressClickRef.current = true;
+        document.body.style.cursor = 'grabbing';
+        document.body.style.userSelect = 'none';
+        const started: DragState = {
+          ...press,
+          pointerY: event.clientY,
+          previewIds: providersRef.current.map((item) => item.id),
+        };
+        dragRef.current = started;
+        setDrag(started);
+        return;
+      }
+
+      const slot = Math.max(
+        0,
+        Math.min(
+          providersRef.current.length,
+          Math.round((event.clientY - current.listTop) / current.rowHeight),
+        ),
+      );
+      const from = current.previewIds.indexOf(current.id);
+      const without = current.previewIds.filter((id) => id !== current.id);
+      const insertAt = Math.max(0, Math.min(without.length, slot > from ? slot - 1 : slot));
+      without.splice(insertAt, 0, current.id);
+
+      const next = { ...current, pointerY: event.clientY, previewIds: without };
+      dragRef.current = next;
+      setDrag(next);
+    };
+
+    const finish = (commit: boolean) => {
+      const current = dragRef.current;
+      pressRef.current = null;
+      dragRef.current = null;
+      setDrag(null);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      if (commit && current) {
+        const currentIds = providersRef.current.map((item) => item.id);
+        const changed = current.previewIds.some((id, index) => id !== currentIds[index]);
+        if (changed) {
+          void reorderProviders(current.previewIds).catch(() => {
+            // 全局错误条展示失败原因
+          });
+        }
+      }
+      // click 在 pointerup 之后同步派发，这里避免把拖动结束误判成打开编辑器
+      setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    };
+
+    const onUp = () => finish(true);
+    const onCancel = () => finish(false);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') finish(false);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('keydown', onKeyDown);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [reorderProviders]);
 
   const dataReady = initialLoaded && !isLoading;
 
   if (!dataReady) return <LoadingState />;
+
+  const providerById = new Map(providers.map((item) => [item.id, item] as const));
+  const orderedProviders = drag
+    ? drag.previewIds
+        .map((id) => providerById.get(id))
+        .filter((item): item is Provider => Boolean(item))
+    : providers;
+  const draggedProvider = drag ? providerById.get(drag.id) : undefined;
 
   const hasDefault = providers.some((p) => p.isDefault && p.enabled);
   const anyEnabled = providers.some((p) => p.enabled);
@@ -1030,9 +916,16 @@ export function ProviderList() {
             </Button>
           </div>
         ) : (
-          <div className="divide-y divide-border">
-            {providers.map((provider) => (
-              <ProviderCard key={provider.id} provider={provider} />
+          <div className="divide-y divide-border" ref={listRef}>
+            {orderedProviders.map((provider) => (
+              <ProviderCard
+                key={provider.id}
+                provider={provider}
+                isDragged={drag?.id === provider.id}
+                onPointerDown={(event) => handleRowPointerDown(event, provider)}
+                onRowClick={() => handleRowClick(provider)}
+                shouldSuppressClick={shouldSuppressClick}
+              />
             ))}
           </div>
         )}
@@ -1043,6 +936,29 @@ export function ProviderList() {
           没有启用的默认服务商：所有服务商都未声明的模型将无法路由。
         </p>
       )}
+
+      {drag &&
+        draggedProvider &&
+        createPortal(
+          <div
+            aria-hidden
+            className="pointer-events-none fixed z-50 overflow-hidden rounded-lg border border-border bg-card shadow-xl"
+            style={{
+              left: drag.rowLeft,
+              width: drag.rowWidth,
+              top: drag.pointerY - drag.grabOffset,
+            }}
+          >
+            <ProviderCard
+              provider={draggedProvider}
+              isDragged={false}
+              onPointerDown={() => {}}
+              onRowClick={() => {}}
+              shouldSuppressClick={() => false}
+            />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

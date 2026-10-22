@@ -1,73 +1,48 @@
-interface ModelRate {
+import { invoke, isTauri } from '@tauri-apps/api/core';
+
+export interface ModelRate {
   prompt: number; // USD per 1M tokens
   completion: number; // USD per 1M tokens
 }
 
-// 常见主流大模型每 100 万 Token 的官方公价（USD）
-const MODEL_PRICING: Record<string, ModelRate> = {
-  // Anthropic Claude
-  'claude-3-7-sonnet': { prompt: 3.0, completion: 15.0 },
-  'claude-3-5-sonnet': { prompt: 3.0, completion: 15.0 },
-  'claude-3-5-haiku': { prompt: 0.8, completion: 4.0 },
-  'claude-3-haiku': { prompt: 0.25, completion: 1.25 },
-  'claude-3-opus': { prompt: 15.0, completion: 75.0 },
-
-  // OpenAI
-  'gpt-4o': { prompt: 2.5, completion: 10.0 },
-  'gpt-4o-mini': { prompt: 0.15, completion: 0.6 },
-  'o1': { prompt: 15.0, completion: 60.0 },
-  'o1-preview': { prompt: 15.0, completion: 60.0 },
-  'o1-mini': { prompt: 3.0, completion: 12.0 },
-  'o3-mini': { prompt: 1.1, completion: 4.4 },
-  'gpt-4-turbo': { prompt: 10.0, completion: 30.0 },
-  'gpt-4': { prompt: 30.0, completion: 60.0 },
-  'gpt-3.5-turbo': { prompt: 0.5, completion: 1.5 },
-
-  // Google Gemini
-  'gemini-2.5-pro': { prompt: 1.25, completion: 5.0 },
-  'gemini-1.5-pro': { prompt: 1.25, completion: 5.0 },
-  'gemini-2.5-flash': { prompt: 0.075, completion: 0.3 },
-  'gemini-2.0-flash': { prompt: 0.075, completion: 0.3 },
-  'gemini-1.5-flash': { prompt: 0.075, completion: 0.3 },
-  'gemini-3.8-flash': { prompt: 0.1, completion: 0.4 },
-  'gemini-3.8-flash-high': { prompt: 0.1, completion: 0.4 },
-
-  // DeepSeek
-  'deepseek-chat': { prompt: 0.14, completion: 0.28 },
-  'deepseek-v3': { prompt: 0.14, completion: 0.28 },
-  'deepseek-reasoner': { prompt: 0.55, completion: 2.19 },
-  'deepseek-r1': { prompt: 0.55, completion: 2.19 },
-};
-
-// 默认基准模型费率（用于未收录模型）：输入 $2.0/M，输出 $8.0/M
+// 目录未加载或模型未收录时的保守估算
 const DEFAULT_RATE: ModelRate = { prompt: 2.0, completion: 8.0 };
+
+// 后端从 models.dev 同步的费率表：规范化模型名 -> [输入价, 输出价]
+let catalogRates: Record<string, [number, number]> = {};
+
+/** 启动时加载一次；失败时保持默认估算，不影响日志其他功能 */
+export async function loadModelRates(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    catalogRates = await invoke<Record<string, [number, number]>>('get_model_rates');
+  } catch {
+    // 后端不可用时沿用默认估算
+  }
+}
+
+/** 与后端 catalog 一致的别名尝试：去 provider 前缀、去日期与 -latest 后缀 */
+const candidateKeys = (modelName: string): string[] => {
+  const base = modelName.toLowerCase().trim();
+  const keys = [base];
+
+  const slash = base.lastIndexOf('/');
+  if (slash >= 0) keys.push(base.slice(slash + 1));
+
+  for (const key of [...keys]) {
+    const slim = key.replace(/-latest$/, '').replace(/-(\d{4}-\d{2}-\d{2}|\d{8})$/, '');
+    if (slim !== key) keys.push(slim);
+  }
+  return keys;
+};
 
 export function getModelRate(modelName?: string | null): ModelRate {
   if (!modelName) return DEFAULT_RATE;
-  const normalized = modelName.toLowerCase().trim();
 
-  // 精准与前缀模糊匹配
-  for (const [key, rate] of Object.entries(MODEL_PRICING)) {
-    if (normalized === key || normalized.includes(key) || key.includes(normalized)) {
-      return rate;
-    }
+  for (const key of candidateKeys(modelName)) {
+    const hit = catalogRates[key];
+    if (hit) return { prompt: hit[0], completion: hit[1] };
   }
-
-  // 厂商大类模糊匹配
-  if (normalized.includes('haiku')) return MODEL_PRICING['claude-3-5-haiku'];
-  if (normalized.includes('opus')) return MODEL_PRICING['claude-3-opus'];
-  if (normalized.includes('sonnet')) return MODEL_PRICING['claude-3-7-sonnet'];
-  if (normalized.includes('claude')) return MODEL_PRICING['claude-3-5-sonnet'];
-  if (normalized.includes('o3')) return MODEL_PRICING['o3-mini'];
-  if (normalized.includes('o1-mini')) return MODEL_PRICING['o1-mini'];
-  if (normalized.includes('o1')) return MODEL_PRICING['o1'];
-  if (normalized.includes('4o-mini')) return MODEL_PRICING['gpt-4o-mini'];
-  if (normalized.includes('4o')) return MODEL_PRICING['gpt-4o'];
-  if (normalized.includes('deepseek-r1') || normalized.includes('reasoner')) return MODEL_PRICING['deepseek-reasoner'];
-  if (normalized.includes('deepseek')) return MODEL_PRICING['deepseek-chat'];
-  if (normalized.includes('flash')) return MODEL_PRICING['gemini-2.0-flash'];
-  if (normalized.includes('gemini')) return MODEL_PRICING['gemini-1.5-pro'];
-
   return DEFAULT_RATE;
 }
 

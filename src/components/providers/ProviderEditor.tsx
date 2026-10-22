@@ -37,6 +37,18 @@ import {
   validateBaseUrl,
 } from './providerDraft';
 
+interface ModelCapability {
+  modalities: string[];
+  contextWindow: number | null;
+  maxOutput: number | null;
+  reasoning: boolean;
+}
+
+const formatContextWindow = (tokens: number) =>
+  tokens >= 1_000_000
+    ? `${Number((tokens / 1_000_000).toFixed(1))}M`
+    : `${Math.round(tokens / 1000)}K`;
+
 const protocols: Record<Protocol, string> = {
   openai: 'OpenAI 兼容',
   anthropic: 'Anthropic',
@@ -56,6 +68,9 @@ export function ProviderEditor() {
   );
   const [initial] = useState(() => createProviderDraft(editingProvider, presets, autoDefault));
   const [draft, setDraft] = useState(initial);
+  // 模型池：上游返回 ∪ 本次编辑中出现过的模型。
+  // 取消勾选只影响已选集合，模型留在池里，误点后可以立即选回
+  const [pool, setPool] = useState<string[]>(() => uniqueValues(initial.models));
   const [choosing, setChoosing] = useState(!editingProvider);
   const [presetSearch, setPresetSearch] = useState('');
   const [showKeys, setShowKeys] = useState(false);
@@ -65,6 +80,7 @@ export function ProviderEditor() {
   const [fetchError, setFetchError] = useState('');
   const [notice, setNotice] = useState('');
   const [modelSearch, setModelSearch] = useState('');
+  const [modelFilterTab, setModelFilterTab] = useState<'all' | 'selected' | 'unselected'>('all');
   const [manualModel, setManualModel] = useState('');
   const [saving, setSaving] = useState(false);
   const [confirmation, setConfirmation] = useState<{ kind: 'leave' | 'preset'; preset?: Preset } | null>(null);
@@ -185,6 +201,7 @@ export function ProviderEditor() {
     }
     setConfirmation(null);
     invalidateModels();
+    setPool([]);
     setDraft(applyProviderPreset(draft, next, autoDefault));
     setShowKeys(false);
     setShowAuthHelp(false);
@@ -326,24 +343,70 @@ export function ProviderEditor() {
     return presets.filter((p) => `${p.name} ${p.id}`.toLowerCase().includes(q));
   }, [presets, presetSearch]);
 
-  // 模型池总览：包含从上游拉取的所有模型以及当前已选/手动添加的模型
-  const allModels = useMemo(
-    () => uniqueValues([...(fetched ?? []), ...draft.models]),
-    [fetched, draft.models]
-  );
+  // 只增不减地合并模型池：切换预设时会主动清空
+  useEffect(() => {
+    setPool((prev) => {
+      const next = uniqueValues([...prev, ...(fetched ?? []), ...draft.models]);
+      return next.length === prev.length ? prev : next;
+    });
+  }, [fetched, draft.models]);
+
+  // 模型能力标记：目录未收录的模型不显示任何标记
+  const [capabilities, setCapabilities] = useState<Record<string, ModelCapability>>({});
+  useEffect(() => {
+    if (pool.length === 0) return;
+    let cancelled = false;
+    invoke<Record<string, ModelCapability>>('get_model_capabilities', { modelNames: pool })
+      .then((caps) => {
+        if (!cancelled) setCapabilities(caps);
+      })
+      .catch(() => {
+        if (!cancelled) setCapabilities({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pool]);
 
   const filteredModels = useMemo(() => {
-    const q = modelSearch.toLowerCase();
-    return allModels.filter((model) => model.toLowerCase().includes(q));
-  }, [allModels, modelSearch]);
+    const q = modelSearch.trim().toLowerCase();
+    return pool.filter((model) => {
+      const matchesSearch = !q || model.toLowerCase().includes(q);
+      if (!matchesSearch) return false;
+      const isSelected = draft.models.includes(model);
+      if (modelFilterTab === 'selected') return isSelected;
+      if (modelFilterTab === 'unselected') return !isSelected;
+      return true;
+    });
+  }, [pool, modelSearch, modelFilterTab, draft.models]);
 
   const selectAllFiltered = () => {
-    replaceModels([...draft.models, ...filteredModels]);
+    const unselected = filteredModels.filter((m) => !draft.models.includes(m));
+    if (unselected.length > 0) {
+      replaceModels([...draft.models, ...unselected]);
+    }
   };
 
   const clearAllFiltered = () => {
-    replaceModels(draft.models.filter((m) => !filteredModels.includes(m)));
+    const selectedInFiltered = filteredModels.filter((m) => draft.models.includes(m));
+    if (selectedInFiltered.length > 0) {
+      replaceModels(draft.models.filter((m) => !selectedInFiltered.includes(m)));
+    }
   };
+
+  const availableFamilies = useMemo(() => {
+    if (pool.length < 5) return [];
+    const candidates = [
+      { key: 'claude', label: 'Claude', test: (m: string) => /claude/i.test(m) },
+      { key: 'gpt', label: 'GPT', test: (m: string) => /gpt|o1|o3|o4/i.test(m) },
+      { key: 'gemini', label: 'Gemini', test: (m: string) => /gemini/i.test(m) },
+      { key: 'deepseek', label: 'DeepSeek', test: (m: string) => /deepseek/i.test(m) },
+      { key: 'qwen', label: 'Qwen', test: (m: string) => /qwen/i.test(m) },
+    ];
+    return candidates
+      .map((c) => ({ ...c, count: pool.filter(c.test).length }))
+      .filter((c) => c.count >= 2);
+  }, [pool]);
 
   const invalidModels = useMemo(() => {
     if (!fetched || fetched.length === 0) return [];
@@ -356,6 +419,13 @@ export function ProviderEditor() {
   };
 
   const otherDefault = providers.find((provider) => provider.isDefault && provider.id !== draft.id);
+
+  // 首选模型必须在已选模型内；历史数据里可能残留已移除的模型，保留为首项以便用户改回
+  const preferredOptions = useMemo(() => {
+    const base = draft.models.map((model) => model.trim()).filter(Boolean);
+    const current = draft.defaultModel?.trim();
+    return current && !base.includes(current) ? [current, ...base] : base;
+  }, [draft.models, draft.defaultModel]);
 
   return (
     <div className="w-full pb-6 space-y-3 animate-in fade-in duration-150">
@@ -704,9 +774,35 @@ export function ProviderEditor() {
                   </div>
                   <Switch
                     checked={!!draft.isDefault}
-                    onCheckedChange={(checked) => update({ isDefault: checked, defaultModel: null })}
+                    onCheckedChange={(checked) => update({ isDefault: checked })}
                     ariaLabel="设为全局默认服务商"
                   />
+                </div>
+
+                {/* 首选模型：客户端连接后默认使用 */}
+                <div className="flex items-center justify-between gap-4 pt-3 border-t border-border">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                      首选模型
+                    </div>
+                    <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 leading-relaxed">
+                      客户端模型列表的首位；默认服务商的该模型会作为启动模型
+                    </div>
+                  </div>
+                  <Select
+                    value={draft.defaultModel ?? ''}
+                    onChange={(e) => update({ defaultModel: e.target.value || null })}
+                    containerClassName="w-40 sm:w-52 shrink-0"
+                    disabled={preferredOptions.length === 0}
+                    aria-label="首选模型"
+                  >
+                    <option value="">跟随列表顺序</option>
+                    {preferredOptions.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </Select>
                 </div>
               </div>
 
@@ -718,7 +814,7 @@ export function ProviderEditor() {
                       可用模型池
                     </h3>
                     <Badge variant="secondary" className="font-mono">
-                      已选 {draft.models.length} {allModels.length > 0 ? `/ 共 ${allModels.length}` : ''}
+                      已选 {draft.models.length} {pool.length > 0 ? `/ 共 ${pool.length}` : ''}
                     </Badge>
                     {invalidModels.length > 0 && (
                       <Badge variant="warning" className="gap-1">
@@ -756,79 +852,258 @@ export function ProviderEditor() {
                 )}
 
                 {/* 一体化清单卡片 */}
-                <div className="rounded-md bg-zinc-500/[0.045] dark:bg-white/[0.045] overflow-hidden">
-                  {/* 顶部搜索与快捷操作 */}
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border/60">
-                    <div className="relative flex-1">
+                <div className="rounded-lg border border-border/70 bg-zinc-500/[0.035] dark:bg-white/[0.035] overflow-hidden">
+                  {/* 顶部搜索、视图切换与快捷操作栏 */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-border/60 bg-background/50">
+                    <div className="relative flex-1 min-w-[140px]">
                       <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
                       <Input
                         type="text"
                         placeholder="搜索或过滤模型…"
                         value={modelSearch}
                         onChange={(e) => setModelSearch(e.target.value)}
-                        className="pl-8 pr-3 h-7 font-mono"
+                        className="pl-8 pr-7 h-7 font-mono text-xs bg-background/80"
                       />
+                      {modelSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setModelSearch('')}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
+                          title="清空搜索"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
                     </div>
 
-                    {allModels.length > 0 && (
-                      <div className="flex items-center gap-1 shrink-0 text-xs text-zinc-500 dark:text-zinc-400">
-                        <button
-                          type="button"
-                          onClick={selectAllFiltered}
-                          className="px-2 py-1 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-                        >
-                          全选
-                        </button>
-                        <span className="text-zinc-300 dark:text-zinc-700">|</span>
-                        <button
-                          type="button"
-                          onClick={clearAllFiltered}
-                          className="px-2 py-1 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-                        >
-                          清空
-                        </button>
+                    {pool.length > 0 && (
+                      <div className="flex items-center gap-2 shrink-0">
+                        {/* 视图分段选择：全部 / 已选 / 未选 */}
+                        <div className="inline-flex p-0.5 rounded-md bg-zinc-500/[0.08] dark:bg-white/[0.08] text-[11px] font-medium">
+                          <button
+                            type="button"
+                            onClick={() => setModelFilterTab('all')}
+                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                              modelFilterTab === 'all'
+                                ? 'bg-background text-foreground shadow-2xs font-semibold'
+                                : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
+                            }`}
+                          >
+                            全部 <span className="opacity-70 font-mono text-[10px] ml-0.5">{pool.length}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setModelFilterTab('selected')}
+                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                              modelFilterTab === 'selected'
+                                ? 'bg-background text-foreground shadow-2xs font-semibold'
+                                : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
+                            }`}
+                          >
+                            已选 <span className="opacity-70 font-mono text-[10px] ml-0.5">{draft.models.length}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setModelFilterTab('unselected')}
+                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                              modelFilterTab === 'unselected'
+                                ? 'bg-background text-foreground shadow-2xs font-semibold'
+                                : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
+                            }`}
+                          >
+                            未选 <span className="opacity-70 font-mono text-[10px] ml-0.5">{Math.max(0, pool.length - draft.models.length)}</span>
+                          </button>
+                        </div>
+
+                        {/* 快捷批量操作 */}
+                        <div className="flex items-center gap-1 pl-1 border-l border-border/60 text-[11px] text-zinc-500 dark:text-zinc-400">
+                          <button
+                            type="button"
+                            onClick={selectAllFiltered}
+                            className="px-1.5 py-0.5 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                            title="将当前过滤视图下的未选模型全部加入"
+                          >
+                            {modelSearch.trim()
+                              ? '全选结果'
+                              : modelFilterTab === 'unselected'
+                              ? '全选未选'
+                              : '全选'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={clearAllFiltered}
+                            className="px-1.5 py-0.5 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                            title="将当前过滤视图下的已选模型取消选择"
+                          >
+                            {modelSearch.trim()
+                              ? '清空结果'
+                              : modelFilterTab === 'selected'
+                              ? '清空已选'
+                              : '清空'}
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
 
-                  {/* 模型紧凑流式列表：按内容自适应宽度，拒绝强行通栏拉长 */}
-                  <div className="max-h-40 overflow-y-auto p-2">
+                  {/* 常用系列快捷过滤：当池子包含典型系列时提供一键聚焦 */}
+                  {availableFamilies.length > 0 && (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border/40 bg-zinc-500/[0.02] dark:bg-white/[0.02] overflow-x-auto text-[11px]">
+                      <span className="text-zinc-400 dark:text-zinc-500 text-[10px] shrink-0">系列过滤:</span>
+                      {availableFamilies.map((fam) => {
+                        const active = modelSearch.toLowerCase() === fam.key;
+                        return (
+                          <button
+                            key={fam.key}
+                            type="button"
+                            onClick={() => setModelSearch(active ? '' : fam.key)}
+                            className={`px-1.5 py-0.5 rounded-[4px] font-mono text-[10px] transition-colors cursor-pointer shrink-0 ${
+                              active
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium shadow-2xs'
+                                : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
+                            }`}
+                          >
+                            {fam.label} <span className="opacity-60 text-[9px]">{fam.count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* 模型列表：自适应流式药丸，强化已选与未选对比度 */}
+                  <div className="max-h-52 overflow-y-auto p-2.5">
                     {filteredModels.length === 0 ? (
-                      <div className="py-6 text-center text-xs text-zinc-400">
-                        {allModels.length === 0
-                          ? '暂无模型，点击右上角「获取上游模型」或在下方手动补充'
-                          : '未匹配到相关模型'}
+                      <div className="py-7 text-center text-xs text-zinc-400 space-y-1.5">
+                        {pool.length === 0 ? (
+                          <p>暂无模型，点击右上角「获取上游模型」或在下方手动补充</p>
+                        ) : modelFilterTab === 'selected' ? (
+                          <p>
+                            尚未勾选任何模型，
+                            <button
+                              type="button"
+                              onClick={() => setModelFilterTab('all')}
+                              className="text-zinc-900 dark:text-zinc-100 underline hover:opacity-80 ml-1 cursor-pointer font-medium"
+                            >
+                              去选择模型
+                            </button>
+                          </p>
+                        ) : modelFilterTab === 'unselected' ? (
+                          <p>所有模型均已被选中</p>
+                        ) : (
+                          <div className="space-y-1">
+                            <p>未匹配到相关模型</p>
+                            {modelSearch.trim() && (
+                              <button
+                                type="button"
+                                onClick={() => setModelSearch('')}
+                                className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 underline cursor-pointer"
+                              >
+                                清空搜索词
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="flex flex-wrap gap-1.5">
                         {filteredModels.map((model) => {
                           const isSelected = draft.models.includes(model);
                           const isInvalid = invalidModels.includes(model);
+                          const isDefaultModel = draft.defaultModel === model;
+                          const cap = capabilities[model];
+
+                          // 推理能力判定：后端返回 或 命中显式推理/思考命名
+                          const hasExplicitReasoningName =
+                            /(-high|-thinking|-thought|-reasoner|-r1\b|o1\b|o3\b|o4\b|gemini-3|gemini-2\.5)/i.test(model);
+                          const isReasoning = cap ? cap.reasoning || hasExplicitReasoningName : hasExplicitReasoningName;
+
+                          // 视觉能力判定：后端返回 或 命中多模态命名规范
+                          const isPureAux = /imagen|dall-e|tts|whisper|embed/i.test(model);
+                          const hasExplicitVisionName =
+                            /vision|image|vl|multimodal/i.test(model) ||
+                            /gemini-|claude-3|claude-4|gpt-4o|gpt-5|gpt-6|o1\b|o3\b/i.test(model);
+                          const isVision = !isPureAux && (cap?.modalities?.includes('image') || hasExplicitVisionName);
+
+                          // 上下文窗口
+                          const contextWindow = cap?.contextWindow || (model.toLowerCase().startsWith('gemini-') ? 1_048_576 : null);
+
+                          const capabilityHint = [
+                            contextWindow ? `${formatContextWindow(contextWindow)} 上下文` : '',
+                            isVision ? '支持图片输入' : '',
+                            isReasoning ? '支持深度推理' : '',
+                            isDefaultModel ? '首选模型' : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' · ');
 
                           return (
                             <button
                               key={model}
                               type="button"
                               onClick={() => toggleModel(model)}
-                              className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-xs font-mono transition-colors cursor-pointer select-none ${
+                              aria-pressed={isSelected}
+                              title={capabilityHint || undefined}
+                              className={`group relative inline-flex items-center gap-1.5 py-1 px-2.5 rounded-md text-xs font-mono transition-all cursor-pointer select-none border text-left ${
                                 isSelected
-                                  ? 'bg-background text-zinc-900 dark:text-zinc-100 font-medium shadow-2xs'
-                                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-background/70 hover:text-zinc-900 dark:hover:text-zinc-200'
+                                  ? 'bg-zinc-100 hover:bg-zinc-200/90 text-zinc-900 border-zinc-300/90 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-100 dark:border-zinc-700 shadow-2xs font-medium'
+                                  : 'bg-background/60 hover:bg-background text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
                               }`}
                             >
-                              {/* 正统 shadcn 高反差极简复选框 */}
+                              {/* 状态指示框：已选为实体高反差勾选框（hover 提示取消），未选为空框（hover 提示添加） */}
                               <span
-                                className={`w-3.5 h-3.5 rounded-[3px] border flex items-center justify-center shrink-0 transition-colors ${
+                                className={`w-3.5 h-3.5 rounded-[3.5px] flex items-center justify-center shrink-0 transition-colors ${
                                   isSelected
-                                    ? 'bg-zinc-900 border-zinc-900 text-white dark:bg-zinc-100 dark:border-zinc-100 dark:text-zinc-900'
-                                    : 'border-zinc-300/80 dark:border-zinc-600 bg-white dark:bg-zinc-800'
+                                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 group-hover:bg-zinc-700 dark:group-hover:bg-zinc-300'
+                                    : 'border border-zinc-300 dark:border-zinc-700 bg-white/70 dark:bg-zinc-900/70 group-hover:border-zinc-400 dark:group-hover:border-zinc-500'
                                 }`}
                               >
-                                {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                                {isSelected ? (
+                                  <>
+                                    <Check className="w-2.5 h-2.5 stroke-[3] group-hover:hidden" />
+                                    <X className="w-2.5 h-2.5 stroke-[3] hidden group-hover:block" />
+                                  </>
+                                ) : (
+                                  <Plus className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                )}
                               </span>
-                              <span>{model}</span>
+
+                              {/* 模型名称 */}
+                              <span className="truncate max-w-[280px]">{model}</span>
+
+                              {/* 首选模型标记 */}
+                              {isDefaultModel && (
+                                <span
+                                  className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
+                                  title="当前服务商的首选启动模型"
+                                >
+                                  首选
+                                </span>
+                              )}
+
+                              {/* 模型能力微徽章 */}
+                              {isReasoning && (
+                                <span
+                                  className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0"
+                                  title="支持深度思考 / 推理"
+                                >
+                                  思考
+                                </span>
+                              )}
+                              {isVision && (
+                                <span
+                                  className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 shrink-0"
+                                  title="支持图片输入"
+                                >
+                                  视觉
+                                </span>
+                              )}
+
+                              {/* 上游缺失警示 */}
                               {isInvalid && (
-                                <span title="该模型未在上游接口返回的列表中" className="shrink-0 text-amber-500">
+                                <span
+                                  title="该模型未在上游接口返回的列表中"
+                                  className="shrink-0 text-amber-500 flex items-center"
+                                >
                                   <AlertTriangle className="w-3 h-3" />
                                 </span>
                               )}
@@ -840,7 +1115,7 @@ export function ProviderEditor() {
                   </div>
 
                   {/* 底部紧凑手动补充条 */}
-                  <div className="px-3 py-2 border-t border-border/60 flex items-center gap-2">
+                  <div className="px-3 py-2 border-t border-border/60 flex items-center gap-2 bg-background/30">
                     <Input
                       type="text"
                       value={manualModel}
@@ -852,7 +1127,7 @@ export function ProviderEditor() {
                         }
                       }}
                       placeholder="手动补充模型 ID，如 claude-3-7-sonnet（回车添加）"
-                      className="font-mono h-7"
+                      className="font-mono h-7 text-xs bg-background/80"
                     />
                     <Button
                       type="button"

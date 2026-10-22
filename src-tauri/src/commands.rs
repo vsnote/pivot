@@ -8,6 +8,124 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tauri::State;
 
+/// 前端成本估算用的模型费率表（来自 models.dev 目录）
+#[tauri::command]
+pub fn get_model_rates() -> Value {
+    crate::model_catalog::rate_table()
+}
+
+fn is_pure_non_text_model(n: &str) -> bool {
+    n.contains("dall-e")
+        || n.contains("imagen")
+        || n.contains("flux")
+        || n.contains("whisper")
+        || n.contains("tts")
+        || n.contains("embedding")
+        || n.contains("embed")
+}
+
+fn infer_model_heuristics(name: &str, n: &str) -> (bool, bool, Option<u64>) {
+    // 1. 深度思考 / 推理模型推断
+    let (spec_levels, default_lvl) = crate::interceptor::resolve_model_reasoning_spec(name);
+    let reasoning = (!spec_levels.is_empty() && default_lvl != "none")
+        || n.contains("thinking")
+        || n.contains("thought")
+        || n.contains("reason")
+        || n.contains("r1")
+        || n.contains("o1")
+        || n.contains("o3")
+        || n.contains("o4")
+        || n.contains("high")
+        || n.contains("gemini-3")
+        || n.contains("gemini-2.5");
+
+    // 2. 视觉多模态推断 (支持图片输入)
+    let vision = if is_pure_non_text_model(n) {
+        false
+    } else {
+        n.contains("vision")
+            || n.contains("image")
+            || n.contains("vl")
+            || n.contains("multimodal")
+            || n.starts_with("gemini-")
+            || n.starts_with("claude-3")
+            || n.starts_with("claude-4")
+            || n.starts_with("gpt-4o")
+            || n.starts_with("gpt-4-turbo")
+            || n.starts_with("gpt-5")
+            || n.starts_with("gpt-6")
+            || n.starts_with("o1")
+            || n.starts_with("o3")
+            || n.starts_with("o4")
+            || n.contains("qwen-vl")
+            || n.contains("qwen2-vl")
+            || n.contains("qwen2.5-vl")
+    };
+
+    // 3. 上下文窗口保底推断
+    let context_window = if n.starts_with("gemini-") {
+        Some(1_048_576) // 1M
+    } else if n.starts_with("claude-3") || n.starts_with("claude-4") {
+        Some(200_000) // 200K
+    } else if n.starts_with("gpt-4o") || n.starts_with("o1") || n.starts_with("o3") || n.starts_with("gpt-5") {
+        Some(128_000) // 128K
+    } else if n.contains("deepseek") {
+        Some(64_000) // 64K
+    } else {
+        None
+    };
+
+    (reasoning, vision, context_window)
+}
+
+/// 批量查询模型能力，用于编辑器里展示多模态 / 推理等标记
+#[tauri::command]
+pub fn get_model_capabilities(model_names: Vec<String>) -> Value {
+    let mut out = serde_json::Map::new();
+    for name in model_names {
+        let catalog_model = crate::model_catalog::lookup(&name, None);
+        let lower = name.to_lowercase();
+        let n = lower.split('/').last().unwrap_or(&lower);
+        let (inferred_reasoning, inferred_vision, inferred_context) = infer_model_heuristics(&name, n);
+
+        let reasoning = catalog_model
+            .as_ref()
+            .map(|m| m.reasoning)
+            .unwrap_or(false)
+            || inferred_reasoning;
+
+        let mut modalities: Vec<String> = catalog_model
+            .as_ref()
+            .map(|m| m.client_input_modalities().into_iter().map(String::from).collect())
+            .unwrap_or_default();
+
+        if !modalities.contains(&"text".to_string()) && !is_pure_non_text_model(n) {
+            modalities.push("text".to_string());
+        }
+        if inferred_vision && !modalities.contains(&"image".to_string()) {
+            modalities.push("image".to_string());
+        }
+
+        let context_window = catalog_model
+            .as_ref()
+            .and_then(|m| m.context_window)
+            .or(inferred_context);
+
+        let max_output = catalog_model.as_ref().and_then(|m| m.max_output);
+
+        out.insert(
+            name,
+            json!({
+                "modalities": modalities,
+                "contextWindow": context_window,
+                "maxOutput": max_output,
+                "reasoning": reasoning,
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
 #[tauri::command]
 pub async fn get_gateway_status(state: State<'_, AppState>) -> Result<Value, String> {
     let uptime = state
@@ -45,6 +163,22 @@ pub async fn save_provider(state: State<'_, AppState>, mut provider: Provider) -
     let _ = mgr.sync_claude_settings_if_intercepted();
     let _ = mgr.sync_pi_models_if_intercepted();
     Ok(())
+}
+
+/// 重新排列服务商：列表顺序即路由优先级，返回重排后的完整列表
+#[tauri::command]
+pub async fn reorder_providers(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<Provider>, String> {
+    state
+        .db
+        .reorder_providers(&ids)
+        .map_err(|e| e.to_string())?;
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    let _ = mgr.sync_codex_catalog_if_intercepted();
+    let _ = mgr.sync_pi_models_if_intercepted();
+    state.db.get_providers().map_err(|e| e.to_string())
 }
 
 /// Deletes a provider and returns the routing rules that survive it, because a
@@ -263,15 +397,15 @@ pub async fn import_third_party_provider(
 }
 
 /// Explain what the gateway would do with a model name, using the very same
-/// resolver the proxy runs, so the advanced page cannot drift from reality.
+/// resolver the proxy runs, so the routing page cannot drift from reality.
 #[tauri::command]
-pub async fn preview_route(
+pub async fn explain_route(
     state: State<'_, AppState>,
     model: String,
-) -> Result<gateway_router::RoutePlan, String> {
+) -> Result<gateway_router::RouteExplanation, String> {
     let providers = state.db.get_providers().map_err(|e| e.to_string())?;
     let routes = state.db.get_routes().map_err(|e| e.to_string())?;
-    gateway_router::plan_route(&model, &providers, &routes)
+    Ok(gateway_router::explain_route(&model, &providers, &routes))
 }
 
 #[tauri::command]

@@ -238,9 +238,9 @@ const LogInspector: React.FC<LogInspectorProps> = ({
           <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05]">
             <span className="text-[10px] text-zinc-400 block mb-0.5">预估成本</span>
             <span className="text-sm font-mono font-bold text-emerald-600 dark:text-emerald-400">
-              {cost > 0 ? formatCurrency(cost) : '¥0.00'}
+              {formatCurrency(cost)}
             </span>
-            <span className="text-[9px] text-zinc-400 block mt-0.5">公价费率</span>
+            <span className="text-[9px] text-zinc-400 block mt-0.5">按官方公价估算</span>
           </div>
 
           <div className="p-3 rounded-md bg-zinc-500/[0.05] dark:bg-white/[0.05]">

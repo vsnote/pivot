@@ -100,13 +100,41 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// 数据库里存着服务商 API 密钥：目录 0700、文件 0600，
+/// 否则同机其他账号能直接读走全部密钥。不支持的平台上静默跳过。
+fn restrict_to_owner(path: &std::path::Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+}
+
 impl Database {
     pub fn new(db_path: PathBuf) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
+            restrict_to_owner(parent, 0o700);
         }
 
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path)?;
+        // SQLite 按 umask 创建文件，这里在打开后逐个纠正（含 WAL/SHM）
+        for suffix in ["", "-wal", "-shm"] {
+            let p = if suffix.is_empty() {
+                db_path.clone()
+            } else {
+                db_path.with_file_name(format!(
+                    "{}{}",
+                    db_path.file_name().and_then(|n| n.to_str()).unwrap_or("pivot.db"),
+                    suffix
+                ))
+            };
+            if p.exists() {
+                restrict_to_owner(&p, 0o600);
+            }
+        }
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -420,6 +448,21 @@ impl Database {
         Ok(())
     }
 
+    /// 按传入顺序重写 priority：列表顺序即路由优先级，排在最前的先被使用。
+    pub fn reorder_providers(&self, ids: &[String]) -> Result<(), rusqlite::Error> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let total = ids.len() as i32;
+        for (index, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE providers SET priority = ?1 WHERE id = ?2",
+                params![(total - index as i32) * 10, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn set_provider_enabled(&self, id: &str, enabled: bool) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute("UPDATE providers SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
@@ -666,8 +709,16 @@ impl Database {
 mod provider_tests {
     use super::*;
 
+    // 每个测试用一个独立子目录：Database::new 会把父目录收紧到 0700，
+    // 直接放在系统临时目录上会改掉 /tmp 的权限，影响同机其他进程
     fn temp_db_path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("omni-{}-{}.db", label, uuid::Uuid::new_v4()))
+        let dir = std::env::temp_dir().join(format!(
+            "omni-test-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("test.db")
     }
 
     fn provider_fixture(id: &str, name: &str, preset_id: Option<&str>) -> Provider {
@@ -697,6 +748,31 @@ mod provider_tests {
         let db = Database::new(path.clone()).unwrap();
         assert!(db.get_providers().unwrap().is_empty());
         assert!(db.get_routes().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reordering_rewrites_priority_and_locks_the_list_order() {
+        let path = temp_db_path("reorder");
+        let db = Database::new(path.clone()).unwrap();
+        for (id, name) in [("alpha", "Alpha"), ("beta", "Beta"), ("gamma", "Gamma")] {
+            db.save_provider(&provider_fixture(id, name, None)).unwrap();
+        }
+
+        db.reorder_providers(&[
+            "gamma".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+        ])
+        .unwrap();
+
+        let providers = db.get_providers().unwrap();
+        let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["gamma", "alpha", "beta"]);
+        assert_eq!(providers[0].priority, 30);
+        assert_eq!(providers[2].priority, 10);
+
         drop(db);
         let _ = std::fs::remove_file(path);
     }

@@ -134,7 +134,7 @@ pub mod imp {
                 return nil;
             }
 
-            let titles: Vec<id> = ["服务商", "客户端", "高级设置", "监控", "日志", "关于"]
+            let titles: Vec<id> = ["服务商", "客户端", "路由", "监控", "日志", "关于"]
                 .iter()
                 .map(|&title| NSString::alloc(nil).init_str(title))
                 .collect();

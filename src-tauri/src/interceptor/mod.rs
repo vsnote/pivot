@@ -1672,6 +1672,13 @@ fn load_native_codex_models_cache() -> HashMap<String, Value> {
 }
 
 pub fn resolve_model_context_window(model_name: &str) -> (u64, u64) {
+    // 目录命中优先：models.dev 的上下文与输出上限比名称猜测准确
+    if let Some(m) = crate::model_catalog::lookup(model_name, None) {
+        if let Some(ctx) = m.context_window {
+            return (ctx, m.max_output.unwrap_or(ctx));
+        }
+    }
+
     let lower = model_name.to_lowercase();
     let name = lower.split('/').last().unwrap_or(&lower);
 
@@ -1692,6 +1699,100 @@ pub fn resolve_model_context_window(model_name: &str) -> (u64, u64) {
     }
 }
 
+/// 按模型名推断可接受的输入模态。
+/// 默认只声明 text：漏标多模态的代价只是用户少贴一张图，而误标成 image
+/// 会让不支持图片的上游直接返回 400，所以只有明确识别为视觉模型时才放开。
+pub fn resolve_model_input_modalities(model_name: &str) -> Vec<&'static str> {
+    let lower = model_name.to_lowercase();
+    let name = lower.split('/').last().unwrap_or(&lower);
+
+    // 图像生成 / 嵌入 / 语音等辅助模型不接收图片输入。
+    // 这条判断先于目录：目录把生图模型的 text+image 理解为「输出/处理」而非对话输入
+    let is_aux = name.contains("image")
+        || name.contains("imagen")
+        || name.contains("dall-e")
+        || name.contains("flux")
+        || name.contains("embed")
+        || name.contains("tts")
+        || name.contains("whisper")
+        || name.contains("audio")
+        || name.contains("realtime");
+    if is_aux {
+        return vec!["text"];
+    }
+
+    // 目录命中优先，未命中或目录没写模态时回落到名称启发式
+    if let Some(m) = crate::model_catalog::lookup(model_name, None) {
+        let mods = m.client_input_modalities();
+        if !mods.is_empty() {
+            return mods;
+        }
+    }
+
+    let is_vision = name.starts_with("gpt-4o")
+        || name.starts_with("gpt-4.1")
+        || name.starts_with("gpt-4-turbo")
+        || name.starts_with("gpt-5")
+        || name.starts_with("gpt-6")
+        || name.starts_with("chatgpt-4o")
+        || name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+        || name.starts_with("claude-3")
+        || name.starts_with("claude-4")
+        || name.starts_with("claude-sonnet")
+        || name.starts_with("claude-opus")
+        || name.starts_with("claude-haiku")
+        || (name.starts_with("gemini")
+            && !name.starts_with("gemini-1.0")
+            && !name.starts_with("gemini-pro"))
+        || name.starts_with("grok-4")
+        || name.contains("-vl")
+        || name.contains("vision")
+        || name.contains("llava")
+        || name.contains("pixtral")
+        || name.contains("internvl")
+        || name.contains("glm-4v")
+        || name.contains("glm-4.1v")
+        || name.contains("step-1v")
+        || name.contains("llama-4");
+
+    if is_vision {
+        vec!["text", "image"]
+    } else {
+        vec!["text"]
+    }
+}
+
+/// 获取服务商已声明的全部模型（包含 default_model 并去重）
+fn provider_declared_models(provider: &Provider) -> Vec<String> {
+    let mut models = Vec::new();
+    if let Some(ref dm) = provider.default_model {
+        let dm_trimmed = dm.trim();
+        if !dm_trimmed.is_empty() {
+            models.push(dm_trimmed.to_string());
+        }
+    }
+    for m in &provider.models {
+        let trimmed = m.trim().to_string();
+        if !trimmed.is_empty() && !models.contains(&trimmed) {
+            models.push(trimmed);
+        }
+    }
+    models
+}
+
+/// 统计每个模型在已启用的服务商中被多少个服务商所声明，用于同名冲突加前缀消歧
+fn count_model_providers(providers: &[Provider]) -> HashMap<String, usize> {
+    let mut count = HashMap::new();
+    for provider in providers.iter().filter(|p| p.enabled) {
+        for m in provider_declared_models(provider) {
+            *count.entry(m).or_insert(0) += 1;
+        }
+    }
+    count
+}
+
 pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
     let native_cache = load_native_codex_models_cache();
     let mut models = Vec::new();
@@ -1699,20 +1800,7 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
     let mut priority = 1000;
 
     for provider in providers.iter().filter(|p| p.enabled) {
-        let mut all_models = Vec::new();
-        if let Some(ref dm) = provider.default_model {
-            let dm_trimmed = dm.trim();
-            if !dm_trimmed.is_empty() {
-                all_models.push(dm_trimmed.to_string());
-            }
-        }
-        for m in &provider.models {
-            let trimmed = m.trim().to_string();
-            if !trimmed.is_empty() && !all_models.contains(&trimmed) {
-                all_models.push(trimmed);
-            }
-        }
-
+        let all_models = provider_declared_models(provider);
         let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
         for model_name in all_models {
             let slug = if model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
@@ -1757,7 +1845,7 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
                     "context_window": context_window,
                     "max_context_window": max_context_window,
                     "effective_context_window_percent": 95,
-                    "input_modalities": ["text", "image"],
+                    "input_modalities": resolve_model_input_modalities(&model_name),
                     "shell_type": "shell_command",
                     "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
                     "default_reasoning_level": default_reasoning_level,
@@ -1862,53 +1950,19 @@ pub fn generate_claude_model_picker(
     }
 
     // 2. 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
-    let mut model_provider_count: HashMap<String, HashSet<String>> = HashMap::new();
-    for provider in providers.iter().filter(|p| p.enabled) {
-        let mut prov_models = HashSet::new();
-        for m in &provider.models {
-            let trimmed = m.trim();
-            if !trimmed.is_empty() {
-                prov_models.insert(trimmed.to_string());
-            }
-        }
-        if let Some(ref dm) = provider.default_model {
-            let trimmed = dm.trim();
-            if !trimmed.is_empty() {
-                prov_models.insert(trimmed.to_string());
-            }
-        }
-        for m in prov_models {
-            model_provider_count
-                .entry(m)
-                .or_default()
-                .insert(provider.id.clone());
-        }
-    }
+    let model_provider_count = count_model_providers(providers);
 
     // 3. 所有已启用服务商的所有可用模型
     for provider in providers.iter().filter(|p| p.enabled) {
-        let mut provider_models = Vec::new();
-        if let Some(ref dm) = provider.default_model {
-            let dm_trimmed = dm.trim();
-            if !dm_trimmed.is_empty() {
-                provider_models.push(dm_trimmed.to_string());
-            }
-        }
-        for m in &provider.models {
-            let trimmed = m.trim().to_string();
-            if !trimmed.is_empty() && !provider_models.contains(&trimmed) {
-                provider_models.push(trimmed);
-            }
-        }
-
+        let provider_models = provider_declared_models(provider);
         let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
 
         for model_name in provider_models {
             let behaves_as = resolve_claude_behaves_as(&model_name);
             let is_duplicate = model_provider_count
                 .get(&model_name)
-                .map(|s| s.len() > 1)
-                .unwrap_or(false);
+                .copied()
+                .unwrap_or(0) > 1;
 
             if is_duplicate {
                 let prefixed = format!("{}/{}", provider_prefix, model_name);
@@ -1969,7 +2023,7 @@ pub fn generate_pi_models_list(
                     "id": id,
                     "name": format!("{} · Pivot 动态路由", label),
                     "reasoning": is_reasoning,
-                    "input": ["text", "image"],
+                    "input": resolve_model_input_modalities(target_m),
                     "contextWindow": ctx,
                     "maxTokens": 16384,
                 }));
@@ -1978,70 +2032,41 @@ pub fn generate_pi_models_list(
     }
 
     // 2. 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
-    let mut model_provider_count: HashMap<String, HashSet<String>> = HashMap::new();
-    for provider in providers.iter().filter(|p| p.enabled) {
-        let mut prov_models = HashSet::new();
-        for m in &provider.models {
-            let trimmed = m.trim();
-            if !trimmed.is_empty() {
-                prov_models.insert(trimmed.to_string());
-            }
-        }
-        if let Some(ref dm) = provider.default_model {
-            let trimmed = dm.trim();
-            if !trimmed.is_empty() {
-                prov_models.insert(trimmed.to_string());
-            }
-        }
-        for m in prov_models {
-            model_provider_count
-                .entry(m)
-                .or_default()
-                .insert(provider.id.clone());
-        }
-    }
+    let model_provider_count = count_model_providers(providers);
 
     // 3. 所有已启用服务商的所有可用模型
+    // 默认服务商的兜底模型先记下来，等清单生成后按同一套 id 规则回填，避免 defaultModel 指向不存在的 id
+    let default_target = providers
+        .iter()
+        .find(|p| p.is_default && p.enabled)
+        .and_then(|p| {
+            let m = p
+                .default_model
+                .as_deref()
+                .or_else(|| p.models.first().map(|s| s.as_str()))?
+                .trim()
+                .to_string();
+            if m.is_empty() {
+                None
+            } else {
+                Some((p.id.clone(), m))
+            }
+        });
+
     let mut preferred_model = None;
 
-    if let Some(def_prov) = providers.iter().find(|p| p.is_default && p.enabled) {
-        let prefix = def_prov.name.to_lowercase().replace(' ', "-");
-        if let Some(dm) = def_prov.default_model.as_deref().or_else(|| def_prov.models.first().map(|s| s.as_str())) {
-            let trimmed = dm.trim();
-            if !trimmed.is_empty() {
-                preferred_model = Some(if trimmed.to_lowercase().starts_with(&format!("{}/", prefix)) {
-                    trimmed.to_string()
-                } else {
-                    format!("{}/{}", prefix, trimmed)
-                });
-            }
-        }
-    }
-
     for provider in providers.iter().filter(|p| p.enabled) {
-        let mut provider_models = Vec::new();
-        if let Some(ref dm) = provider.default_model {
-            let dm_trimmed = dm.trim();
-            if !dm_trimmed.is_empty() {
-                provider_models.push(dm_trimmed.to_string());
-            }
-        }
-        for m in &provider.models {
-            let trimmed = m.trim().to_string();
-            if !trimmed.is_empty() && !provider_models.contains(&trimmed) {
-                provider_models.push(trimmed);
-            }
-        }
-
+        let provider_models = provider_declared_models(provider);
         let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
 
         for model_name in provider_models {
             let is_duplicate = model_provider_count
                 .get(&model_name)
-                .map(|s| s.len() > 1)
-                .unwrap_or(false);
+                .copied()
+                .unwrap_or(0) > 1;
 
-            let slug = if model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
+            // 跨服务商重名才带前缀，否则用模型原名：每个模型在列表里只出现一次
+            let id = if model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
                 model_name.clone()
             } else if is_duplicate {
                 format!("{}/{}", provider_prefix, model_name)
@@ -2049,35 +2074,28 @@ pub fn generate_pi_models_list(
                 model_name.clone()
             };
 
-            if !seen_ids.contains(&slug) {
-                seen_ids.insert(slug.clone());
-                let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
-                let is_reasoning = !levels.is_empty() && default_lvl != "none";
-                let (ctx, _) = resolve_model_context_window(&model_name);
-                models.push(json!({
-                    "id": slug,
-                    "name": format!("{} ({})", model_name, provider.name),
-                    "reasoning": is_reasoning,
-                    "input": ["text", "image"],
-                    "contextWindow": ctx,
-                    "maxTokens": 16384,
-                }));
+            if !seen_ids.insert(id.clone()) {
+                continue;
             }
 
-            let prefixed = format!("{}/{}", provider_prefix, model_name);
-            if !seen_ids.contains(&prefixed) {
-                seen_ids.insert(prefixed.clone());
-                let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
-                let is_reasoning = !levels.is_empty() && default_lvl != "none";
-                let (ctx, _) = resolve_model_context_window(&model_name);
-                models.push(json!({
-                    "id": prefixed,
-                    "name": format!("{} ({})", model_name, provider.name),
-                    "reasoning": is_reasoning,
-                    "input": ["text", "image"],
-                    "contextWindow": ctx,
-                    "maxTokens": 16384,
-                }));
+            let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
+            let is_reasoning = !levels.is_empty() && default_lvl != "none";
+            let (ctx, _) = resolve_model_context_window(&model_name);
+            models.push(json!({
+                "id": id,
+                "name": format!("{} ({})", model_name, provider.name),
+                "reasoning": is_reasoning,
+                "input": resolve_model_input_modalities(&model_name),
+                "contextWindow": ctx,
+                "maxTokens": 16384,
+            }));
+
+            if preferred_model.is_none() {
+                if let Some((ref def_provider, ref def_model)) = default_target {
+                    if *def_provider == provider.id && *def_model == model_name {
+                        preferred_model = Some(id);
+                    }
+                }
             }
         }
     }
@@ -2091,6 +2109,10 @@ pub fn generate_pi_models_list(
 
 /// Accurately resolves supported reasoning levels and default effort for a model
 pub fn resolve_model_reasoning_spec(model_name: &str) -> (Vec<Value>, &'static str) {
+    // 目录只用来补强：聚合商条目的 reasoning 标记并不可靠，
+    // 因此目录说 true 时给未知模型补一组通用档位，说 false 时不推翻名称启发式
+    let catalog_reasoning = crate::model_catalog::lookup(model_name, None).map(|m| m.reasoning);
+
     let lower = model_name.to_lowercase();
     let name = lower.split('/').last().unwrap_or(&lower);
 
@@ -2243,6 +2265,7 @@ pub fn resolve_model_reasoning_spec(model_name: &str) -> (Vec<Value>, &'static s
     }
 
     // 7. General Custom / Unknown Models: Default to none with option to configure
+    // 目录已知是推理模型但名称规则不认识时，默认给一组通用档位
     (
         vec![
             json!({ "description": "Default", "effort": "none" }),
@@ -2250,7 +2273,11 @@ pub fn resolve_model_reasoning_spec(model_name: &str) -> (Vec<Value>, &'static s
             json!({ "description": "Medium Thinking", "effort": "medium" }),
             json!({ "description": "High Thinking", "effort": "high" }),
         ],
-        "none",
+        if catalog_reasoning == Some(true) {
+            "medium"
+        } else {
+            "none"
+        },
     )
 }
 
@@ -2523,9 +2550,24 @@ followUpQueueMode = "queue"
 
         let (models, preferred_model) = generate_pi_models_list(&[provider1], &[]);
         assert!(!models.is_empty());
-        assert_eq!(preferred_model, Some("anthropic/claude-3-7-sonnet".to_string()));
-        let has_sonnet = models.iter().any(|m| m["id"] == "claude-3-7-sonnet" || m["id"] == "anthropic/claude-3-7-sonnet");
-        assert!(has_sonnet);
+        // 模型不重名时用原名，且 defaultModel 必须指向清单里真实存在的 id
+        assert_eq!(preferred_model, Some("claude-3-7-sonnet".to_string()));
+        let sonnet_count = models.iter().filter(|m| m["id"] == "claude-3-7-sonnet").count();
+        assert_eq!(sonnet_count, 1, "每个模型在清单里只能出现一次");
+    }
+
+    #[test]
+    fn test_resolve_model_input_modalities() {
+        assert_eq!(resolve_model_input_modalities("gpt-4o-mini"), vec!["text", "image"]);
+        assert_eq!(resolve_model_input_modalities("claude-3-7-sonnet"), vec!["text", "image"]);
+        assert_eq!(resolve_model_input_modalities("gemini-2.5-pro"), vec!["text", "image"]);
+        assert_eq!(resolve_model_input_modalities("qwen2.5-vl-72b"), vec!["text", "image"]);
+        // 未识别的模型保守只声明 text，避免上游 400
+        assert_eq!(resolve_model_input_modalities("deepseek-v4-pro"), vec!["text"]);
+        assert_eq!(resolve_model_input_modalities("gpt-3.5-turbo"), vec!["text"]);
+        // 辅助模型不接收图片输入
+        assert_eq!(resolve_model_input_modalities("gpt-image-1"), vec!["text"]);
+        assert_eq!(resolve_model_input_modalities("text-embedding-3-large"), vec!["text"]);
     }
 
     #[test]

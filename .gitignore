@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Design previews & exploration assets
+preview_*.html
+/public/generated-logos/
+src-tauri/icons/tray-icon-22.png
+

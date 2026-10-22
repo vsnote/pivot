@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Button } from '@/components/common/Button';
+import { PivotLogo } from '@/components/common/PivotLogo';
 import {
   Download,
   Upload,
@@ -214,7 +215,10 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {/* 卡片 4：关于信息与架构理念 */}
-      <div className="pt-3 text-center space-y-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+      <div className="pt-3 text-center space-y-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+        <div className="flex items-center justify-center mb-1">
+          <PivotLogo variant="icon" className="w-8 h-8 rounded-lg shadow-xs" />
+        </div>
         <div className="flex items-center justify-center gap-1.5">
           <span className="text-xs font-bold tracking-wider text-zinc-800 dark:text-zinc-200 font-mono">
             PIVOT
@@ -225,7 +229,7 @@ export const SettingsView: React.FC = () => {
         </div>
         <p>面向开发者的本地 AI 智能网关与模型中继器</p>
         <p className="text-[10px] text-zinc-400 dark:text-zinc-600 pt-0.5">
-          纯本地运行 · 密钥与配置均保存在本机 Keychain 与本地 SQLite · 无任何云端遥测
+          纯本地运行 · 密钥与配置保存在本机 ~/.pivot/pivot.db（仅当前系统用户可读写） · 无任何云端遥测
         </p>
       </div>
     </div>

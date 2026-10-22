@@ -173,8 +173,10 @@ export const BrandIconRenderers: Record<string, React.FC<{ className?: string }>
     </svg>
   ),
   "pi": ({ className = 'w-4 h-4' }) => (
-    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
-      <path d="M4.5 4.5C4.5 3.67 5.17 3 6 3H18C18.83 3 19.5 3.67 19.5 4.5C19.5 5.33 18.83 6 18 6H16V16C16 17.66 17.34 19 19 19C19.55 19 20 19.45 20 20C20 20.55 19.55 21 19 21C16.24 21 14 18.76 14 16V6H10V18C10 18.83 9.33 19.5 8.5 19.5C7.67 19.5 7 18.83 7 18V6H6C5.17 6 4.5 5.33 4.5 4.5Z" />
+    <svg viewBox="0 0 560 560" className={className} aria-hidden="true">
+      <path fill="#F09082" d="M0 0H420V280H280V140H0Z" />
+      <path fill="#4D9ABF" d="M0 140H140V280H280V420H140V560H0Z" />
+      <path fill="#F1BE58" d="M420 280H560V560H420Z" />
     </svg>
   ),
 };

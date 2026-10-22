@@ -143,6 +143,80 @@ pub fn plan_route(
     providers: &[Provider],
     routes: &[RouteRule],
 ) -> Result<RoutePlan, String> {
+    plan_route_inner(incoming_model, providers, routes, &mut None)
+}
+
+/// One evaluated step in the resolution pipeline. `rule_id` is set when the
+/// step belongs to a routing rule, letting the UI link it back to the editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteStep {
+    pub layer: String,
+    pub matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    pub detail: String,
+}
+
+/// `plan_route` plus the trace of every layer it tried, for the routing page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteExplanation {
+    pub incoming: String,
+    pub steps: Vec<RouteStep>,
+    pub plan: Option<RoutePlan>,
+    pub error: Option<String>,
+}
+
+/// Resolve `model` and explain the result. Unlike `plan_route`, this never
+/// fails: the error is part of the explanation.
+pub fn explain_route(
+    incoming_model: &str,
+    providers: &[Provider],
+    routes: &[RouteRule],
+) -> RouteExplanation {
+    let mut steps = Vec::new();
+    let result = {
+        let mut trace = Some(&mut steps);
+        plan_route_inner(incoming_model, providers, routes, &mut trace)
+    };
+    let (plan, error) = match result {
+        Ok(plan) => (Some(plan), None),
+        Err(error) => (None, Some(error)),
+    };
+    RouteExplanation {
+        incoming: incoming_model.to_string(),
+        steps,
+        plan,
+        error,
+    }
+}
+
+/// Record a trace step. The closure only runs when a trace is attached, so the
+/// gateway's hot path stays allocation-free.
+fn note(
+    trace: &mut Option<&mut Vec<RouteStep>>,
+    layer: &str,
+    matched: bool,
+    rule_id: Option<&str>,
+    detail: impl FnOnce() -> String,
+) {
+    if let Some(steps) = trace.as_deref_mut() {
+        steps.push(RouteStep {
+            layer: layer.to_string(),
+            matched,
+            rule_id: rule_id.map(str::to_string),
+            detail: detail(),
+        });
+    }
+}
+
+fn plan_route_inner(
+    incoming_model: &str,
+    providers: &[Provider],
+    routes: &[RouteRule],
+    trace: &mut Option<&mut Vec<RouteStep>>,
+) -> Result<RoutePlan, String> {
     let mut active_providers: Vec<&Provider> = providers.iter().filter(|p| p.enabled).collect();
     if active_providers.is_empty() {
         return Err("No active providers enabled in Pivot".to_string());
@@ -177,11 +251,19 @@ pub fn plan_route(
                     .copied()
             });
         if let Some(provider) = matched {
+            note(trace, "prefix", true, None, || {
+                format!("前缀 {} 直接命中服务商 {}", prefix, provider.name)
+            });
             return Ok(RoutePlan {
                 primary: planned(provider, sub_model),
                 fallbacks: automatic_fallbacks(&active_providers, &provider.id, sub_model),
             });
         }
+        note(trace, "prefix", false, None, || {
+            format!("前缀 {} 不对应任何已启用的服务商", prefix)
+        });
+    } else {
+        note(trace, "prefix", false, None, || "模型名不含服务商前缀".to_string());
     }
 
     // 2. Routing rules stay available as explicit overrides.
@@ -189,10 +271,19 @@ pub fn plan_route(
     sorted_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
 
     for rule in &sorted_rules {
-        if !rule.enabled || !pattern_matches(&rule.pattern, incoming_model) {
+        if !rule.enabled {
+            continue;
+        }
+        if !pattern_matches(&rule.pattern, incoming_model) {
+            note(trace, "rule", false, Some(&rule.id), || {
+                format!("模式 {} 不匹配", rule.pattern)
+            });
             continue;
         }
         let Some(primary_provider) = provider_map.get(rule.target_provider_id.as_str()) else {
+            note(trace, "rule", false, Some(&rule.id), || {
+                format!("模式 {} 命中，但目标服务商已停用或不存在", rule.pattern)
+            });
             continue;
         };
 
@@ -213,6 +304,18 @@ pub fn plan_route(
             .filter_map(|p| candidate_model(p, &desired_model).map(|model| planned(p, &model)))
             .collect();
 
+        let layer = if rule.id.starts_with("tier-") {
+            "role"
+        } else {
+            "rule"
+        };
+        note(trace, layer, true, Some(&rule.id), || {
+            format!(
+                "模式 {} 命中，固定到 {} / {}",
+                rule.pattern, primary_provider.name, desired_model
+            )
+        });
+
         return Ok(RoutePlan {
             primary: planned(primary_provider, &desired_model),
             fallbacks,
@@ -224,34 +327,52 @@ pub fn plan_route(
         .iter()
         .find(|p| lists_model(p, incoming_model))
     {
+        note(trace, "exact", true, None, || {
+            format!("{} 在服务商优先级中最先声明该模型", provider.name)
+        });
         return Ok(RoutePlan {
             primary: planned(provider, incoming_model),
             fallbacks: automatic_fallbacks(&active_providers, &provider.id, incoming_model),
         });
     }
+    note(trace, "exact", false, None, || {
+        "没有已启用的服务商精确声明该模型".to_string()
+    });
 
     // 3.5. Smart normalized match (e.g. date versions, bracketed [1M], latest suffixes)
     for provider in &active_providers {
         if let Some(matched) = find_declared_or_normalized_model(provider, incoming_model) {
+            note(trace, "normalized", true, None, || {
+                format!("{} 通过归一化匹配到 {}", provider.name, matched)
+            });
             return Ok(RoutePlan {
                 primary: planned(provider, &matched),
                 fallbacks: automatic_fallbacks(&active_providers, &provider.id, &matched),
             });
         }
     }
+    note(trace, "normalized", false, None, || {
+        "没有可归一化匹配的模型".to_string()
+    });
 
     // 4. Unknown model name: hand it to the default provider.
-    let default_provider = active_providers
-        .iter()
-        .find(|p| p.is_default)
-        .ok_or_else(|| {
-            format!(
-                "Model '{}' is not declared by any enabled provider and no default provider is configured; mark one provider as default in Pivot",
-                incoming_model
-            )
-        })?;
+    let Some(default_provider) = active_providers.iter().find(|p| p.is_default) else {
+        note(trace, "default", false, None, || {
+            "没有配置默认服务商".to_string()
+        });
+        return Err(format!(
+            "Model '{}' is not declared by any enabled provider and no default provider is configured; mark one provider as default in Pivot",
+            incoming_model
+        ));
+    };
     let model = candidate_model(default_provider, incoming_model)
         .unwrap_or_else(|| incoming_model.to_string());
+    note(trace, "default", true, None, || {
+        format!(
+            "未命中前几层，交给默认服务商 {} / {}",
+            default_provider.name, model
+        )
+    });
 
     Ok(RoutePlan {
         primary: planned(default_provider, &model),
@@ -721,4 +842,94 @@ mod tests {
         assert_eq!(plan3.primary.provider_id, "openai");
         assert_eq!(plan3.primary.model, "gpt-4o-2024-08-06");
     }
+    #[test]
+    fn explain_route_traces_every_layer() {
+        let providers = vec![
+            provider("anthropic", &["claude-3-7-sonnet"], 20),
+            as_default(with_default_model(
+                provider("catch-all", &["some-model"], 10),
+                "gemini-3.8-flash-high",
+            )),
+        ];
+
+        // Prefix routing wins before any rule is considered.
+        let explained = explain_route("anthropic/claude-3-7-sonnet", &providers, &[]);
+        assert_eq!(explained.steps[0].layer, "prefix");
+        assert!(explained.steps[0].matched);
+        assert_eq!(explained.plan.unwrap().primary.model, "claude-3-7-sonnet");
+
+        // A tier rule is labelled as a role step and keeps its rule id.
+        let mut tier = rule("claude-3-7-sonnet", "catch-all", &[]);
+        tier.id = "tier-main".to_string();
+        tier.target_model = Some("gpt-6.1-sol".to_string());
+        let explained = explain_route("claude-3-7-sonnet", &providers, &[tier]);
+        let role = explained
+            .steps
+            .iter()
+            .find(|step| step.layer == "role")
+            .expect("role step");
+        assert!(role.matched);
+        assert_eq!(role.rule_id.as_deref(), Some("tier-main"));
+        assert_eq!(explained.plan.unwrap().primary.model, "gpt-6.1-sol");
+
+        // Exact declaration.
+        let explained = explain_route("claude-3-7-sonnet", &providers, &[]);
+        assert!(explained
+            .steps
+            .iter()
+            .any(|step| step.layer == "exact" && step.matched));
+
+        // Normalized matching (declared date suffix, requested base name).
+        let dated = vec![provider("anthropic", &["claude-3-7-sonnet-20250219"], 20)];
+        let explained = explain_route("claude-3-7-sonnet", &dated, &[]);
+        assert!(explained
+            .steps
+            .iter()
+            .any(|step| step.layer == "normalized" && step.matched));
+
+        // Default provider for an unknown name.
+        let explained = explain_route("brand-new-model", &providers, &[]);
+        assert!(explained
+            .steps
+            .iter()
+            .any(|step| step.layer == "default" && step.matched));
+        assert_eq!(explained.plan.unwrap().primary.provider_id, "catch-all");
+    }
+
+    #[test]
+    fn explain_route_reports_failures_with_the_step_that_failed() {
+        let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 10)];
+        let explained = explain_route("brand-new-model", &providers, &[]);
+
+        assert!(explained.plan.is_none());
+        assert!(explained
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("default provider"));
+        assert!(explained
+            .steps
+            .iter()
+            .any(|step| step.layer == "default" && !step.matched));
+    }
+
+    #[test]
+    fn explain_route_marks_rules_with_unavailable_targets_as_skipped() {
+        let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 10)];
+        let mut orphan = rule("deepseek-*", "gone", &[]);
+        orphan.id = "custom-orphan".to_string();
+
+        let explained = explain_route("deepseek-v4-pro", &providers, &[orphan]);
+        let step = explained
+            .steps
+            .iter()
+            .find(|step| step.rule_id.as_deref() == Some("custom-orphan"))
+            .expect("rule step");
+
+        assert!(!step.matched);
+        assert!(step.detail.contains("已停用或不存在"));
+        // The skipped rule does not stop exact resolution.
+        assert_eq!(explained.plan.unwrap().primary.provider_id, "deepseek");
+    }
+
 }

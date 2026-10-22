@@ -2,10 +2,12 @@ import React, { useEffect, useSyncExternalStore } from 'react';
 import { applyAppTheme, useAppStore } from '@/store/useAppStore';
 import { Header } from '@/components/layout/Header';
 import { ClientsView, ProviderList } from '@/components/providers/ProviderList';
+import { RoutesView } from '@/components/routes/RoutesView';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
 import { RequestLogs } from '@/components/logs/RequestLogs';
 import { SettingsView } from '@/components/settings/SettingsView';
 import { X, AlertCircle } from 'lucide-react';
+import { loadModelRates } from '@/utils/pricing';
 import './App.css';
 
 const subscribeColorScheme = (onChange: () => void) => {
@@ -52,6 +54,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     fetchInitialData();
+    loadModelRates();
   }, []);
 
   // 全局快捷键：⌘1-4 切换主要页面，⌘N 快速打开新增服务商
@@ -74,11 +77,14 @@ export const App: React.FC = () => {
           setActiveTab('providers');
         } else if (event.key === '2') {
           event.preventDefault();
-          setActiveTab('clients');
+          setActiveTab('routes');
         } else if (event.key === '3') {
           event.preventDefault();
-          setActiveTab('logs');
+          setActiveTab('clients');
         } else if (event.key === '4') {
+          event.preventDefault();
+          setActiveTab('logs');
+        } else if (event.key === '5') {
           event.preventDefault();
           setSettingsSection('about');
           setActiveTab('settings');
@@ -145,6 +151,9 @@ export const App: React.FC = () => {
         >
           <div className={activeTab === 'providers' ? 'block' : 'hidden'}>
             {isProviderEditorOpen ? <ProviderEditor /> : <ProviderList />}
+          </div>
+          <div className={activeTab === 'routes' ? 'block' : 'hidden'}>
+            <RoutesView />
           </div>
           <div className={activeTab === 'clients' ? 'block' : 'hidden'}>
             <ClientsView />

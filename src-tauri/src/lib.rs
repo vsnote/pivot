@@ -4,6 +4,7 @@ pub mod db;
 pub mod gateway;
 pub mod interceptor;
 pub mod macos_tab;
+pub mod model_catalog;
 pub mod state;
 pub mod tray;
 
@@ -45,7 +46,14 @@ fn get_db_path() -> PathBuf {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db_path = get_db_path();
-    let db = Database::new(db_path).expect("Failed to initialize SQLite database");
+    let db = Database::new(db_path.clone()).expect("Failed to initialize SQLite database");
+
+    // 模型能力目录：先加载本地缓存，网络刷新在 setup 中后台进行
+    let catalog_path = db_path
+        .parent()
+        .map(|dir| dir.join("model-catalog.json"))
+        .unwrap_or_else(|| PathBuf::from("model-catalog.json"));
+    model_catalog::init(catalog_path.clone());
 
     let router = Arc::new(RoutingEngine::new());
     let http_client = reqwest::Client::builder()
@@ -86,6 +94,25 @@ pub fn run() {
             let _ = interceptor_mgr.sync_claude_settings_if_intercepted();
             let _ = interceptor_mgr.sync_pi_models_if_intercepted();
 
+            // 后台刷新模型目录：缓存仍在 TTL 内则跳过；刷新成功后重写依赖模型能力的客户端配置
+            if !model_catalog::is_fresh(24 * 60 * 60) {
+                let client = http_client.clone();
+                let path = catalog_path.clone();
+                let db_for_catalog = db.clone();
+                tauri::async_runtime::spawn(async move {
+                    match model_catalog::refresh(&client, &path).await {
+                        Ok(count) => {
+                            tracing::info!("Model catalog refreshed: {} entries", count);
+                            let mgr =
+                                interceptor::InterceptorManager::new(db_for_catalog, DEFAULT_PORT);
+                            let _ = mgr.sync_codex_catalog_if_intercepted();
+                            let _ = mgr.sync_pi_models_if_intercepted();
+                        }
+                        Err(e) => tracing::warn!("Model catalog refresh failed: {}", e),
+                    }
+                });
+            }
+
             let gw_state = GatewayState {
                 db,
                 router,
@@ -100,8 +127,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_gateway_status,
+            get_model_rates,
+            get_model_capabilities,
             get_providers,
             save_provider,
+            reorder_providers,
             set_provider_enabled,
             delete_provider,
             test_provider_latency,
@@ -114,7 +144,7 @@ pub fn run() {
             toggle_interceptor,
             import_third_party_provider,
             get_presets,
-            preview_route,
+            explain_route,
             fetch_provider_models,
             sync_native_tab,
             set_native_toolbar_enabled,

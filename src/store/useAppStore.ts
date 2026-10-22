@@ -10,7 +10,7 @@ import {
   Preset,
   Provider,
   RequestLog,
-  RoutePlan,
+  RouteExplanation,
   RouteRule,
 } from '@/types';
 
@@ -47,11 +47,12 @@ interface AppStore {
   refreshStats: () => Promise<void>;
   fetchInterceptors: () => Promise<void>;
   saveProvider: (p: Provider) => Promise<void>;
+  reorderProviders: (orderedIds: string[]) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   testProviderLatency: (id: string) => Promise<number>;
   toggleProvider: (id: string, enabled: boolean) => Promise<void>;
   saveRoutes: (routes: RouteRule[]) => Promise<void>;
-  previewRoute: (model: string) => Promise<RoutePlan>;
+  explainRoute: (model: string) => Promise<RouteExplanation>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
   importThirdPartyProvider: (id: string) => Promise<void>;
   clearLogs: () => Promise<void>;
@@ -59,6 +60,9 @@ interface AppStore {
 }
 
 const SETTINGS_SECTIONS: SettingsSection[] = ['clients', 'routes', 'gateway', 'logs', 'about'];
+
+// 连续拖拽时只认最后一次请求，避免先发后到的响应覆盖新顺序
+let reorderSeq = 0;
 const LEGACY_TABS: Partial<Record<ActiveTab, SettingsSection>> = {
   dashboard: 'gateway',
   routes: 'routes',
@@ -99,14 +103,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'providers',
   setActiveTab: (tab) => {
     const section = LEGACY_TABS[tab] ?? (tab === 'logs' ? 'logs' : get().settingsSection);
-    const activeTab =
-      tab === 'logs' ? 'logs' : tab === 'providers' || tab === 'clients' ? tab : 'settings';
+    const isTopLevel =
+      tab === 'providers' || tab === 'clients' || tab === 'routes' || tab === 'logs';
+    const activeTab = isTopLevel ? tab : 'settings';
     set({ activeTab, settingsSection: section });
     if (isNativeRuntime()) {
       invoke('sync_native_tab', {
-        tab: activeTab === 'providers' || activeTab === 'clients' ? activeTab : section,
-      })
-        .catch((error) => console.warn('无法同步原生导航', error));
+        tab: activeTab === 'settings' ? section : activeTab,
+      }).catch((error) => console.warn('无法同步原生导航', error));
     }
   },
   settingsSection: 'about',
@@ -218,14 +222,44 @@ export const useAppStore = create<AppStore>((set, get) => ({
   saveProvider: async (provider: Provider) => {
     try {
       await invoke('save_provider', { provider });
-      // A successful write must not be reported as failed if a subsequent list request fails.
-      set((state) => ({ providers: [...state.providers
+      // 原地更新，保持当前列表顺序：编辑服务商不应让它在列表里跳动。
+      // 列表顺序只在加载时由后端决定，新建的服务商追加到末尾。
+      set((state) => {
+        const exists = state.providers.some((p) => p.id === provider.id);
+        const next = exists
+          ? state.providers.map((p) => (p.id === provider.id ? provider : p))
+          : [...state.providers, provider];
         // 后端保证默认服务商唯一，本地列表立即跟上，避免出现两个默认标记。
-        .filter((p) => p.id !== provider.id)
-        .map((p) => (provider.isDefault ? { ...p, isDefault: false } : p)), provider]
-        .sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)) }));
+        return {
+          providers: provider.isDefault
+            ? next.map((p) => (p.id === provider.id ? p : { ...p, isDefault: false }))
+            : next,
+        };
+      });
     } catch (err: unknown) {
       set({ error: String(err) });
+      throw err;
+    }
+  },
+
+  reorderProviders: async (orderedIds: string[]) => {
+    const seq = ++reorderSeq;
+    const previous = get().providers;
+    // 先按释放顺序就地更新，避免等待后端时列表跳回旧顺序
+    const byId = new Map(previous.map((provider) => [provider.id, provider] as const));
+    set({
+      providers: orderedIds
+        .map((id) => byId.get(id))
+        .filter((provider): provider is Provider => Boolean(provider)),
+    });
+    try {
+      // 列表顺序即路由优先级，后端重写 priority 后返回权威顺序
+      const providers = await invoke<Provider[]>('reorder_providers', { ids: orderedIds });
+      if (seq !== reorderSeq) return;
+      set({ providers, error: null });
+    } catch (err: unknown) {
+      if (seq !== reorderSeq) return;
+      set({ providers: previous, error: `调整顺序失败：${String(err)}` });
       throw err;
     }
   },
@@ -278,9 +312,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  // The gateway owns model resolution, so the advanced page asks it instead of
+  // The gateway owns model resolution, so the routing page asks it instead of
   // guessing in the browser.
-  previewRoute: (model: string) => invoke<RoutePlan>('preview_route', { model }),
+  explainRoute: (model: string) => invoke<RouteExplanation>('explain_route', { model }),
 
   toggleInterceptor: async (id: string, enable: boolean) => {
     try {
@@ -338,7 +372,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         // 监听 macOS 原生 NSSegmentedControl 切换事件
         const unlistenTab = await listen<string>('native-tab-selected', (event) => {
           const tabId = event.payload;
-          if (tabId === 'providers' || tabId === 'clients') {
+          if (tabId === 'providers' || tabId === 'clients' || tabId === 'routes') {
             set({ activeTab: tabId });
           } else if (SETTINGS_SECTIONS.includes(tabId as SettingsSection)) {
             set({ activeTab: 'settings', settingsSection: tabId as SettingsSection });

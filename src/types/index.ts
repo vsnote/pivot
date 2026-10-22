@@ -75,6 +75,23 @@ export interface RoutePlan {
   fallbacks: PlannedCandidate[];
 }
 
+export type RouteLayer = 'prefix' | 'role' | 'rule' | 'exact' | 'normalized' | 'default';
+
+/** One layer the gateway tried while resolving a model name. */
+export interface RouteStep {
+  layer: RouteLayer;
+  matched: boolean;
+  ruleId?: string;
+  detail: string;
+}
+
+export interface RouteExplanation {
+  incoming: string;
+  steps: RouteStep[];
+  plan: RoutePlan | null;
+  error: string | null;
+}
+
 export interface GatewayStats {
   isRunning: boolean;
   host: string;

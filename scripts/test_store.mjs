@@ -117,15 +117,23 @@ test('初始数据未就绪时不能打开编辑页，真实数据到达后旧�
   assert.ok(!calls.some(([command]) => command === 'save_provider'));
 });
 
-test('路由预览使用网关照常解析，结果原样返回', async () => {
+test('路由试算使用网关照常解析，判定过程与计划原样返回', async () => {
   const calls = [];
-  const plan = { primary: { providerId: 'antigravity', model: 'gemini-3.8-flash-high' }, fallbacks: [] };
+  const explanation = {
+    incoming: 'claude-3-7-sonnet',
+    steps: [{ layer: 'role', matched: true, ruleId: 'tier-main', detail: '角色槽位命中' }],
+    plan: {
+      primary: { providerId: 'antigravity', model: 'gemini-3.8-flash-high' },
+      fallbacks: [],
+    },
+    error: null,
+  };
   const store = await createStore({ invoke: async (...args) => {
     calls.push(args);
-    if (args[0] === 'preview_route') return plan;
+    if (args[0] === 'explain_route') return explanation;
   } });
-  assert.deepEqual(await store.getState().previewRoute('claude-3-7-sonnet'), plan);
-  assert.deepEqual(calls, [['preview_route', { model: 'claude-3-7-sonnet' }]]);
+  assert.deepEqual(await store.getState().explainRoute('claude-3-7-sonnet'), explanation);
+  assert.deepEqual(calls, [['explain_route', { model: 'claude-3-7-sonnet' }]]);
 });
 
 test('日志事件保留每次尝试，尝试链在前端不被裁剪', async () => {
