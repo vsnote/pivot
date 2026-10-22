@@ -1,6 +1,6 @@
 use crate::gateway::types::*;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub struct ResponsesSseState {
     pub response_id: String,
@@ -19,6 +19,7 @@ pub struct ResponsesSseState {
     pub total_tokens: u32,
     pub stream_finished: bool,
     pub is_compaction: bool,
+    pub custom_tools: HashSet<String>,
 }
 
 #[derive(Default, Clone)]
@@ -34,6 +35,17 @@ impl ResponsesSseState {
     }
 
     pub fn new_with_compaction(response_id: &str, model: &str, is_compaction: bool) -> Self {
+        let mut custom_tools = HashSet::new();
+        custom_tools.insert("exec".to_string());
+        Self::new_full(response_id, model, is_compaction, custom_tools)
+    }
+
+    pub fn new_full(
+        response_id: &str,
+        model: &str,
+        is_compaction: bool,
+        custom_tools: HashSet<String>,
+    ) -> Self {
         let item_suffix = uuid::Uuid::new_v4().to_string().replace('-', "");
         Self {
             response_id: response_id.to_string(),
@@ -52,6 +64,7 @@ impl ResponsesSseState {
             total_tokens: 0,
             stream_finished: false,
             is_compaction,
+            custom_tools,
         }
     }
 
@@ -250,7 +263,7 @@ impl ResponsesSseState {
             ));
         }
 
-        let output: Vec<Value>;
+        let mut output = Vec::new();
 
         if self.is_compaction {
             let comp_item = json!({
@@ -276,87 +289,110 @@ impl ResponsesSseState {
                     "item": comp_item
                 }),
             ));
-            output = vec![comp_item];
-        } else if self.in_tool_call && !self.tool_calls_buf.is_empty() {
-            let mut tool_items = Vec::new();
-            for (idx, buf) in &self.tool_calls_buf {
-                let call_id = if buf.id.is_empty() {
-                    format!("call_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string())
-                } else {
-                    buf.id.clone()
-                };
-                let fc_item = json!({
-                    "id": format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
-                    "object": "response.output_item",
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": buf.name,
-                    "arguments": buf.arguments,
-                    "status": "completed"
-                });
-                events.push(Self::sse(
-                    "response.output_item.added",
-                    &json!({
-                        "type": "response.output_item.added",
-                        "output_index": idx,
-                        "item": fc_item
-                    }),
-                ));
-                events.push(Self::sse(
-                    "response.output_item.done",
-                    &json!({
-                        "type": "response.output_item.done",
-                        "output_index": idx,
-                        "item": fc_item
-                    }),
-                ));
-                tool_items.push(fc_item);
-            }
-            output = tool_items;
+            output.push(comp_item);
         } else {
-            if self.text_started {
+            let mut next_output_index = 0;
+            if self.text_started && !self.full_text.is_empty() {
                 events.push(Self::sse(
                     "response.output_text.done",
                     &json!({
                         "type": "response.output_text.done",
                         "item_id": self.item_id,
-                        "output_index": 0,
+                        "output_index": next_output_index,
                         "content_index": 0,
                         "text": self.full_text
                     }),
                 ));
+                let msg_item = json!({
+                    "id": self.item_id,
+                    "object": "response.output_item",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": self.full_text,
+                        "annotations": []
+                    }]
+                });
                 events.push(Self::sse(
                     "response.output_item.done",
                     &json!({
                         "type": "response.output_item.done",
-                        "output_index": 0,
-                        "item": {
-                            "id": self.item_id,
-                            "object": "response.output_item",
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{
-                                "type": "output_text",
-                                "text": self.full_text,
-                                "annotations": []
-                            }]
-                        }
+                        "output_index": next_output_index,
+                        "item": msg_item
                     }),
                 ));
+                output.push(msg_item);
+                next_output_index += 1;
             }
-            output = vec![json!({
-                "id": self.item_id,
-                "object": "response.output_item",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{
-                    "type": "output_text",
-                    "text": self.full_text,
-                    "annotations": []
-                }]
-            })];
+
+            if self.in_tool_call && !self.tool_calls_buf.is_empty() {
+                for (_idx, buf) in &self.tool_calls_buf {
+                    let call_id = if buf.id.is_empty() {
+                        format!("call_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string())
+                    } else {
+                        buf.id.clone()
+                    };
+
+                    let is_custom = self.custom_tools.contains(&buf.name) || buf.name == "exec";
+                    let tc_item = if is_custom {
+                        let input_val = extract_custom_tool_input(&buf.arguments, &buf.name);
+                        json!({
+                            "id": format!("ctc_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
+                            "object": "response.output_item",
+                            "type": "custom_tool_call",
+                            "call_id": call_id,
+                            "name": buf.name,
+                            "input": input_val,
+                            "status": "completed"
+                        })
+                    } else {
+                        json!({
+                            "id": format!("fc_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
+                            "object": "response.output_item",
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": buf.name,
+                            "arguments": buf.arguments,
+                            "status": "completed"
+                        })
+                    };
+
+                    events.push(Self::sse(
+                        "response.output_item.added",
+                        &json!({
+                            "type": "response.output_item.added",
+                            "output_index": next_output_index,
+                            "item": tc_item
+                        }),
+                    ));
+                    events.push(Self::sse(
+                        "response.output_item.done",
+                        &json!({
+                            "type": "response.output_item.done",
+                            "output_index": next_output_index,
+                            "item": tc_item
+                        }),
+                    ));
+                    output.push(tc_item);
+                    next_output_index += 1;
+                }
+            } else if output.is_empty() {
+                let empty_item = json!({
+                    "id": self.item_id,
+                    "object": "response.output_item",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": self.full_text,
+                        "annotations": []
+                    }]
+                });
+                output.push(empty_item);
+            }
         }
 
         events.push(Self::sse(
@@ -381,6 +417,110 @@ impl ResponsesSseState {
         ));
 
         events
+    }
+}
+
+/// Extract raw custom tool input (e.g. JavaScript code for `exec`) from arguments
+pub fn extract_custom_tool_input(arguments: &str, tool_name: &str) -> String {
+    if tool_name == "exec" {
+        if let Ok(val) = serde_json::from_str::<Value>(arguments) {
+            if let Some(code) = val.get("code").and_then(Value::as_str) {
+                return code.to_string();
+            }
+            if let Some(code) = val.get("input").and_then(Value::as_str) {
+                return code.to_string();
+            }
+        }
+    }
+    arguments.to_string()
+}
+
+/// Extract names of tools configured as custom tools (e.g. `exec`) from incoming Responses request
+pub fn extract_custom_tool_names(body: &Value) -> HashSet<String> {
+    let mut set = HashSet::new();
+    set.insert("exec".to_string());
+    if let Some(arr) = body.get("input").or_else(|| body.get("messages")).and_then(Value::as_array) {
+        for item in arr {
+            if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                if let Some(tools) = item.get("tools").and_then(Value::as_array) {
+                    collect_custom_tools_recursive(tools, &mut set);
+                }
+            }
+        }
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        collect_custom_tools_recursive(tools, &mut set);
+    }
+    set
+}
+
+fn collect_custom_tools_recursive(tools: &[Value], set: &mut HashSet<String>) {
+    for t in tools {
+        let t_type = t.get("type").and_then(Value::as_str).unwrap_or("");
+        if t_type == "namespace" {
+            if let Some(sub) = t.get("tools").and_then(Value::as_array) {
+                collect_custom_tools_recursive(sub, set);
+            }
+        } else if t_type == "custom" {
+            if let Some(name) = t.get("name").and_then(Value::as_str) {
+                if !name.is_empty() {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+    }
+}
+
+fn parse_tools_list(tools_arr: &[Value], chat_tools: &mut Vec<OpenAITool>) {
+    for t in tools_arr {
+        let t_type = t.get("type").and_then(Value::as_str).unwrap_or("");
+        if t_type == "namespace" {
+            if let Some(sub_tools) = t.get("tools").and_then(Value::as_array) {
+                parse_tools_list(sub_tools, chat_tools);
+            }
+        } else if let Some(func_val) = t.get("function") {
+            if let Ok(func) = serde_json::from_value::<OpenAIFunction>(func_val.clone()) {
+                if !chat_tools.iter().any(|existing| existing.function.name == func.name) {
+                    chat_tools.push(OpenAITool {
+                        tool_type: "function".to_string(),
+                        function: func,
+                    });
+                }
+            }
+        } else {
+            let name = t.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let description = t.get("description").and_then(Value::as_str).map(|s| s.to_string());
+            let parameters = if let Some(p) = t.get("parameters") {
+                p.clone()
+            } else if t_type == "custom" || name == "exec" {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "JavaScript code to execute in isolate"
+                        }
+                    },
+                    "required": ["code"]
+                })
+            } else {
+                json!({})
+            };
+
+            if !chat_tools.iter().any(|existing| existing.function.name == name) {
+                chat_tools.push(OpenAITool {
+                    tool_type: "function".to_string(),
+                    function: OpenAIFunction {
+                        name,
+                        description,
+                        parameters,
+                    },
+                });
+            }
+        }
     }
 }
 
@@ -428,6 +568,7 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
         .to_string();
 
     let mut messages: Vec<OpenAIMessage> = Vec::new();
+    let mut chat_tools: Vec<OpenAITool> = Vec::new();
 
     // 1. instructions / system prompt
     if let Some(inst) = body.get("instructions").or_else(|| body.get("system")) {
@@ -489,6 +630,17 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                 let itype = item.get("type").and_then(Value::as_str).unwrap_or("");
                 let role = item.get("role").and_then(Value::as_str).unwrap_or("");
 
+                if itype == "additional_tools" {
+                    if let Some(tools_arr) = item.get("tools").and_then(Value::as_array) {
+                        parse_tools_list(tools_arr, &mut chat_tools);
+                    }
+                    continue;
+                }
+
+                if itype == "reasoning" {
+                    continue;
+                }
+
                 if itype == "compaction" {
                     if !pending_tool_calls.is_empty() {
                         messages.push(OpenAIMessage {
@@ -535,7 +687,7 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                     continue;
                 }
 
-                if itype == "function_call_output" {
+                if itype == "function_call_output" || itype == "custom_tool_call_output" {
                     if !pending_tool_calls.is_empty() {
                         messages.push(OpenAIMessage {
                             role: "assistant".to_string(),
@@ -556,6 +708,18 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                         .map(|v| {
                             if let Some(s) = v.as_str() {
                                 s.to_string()
+                            } else if let Some(arr) = v.as_array() {
+                                let mut text_buf = String::new();
+                                for part in arr {
+                                    if let Some(s) = part.as_str() {
+                                        text_buf.push_str(s);
+                                    } else if let Some(t) = part.get("text").and_then(Value::as_str) {
+                                        text_buf.push_str(t);
+                                    } else {
+                                        text_buf.push_str(&part.to_string());
+                                    }
+                                }
+                                text_buf
                             } else {
                                 v.to_string()
                             }
@@ -569,7 +733,7 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                         reasoning_content: None,
                         name: None,
                     });
-                } else if itype == "function_call" {
+                } else if itype == "function_call" || itype == "custom_tool_call" {
                     let call_id = item
                         .get("call_id")
                         .and_then(Value::as_str)
@@ -580,11 +744,19 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    let arguments = item
-                        .get("arguments")
+                    let raw_args = if itype == "custom_tool_call" {
+                        item.get("input")
+                    } else {
+                        item.get("arguments")
+                    };
+                    let arguments = raw_args
                         .map(|v| {
                             if let Some(s) = v.as_str() {
-                                s.to_string()
+                                if itype == "custom_tool_call" && (name == "exec" || !s.trim().starts_with('{')) {
+                                    json!({"code": s}).to_string()
+                                } else {
+                                    s.to_string()
+                                }
                             } else {
                                 v.to_string()
                             }
@@ -663,31 +835,9 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
         }
     }
 
-    // 3. tools
-    let mut chat_tools = Vec::new();
+    // 3. tools (merge with tools from body.tools)
     if let Some(tools_arr) = body.get("tools").and_then(Value::as_array) {
-        for t in tools_arr {
-            if let Some(func_val) = t.get("function") {
-                if let Ok(func) = serde_json::from_value::<OpenAIFunction>(func_val.clone()) {
-                    chat_tools.push(OpenAITool {
-                        tool_type: "function".to_string(),
-                        function: func,
-                    });
-                }
-            } else if t.get("type").and_then(Value::as_str) == Some("function") || t.get("name").is_some() {
-                let name = t.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                let description = t.get("description").and_then(Value::as_str).map(|s| s.to_string());
-                let parameters = t.get("parameters").cloned().unwrap_or(json!({}));
-                chat_tools.push(OpenAITool {
-                    tool_type: "function".to_string(),
-                    function: OpenAIFunction {
-                        name,
-                        description,
-                        parameters,
-                    },
-                });
-            }
-        }
+        parse_tools_list(tools_arr, &mut chat_tools);
     }
     let tools = if chat_tools.is_empty() { None } else { Some(chat_tools) };
 
@@ -727,6 +877,18 @@ pub fn chat_response_to_responses(
     model: &str,
     is_compaction: bool,
 ) -> Value {
+    let mut custom_tools = HashSet::new();
+    custom_tools.insert("exec".to_string());
+    chat_response_to_responses_full(chat_resp, response_id, model, is_compaction, &custom_tools)
+}
+
+pub fn chat_response_to_responses_full(
+    chat_resp: &Value,
+    response_id: &str,
+    model: &str,
+    is_compaction: bool,
+    custom_tools: &HashSet<String>,
+) -> Value {
     let choice = chat_resp
         .get("choices")
         .and_then(Value::as_array)
@@ -752,33 +914,61 @@ pub fn chat_response_to_responses(
             "status": "completed",
             "encrypted_content": text
         }));
-    } else if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-        for tc in tool_calls {
-            let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
+    } else {
+        let text = message.get("content").and_then(Value::as_str).unwrap_or("");
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+
+        if !text.is_empty() || !has_tool_calls {
             output.push(json!({
                 "id": format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
                 "object": "response.output_item",
-                "type": "function_call",
-                "call_id": tc.get("id").and_then(Value::as_str).unwrap_or("call_default"),
-                "name": fn_obj.get("name").and_then(Value::as_str).unwrap_or(""),
-                "arguments": fn_obj.get("arguments").and_then(Value::as_str).unwrap_or("{}"),
-                "status": "completed"
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": []
+                }]
             }));
         }
-    } else {
-        let text = message.get("content").and_then(Value::as_str).unwrap_or("");
-        output.push(json!({
-            "id": format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
-            "object": "response.output_item",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{
-                "type": "output_text",
-                "text": text,
-                "annotations": []
-            }]
-        }));
+
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for tc in tool_calls {
+                let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
+                let name = fn_obj.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = fn_obj.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let call_id = tc.get("id").and_then(Value::as_str).unwrap_or("call_default");
+
+                let is_custom = custom_tools.contains(name) || name == "exec";
+                if is_custom {
+                    let input_val = extract_custom_tool_input(args, name);
+                    output.push(json!({
+                        "id": format!("ctc_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
+                        "object": "response.output_item",
+                        "type": "custom_tool_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "input": input_val,
+                        "status": "completed"
+                    }));
+                } else {
+                    output.push(json!({
+                        "id": format!("fc_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
+                        "object": "response.output_item",
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": args,
+                        "status": "completed"
+                    }));
+                }
+            }
+        }
     }
 
     json!({
@@ -951,5 +1141,145 @@ mod tests {
         assert_eq!(chat_req.messages[0].role, "system");
         assert!(chat_req.messages[0].content.as_ref().unwrap().to_string().contains("Prior conversation summary checkpoint"));
         assert_eq!(chat_req.messages[1].role, "user");
+    }
+
+    #[test]
+    fn test_additional_tools_and_custom_tool_calls() {
+        let req_json = json!({
+            "model": "work/gpt-6-astra",
+            "instructions": "You are Codex",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "id": "at_123",
+                    "role": "developer",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "functions",
+                            "tools": [
+                                {
+                                    "type": "custom",
+                                    "name": "exec",
+                                    "description": "Run JavaScript code to orchestrate tools"
+                                },
+                                {
+                                    "type": "function",
+                                    "name": "wait",
+                                    "description": "Wait for execution",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {
+                                            "cell_id": { "type": "string" }
+                                        },
+                                        "required": ["cell_id"]
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_123",
+                    "summary": [{ "type": "summary_text", "text": "Plan steps" }]
+                },
+                {
+                    "role": "user",
+                    "content": "Deploy project"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_123",
+                    "call_id": "call_abc",
+                    "name": "exec",
+                    "input": "const res = await tools.exec_command({cmd: 'git status'});"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "ctco_123",
+                    "call_id": "call_abc",
+                    "output": [
+                        { "type": "input_text", "text": "Clean working tree\n" }
+                    ]
+                }
+            ],
+            "stream": true
+        });
+
+        let custom_tools = extract_custom_tool_names(&req_json);
+        assert!(custom_tools.contains("exec"));
+
+        let chat_req = convert_responses_req_to_chat(&req_json);
+        assert_eq!(chat_req.model, "work/gpt-6-astra");
+
+        // System message + user message + assistant tool call + tool output = 4 messages
+        assert_eq!(chat_req.messages.len(), 4);
+        assert_eq!(chat_req.messages[0].role, "system");
+        assert_eq!(chat_req.messages[1].role, "user");
+        assert_eq!(chat_req.messages[2].role, "assistant");
+        let tc = chat_req.messages[2].tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0].id, "call_abc");
+        assert_eq!(tc[0].function.name, "exec");
+        assert!(tc[0].function.arguments.contains("const res = await tools.exec_command"));
+
+        assert_eq!(chat_req.messages[3].role, "tool");
+        assert_eq!(chat_req.messages[3].tool_call_id.as_deref(), Some("call_abc"));
+        assert_eq!(chat_req.messages[3].content.as_ref().unwrap(), &json!("Clean working tree\n"));
+
+        // Tools extracted from additional_tools
+        let tools = chat_req.tools.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].function.name, "exec");
+        assert!(tools[0].function.parameters.get("properties").and_then(|p| p.get("code")).is_some());
+        assert_eq!(tools[1].function.name, "wait");
+    }
+
+    #[test]
+    fn test_custom_tool_response_streaming_and_non_streaming() {
+        let mut custom_tools = HashSet::new();
+        custom_tools.insert("exec".to_string());
+
+        // 1. Streaming
+        let mut state = ResponsesSseState::new_full("resp_test_custom", "work/gpt-6-astra", false, custom_tools.clone());
+
+        let chunk1 = "data: {\"choices\": [{\"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_custom_1\", \"function\": {\"name\": \"exec\", \"arguments\": \"{\\\"code\\\":\\\"console.log(123);\\\"}\"}}]}}]}";
+        let _ = state.process_line(chunk1);
+        let evs = state.process_line("data: [DONE]");
+
+        let added_ev = evs.iter().find(|e| e.contains("response.output_item.added")).unwrap();
+        assert!(added_ev.contains("\"type\":\"custom_tool_call\""));
+        assert!(added_ev.contains("\"name\":\"exec\""));
+        assert!(added_ev.contains("\"input\":\"console.log(123);\""));
+
+        let completed_ev = evs.iter().find(|e| e.contains("response.completed")).unwrap();
+        assert!(completed_ev.contains("\"type\":\"custom_tool_call\""));
+
+        // 2. Non-streaming
+        let chat_resp = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_custom_2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec",
+                                "arguments": "{\"code\":\"console.log(456);\"}"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let responses_val = chat_response_to_responses_full(&chat_resp, "resp_test_custom2", "work/gpt-6-astra", false, &custom_tools);
+        let outputs = responses_val["output"].as_array().unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["type"], "custom_tool_call");
+        assert_eq!(outputs[0]["name"], "exec");
+        assert_eq!(outputs[0]["input"], "console.log(456);");
     }
 }

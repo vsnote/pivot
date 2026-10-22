@@ -140,7 +140,7 @@ pub fn create_gateway_router(state: GatewayState) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/messages", post(handle_messages))
         .route("/v1/chat/completions", post(handle_chat_completions))
-        .route("/v1/responses", post(handle_responses))
+        .route("/v1/responses", post(handle_responses).get(handle_responses_get))
         .route("/api/stats", get(get_stats))
         .layer(cors)
         .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
@@ -1100,6 +1100,20 @@ async fn handle_chat_completions(
         .into_response()
 }
 
+/// Fallback for GET or WebSocket upgrade probes on `/v1/responses`
+async fn handle_responses_get() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "message": "WebSocket streaming is not supported on Pivot responses gateway; please use HTTP POST for /v1/responses (set supports_websockets = false in ~/.codex/config.toml).",
+                "type": "invalid_request_error"
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// Handler for OpenAI Responses API clients (e.g. Codex CLI / Desktop) calling `/v1/responses`
 async fn handle_responses(
     State(state): State<GatewayState>,
@@ -1134,6 +1148,7 @@ async fn handle_responses(
     let routes = state.db.get_routes().unwrap_or_default();
 
     let is_compaction = responses::is_compaction_request(&body);
+    let custom_tools = responses::extract_custom_tool_names(&body);
     let req = responses::convert_responses_req_to_chat(&body);
     let is_stream = req.stream.unwrap_or(true);
 
@@ -1249,9 +1264,10 @@ async fn handle_responses(
                     let response_id = format!("resp_{}", req_id.replace('-', ""));
                     let model_str = req.model.clone();
                     let byte_stream = result.response.into_body().into_data_stream();
+                    let custom_tools_clone = custom_tools.clone();
 
                     let responses_stream = stream! {
-                        let mut sse_state = responses::ResponsesSseState::new_with_compaction(&response_id, &model_str, is_compaction);
+                        let mut sse_state = responses::ResponsesSseState::new_full(&response_id, &model_str, is_compaction, custom_tools_clone);
                         let mut buffer = String::new();
 
                         for await chunk_res in byte_stream {
@@ -1292,7 +1308,7 @@ async fn handle_responses(
                         .unwrap_or_default();
                     let chat_json: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
                     let resp_id = format!("resp_{}", req_id.replace('-', ""));
-                    let responses_val = responses::chat_response_to_responses(&chat_json, &resp_id, &req.model, is_compaction);
+                    let responses_val = responses::chat_response_to_responses_full(&chat_json, &resp_id, &req.model, is_compaction, &custom_tools);
                     return Json(responses_val).into_response();
                 }
             }
