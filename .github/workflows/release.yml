@@ -51,6 +51,8 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const { execSync } = require('child_process');
+
             const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
             const pkgVersion = pkg.version;
 
@@ -66,7 +68,119 @@ jobs:
 
             const isPrerelease = process.env.PRERELEASE === 'true';
 
-            // 查找或创建 Release
+            // 1. 从 Git Log 智能提取与分类提交记录 (Changelog)
+            function generateGitChangelog(tag) {
+              let prevTag = '';
+              try {
+                prevTag = execSync(`git describe --tags --abbrev=0 "${tag}^" 2>/dev/null`, { encoding: 'utf8' }).trim();
+              } catch (e) {
+                prevTag = '';
+              }
+
+              const range = prevTag ? `${prevTag}..${tag}` : (tag || 'HEAD');
+              let rawLog = '';
+              try {
+                rawLog = execSync(`git log ${range} --pretty=format:"%h|%s" --no-merges`, { encoding: 'utf8' }).trim();
+              } catch (e) {
+                return '';
+              }
+              if (!rawLog) return '';
+
+              const categories = {
+                features: { title: '### 🚀 新功能 (Features)', items: [] },
+                fixes: { title: '### 🐛 漏洞修复 (Bug Fixes)', items: [] },
+                perf: { title: '### ⚡ 优化与重构 (Refactoring & Performance)', items: [] },
+                ui: { title: '### 💄 界面与体验 (UI & Styling)', items: [] },
+                maintenance: { title: '### 🔧 工具与构建 (Tooling & Maintenance)', items: [] },
+                others: { title: '### 📦 其他更新 (Other Changes)', items: [] },
+              };
+
+              const lines = rawLog.split('\n').filter(Boolean);
+              for (const line of lines) {
+                const sepIndex = line.indexOf('|');
+                if (sepIndex === -1) continue;
+                const hash = line.slice(0, sepIndex).trim();
+                const msg = line.slice(sepIndex + 1).trim();
+                if (!msg) continue;
+
+                const lower = msg.toLowerCase();
+                const item = `- ${msg} ([${hash}](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${hash}))`;
+
+                if (lower.startsWith('feat')) {
+                  categories.features.items.push(item);
+                } else if (lower.startsWith('fix')) {
+                  categories.fixes.items.push(item);
+                } else if (lower.startsWith('perf') || lower.startsWith('refactor')) {
+                  categories.perf.items.push(item);
+                } else if (lower.startsWith('style') || lower.startsWith('ui')) {
+                  categories.ui.items.push(item);
+                } else if (lower.startsWith('chore') || lower.startsWith('ci') || lower.startsWith('build')) {
+                  categories.maintenance.items.push(item);
+                } else {
+                  categories.others.items.push(item);
+                }
+              }
+
+              const sections = [];
+              for (const key of Object.keys(categories)) {
+                const cat = categories[key];
+                if (cat.items.length > 0) {
+                  sections.push(`${cat.title}\n\n${cat.items.join('\n')}`);
+                }
+              }
+
+              return sections.join('\n\n');
+            }
+
+            const gitChangelog = generateGitChangelog(tagName);
+
+            // 2. 尝试调用 GitHub API 获取 PR Notes (如包含贡献者等信息)
+            let apiNotes = '';
+            try {
+              const notesRes = await github.rest.repos.generateReleaseNotes({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tagName,
+                target_commitish: context.sha,
+              });
+              apiNotes = notesRes.data.body || '';
+            } catch (notesErr) {
+              console.log('generateReleaseNotes warning:', notesErr.message);
+            }
+
+            // 3. 组装说明文档，包含 macOS 各架构下载指引与安全拦截提示
+            const macosNotice = [
+              '### 🍎 macOS 安装与下载说明',
+              '',
+              '| 芯片架构 | 适用机型 | 安装包推荐 |',
+              '| :--- | :--- | :--- |',
+              '| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | `Pivot_*_aarch64.dmg` |',
+              '| **Intel** | 采用 Intel 处理器的传统 Mac | `Pivot_*_x64.dmg` |',
+              '',
+              '> **💡 首次打开提示「已损坏」或「无法打开」？**',
+              '> 由于开源分发未内置苹果商业付费证书签名，macOS Gatekeeper 可能会弹出拦截提示。可通过以下方式解决：',
+              '> 1. 打开系统「设置」->「隐私与安全性」，在安全性部分找到提示并点击「仍要打开」。',
+              '> 2. 或在终端 (Terminal) 中执行以下命令去除隔离标记：',
+              '>    ```bash',
+              '>    sudo xattr -r -d com.apple.quarantine /Applications/Pivot.app',
+              '>    ```',
+              '',
+              '---',
+              '',
+            ].join('\n');
+
+            let changelogContent = '';
+            if (gitChangelog) {
+              changelogContent = `## 📝 更新日志 (Changelog)\n\n${gitChangelog}`;
+            } else if (apiNotes) {
+              changelogContent = `## 📝 更新日志 (Changelog)\n\n${apiNotes}`;
+            } else {
+              changelogContent = `## 📝 更新日志 (Changelog)\n\n发布版本 ${tagName}。`;
+            }
+
+            const finalBody = `${macosNotice}${changelogContent}\n\n---\n**完整提交历史**: https://github.com/${context.repo.owner}/${context.repo.repo}/commits/${tagName}\n`;
+
+            // 4. 查找或创建 Release
             let release;
             try {
               const existing = await github.rest.repos.getReleaseByTag({
@@ -75,47 +189,15 @@ jobs:
                 tag: tagName,
               });
               release = existing.data;
-              console.log(`Found existing release ID: ${release.id}`);
+              console.log(`Found existing release ID: ${release.id}, updating body with Changelog...`);
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+                body: finalBody,
+              });
             } catch (err) {
               console.log(`Creating release for tag ${tagName}...`);
-
-              let generatedNotes = '';
-              try {
-                const notesRes = await github.rest.repos.generateReleaseNotes({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  tag_name: tagName,
-                  target_commitish: context.sha,
-                });
-                generatedNotes = notesRes.data.body || '';
-              } catch (notesErr) {
-                console.log('generateReleaseNotes warning:', notesErr.message);
-              }
-
-              const macosNotice = [
-                '### 🍎 macOS 安装与下载说明',
-                '',
-                '| 芯片架构 | 适用机型 | 安装包推荐 |',
-                '| :--- | :--- | :--- |',
-                '| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | `Pivot_*_aarch64.dmg` |',
-                '| **Intel** | 采用 Intel 处理器的传统 Mac | `Pivot_*_x64.dmg` |',
-                '',
-                '> **💡 首次打开提示「已损坏」或「无法打开」？**',
-                '> 由于开源分发未内置苹果商业付费证书签名，macOS Gatekeeper 可能会弹出拦截提示。可通过以下方式解决：',
-                '> 1. 打开系统「设置」->「隐私与安全性」，在安全性部分找到提示并点击「仍要打开」。',
-                '> 2. 或在终端 (Terminal) 中执行以下命令去除隔离标记：',
-                '>    ```bash',
-                '>    sudo xattr -r -d com.apple.quarantine /Applications/Pivot.app',
-                '>    ```',
-                '',
-                '---',
-                '',
-              ].join('\n');
-
-              const finalBody = generatedNotes
-                ? `${macosNotice}${generatedNotes}`
-                : `${macosNotice}### 📦 变更说明\n\n发布版本 ${tagName}。`;
-
               const created = await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -123,7 +205,7 @@ jobs:
                 target_commitish: context.sha,
                 name: `Pivot ${tagName}`,
                 body: finalBody,
-                draft: true, // 先建为 draft，等安装包全部构建上传完成后再发布
+                draft: true,
                 prerelease: isPrerelease,
               });
               release = created.data;
