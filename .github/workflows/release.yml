@@ -259,11 +259,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_CLI_NO_VERSION_CHECK: 'true'
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ needs.create-release.outputs.tag_name }}
-          args: --target ${{ matrix.target }} --no-version-check
+          args: --target ${{ matrix.target }} --ignore-version-mismatches
 
   publish-release:
     name: Publish Release
