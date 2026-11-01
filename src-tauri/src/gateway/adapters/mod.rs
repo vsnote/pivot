@@ -15,6 +15,7 @@ pub struct SseState {
     pub in_tool_block: bool,
     pub current_tool_id: Option<String>,
     pub current_tool_name: Option<String>,
+    pub last_thought_signature: Option<String>,
     pub total_output_tokens: u32,
     pub stream_finished: bool,
 }
@@ -77,8 +78,9 @@ pub fn parse_gemini_chunk_to_anthropic_events(
         Err(_) => return events,
     };
 
-    let candidates = value.get("candidates").and_then(Value::as_array);
-    let usage = value.get("usageMetadata");
+    let actual_val = value.get("response").unwrap_or(&value);
+    let candidates = actual_val.get("candidates").and_then(Value::as_array);
+    let usage = actual_val.get("usageMetadata");
     if candidates.is_none() && usage.is_none() {
         return events;
     }
@@ -111,6 +113,16 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                 .and_then(Value::as_array)
             {
                 for part in parts {
+                    if let Some(sig) = part
+                        .get("thoughtSignature")
+                        .or_else(|| part.get("thought_signature"))
+                        .and_then(Value::as_str)
+                    {
+                        state.last_thought_signature = Some(sig.to_string());
+                    }
+
+                    let is_thought = part.get("thought").and_then(Value::as_bool).unwrap_or(false);
+
                     if let Some(text) = part.get("text").and_then(Value::as_str) {
                         if text.is_empty() {
                             continue;
@@ -118,30 +130,59 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                         if state.in_tool_block {
                             close_active_anthropic_blocks(&mut events, state);
                         }
-                        if !state.in_text_block {
-                            state.in_text_block = true;
+
+                        if is_thought {
+                            if state.in_text_block {
+                                close_active_anthropic_blocks(&mut events, state);
+                            }
+                            if !state.in_thinking_block {
+                                state.in_thinking_block = true;
+                                events.push(format!(
+                                    "event: content_block_start\ndata: {}\n\n",
+                                    json!({
+                                        "type": "content_block_start",
+                                        "index": state.current_block_index,
+                                        "content_block": { "type": "thinking", "thinking": "" }
+                                    })
+                                ));
+                            }
                             events.push(format!(
-                                "event: content_block_start\ndata: {}\n\n",
+                                "event: content_block_delta\ndata: {}\n\n",
                                 json!({
-                                    "type": "content_block_start",
+                                    "type": "content_block_delta",
                                     "index": state.current_block_index,
-                                    "content_block": { "type": "text", "text": "" }
+                                    "delta": { "type": "thinking_delta", "thinking": text }
+                                })
+                            ));
+                        } else {
+                            if state.in_thinking_block {
+                                close_active_anthropic_blocks(&mut events, state);
+                            }
+                            if !state.in_text_block {
+                                state.in_text_block = true;
+                                events.push(format!(
+                                    "event: content_block_start\ndata: {}\n\n",
+                                    json!({
+                                        "type": "content_block_start",
+                                        "index": state.current_block_index,
+                                        "content_block": { "type": "text", "text": "" }
+                                    })
+                                ));
+                            }
+                            events.push(format!(
+                                "event: content_block_delta\ndata: {}\n\n",
+                                json!({
+                                    "type": "content_block_delta",
+                                    "index": state.current_block_index,
+                                    "delta": { "type": "text_delta", "text": text }
                                 })
                             ));
                         }
-                        events.push(format!(
-                            "event: content_block_delta\ndata: {}\n\n",
-                            json!({
-                                "type": "content_block_delta",
-                                "index": state.current_block_index,
-                                "delta": { "type": "text_delta", "text": text }
-                            })
-                        ));
                         state.total_output_tokens = state.total_output_tokens.saturating_add(1);
                     }
 
                     if let Some(function_call) = part.get("functionCall") {
-                        if state.in_text_block {
+                        if state.in_text_block || state.in_thinking_block {
                             close_active_anthropic_blocks(&mut events, state);
                         }
                         if !state.in_tool_block {
@@ -154,6 +195,20 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                             state.in_tool_block = true;
                             state.current_tool_id = Some(id.clone());
                             state.current_tool_name = Some(name.clone());
+
+                            let sig = part
+                                .get("thoughtSignature")
+                                .or_else(|| part.get("thought_signature"))
+                                .or_else(|| function_call.get("thoughtSignature"))
+                                .or_else(|| function_call.get("thought_signature"))
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_string())
+                                .or_else(|| state.last_thought_signature.clone());
+
+                            if let Some(ref s) = sig {
+                                anthropic_to_gemini::store_thought_signature(&id, &name, s);
+                            }
+
                             events.push(format!(
                                 "event: content_block_start\ndata: {}\n\n",
                                 json!({
@@ -183,10 +238,14 @@ pub fn parse_gemini_chunk_to_anthropic_events(
             }
 
             if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
-                let stop_reason = match reason {
-                    "MAX_TOKENS" => "max_tokens",
-                    "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" => "end_turn",
-                    _ => "end_turn",
+                let stop_reason = if state.current_tool_id.is_some() || reason == "FUNCTION_CALL" {
+                    "tool_use"
+                } else {
+                    match reason {
+                        "MAX_TOKENS" => "max_tokens",
+                        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" => "end_turn",
+                        _ => "end_turn",
+                    }
                 };
                 if let Some(output_tokens) = usage
                     .and_then(|u| u.get("candidatesTokenCount"))
@@ -504,27 +563,69 @@ pub fn parse_openai_chunk_to_anthropic_events(
 
 /// Convert an Anthropic SSE event to OpenAI SSE chunk format (`data: {...}\n\n`)
 pub fn parse_anthropic_event_to_openai_chunks(
-    line: &str,
+    raw: &str,
     msg_id: &str,
     model: &str,
 ) -> Vec<String> {
     let mut chunks = Vec::new();
-    let trimmed = line.trim();
 
-    if !trimmed.starts_with("data:") {
-        return chunks;
-    }
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("data:") {
+            continue;
+        }
 
-    let payload = trimmed.trim_start_matches("data:").trim();
-    let val: Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return chunks,
-    };
+        let payload = trimmed.trim_start_matches("data:").trim();
+        let val: Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
-    let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    match event_type {
+        match event_type {
+        "content_block_start" => {
+            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if let Some(block) = val.get("content_block") {
+                let btype = block.get("type").and_then(Value::as_str).unwrap_or("");
+                if btype == "tool_use" {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let chunk = json!({
+                        "id": msg_id,
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": index,
+                                    "id": id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": ""
+                                    }
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    });
+                    chunks.push(format!("data: {}\n\n", chunk));
+                }
+            }
+        }
         "content_block_delta" => {
+            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             let delta = val.get("delta");
             let delta_type = delta
                 .and_then(|d| d.get("type"))
@@ -545,6 +646,24 @@ pub fn parse_anthropic_event_to_openai_chunks(
                     });
                     chunks.push(format!("data: {}\n\n", chunk));
                 }
+            } else if delta_type == "thinking_delta" {
+                if let Some(thinking) = delta
+                    .and_then(|d| d.get("thinking"))
+                    .and_then(|t| t.as_str())
+                {
+                    let chunk = json!({
+                        "id": msg_id,
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "reasoning_content": thinking },
+                            "finish_reason": null
+                        }]
+                    });
+                    chunks.push(format!("data: {}\n\n", chunk));
+                }
             } else if delta_type == "input_json_delta" {
                 if let Some(partial) = delta
                     .and_then(|d| d.get("partial_json"))
@@ -559,7 +678,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
                             "index": 0,
                             "delta": {
                                 "tool_calls": [{
-                                    "index": 0,
+                                    "index": index,
                                     "function": { "arguments": partial }
                                 }]
                             },
@@ -598,6 +717,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
             chunks.push("data: [DONE]\n\n".to_string());
         }
         _ => {}
+        }
     }
 
     chunks
@@ -671,5 +791,73 @@ mod tests {
             "claude-3-7-sonnet",
         );
         assert!(done.is_empty());
+    }
+
+    #[test]
+    fn gemini_stream_with_thinking_and_tool_call() {
+        let mut state = SseState::new();
+
+        // 1. Thinking block (thought = true)
+        let chunk1 = r#"data: {"candidates":[{"content":{"parts":[{"text":"Thinking process...","thought":true}]}}]}"#;
+        let evts1 = parse_gemini_chunk_to_anthropic_events(chunk1, &mut state, "req-t", "gemini-2.5-pro");
+        let out1 = evts1.concat();
+        assert!(out1.contains(r#""type":"thinking""#));
+        assert!(out1.contains(r#""thinking":"Thinking process...""#));
+        assert!(!out1.contains(r#""type":"text""#));
+
+        // 2. Normal text
+        let chunk2 = r#"data: {"candidates":[{"content":{"parts":[{"text":"I will run the command."}]}}]}"#;
+        let evts2 = parse_gemini_chunk_to_anthropic_events(chunk2, &mut state, "req-t", "gemini-2.5-pro");
+        let out2 = evts2.concat();
+        assert!(out2.contains(r#""type":"text""#));
+        assert!(out2.contains("I will run the command."));
+
+        // 3. Tool call with thoughtSignature
+        let chunk3 = r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}},"thoughtSignature":"sig-123"}]}}]}"#;
+        let evts3 = parse_gemini_chunk_to_anthropic_events(chunk3, &mut state, "req-t", "gemini-2.5-pro");
+        let out3 = evts3.concat();
+        assert!(out3.contains(r#""type":"tool_use""#));
+        assert!(out3.contains(r#""name":"Bash""#));
+        assert!(out3.contains(r#""partial_json":"{\"command\":\"ls\"}""#));
+
+        // 4. Finish reason FUNCTION_CALL
+        let chunk4 = r#"data: {"candidates":[{"finishReason":"FUNCTION_CALL"}],"usageMetadata":{"candidatesTokenCount":12}}"#;
+        let evts4 = parse_gemini_chunk_to_anthropic_events(chunk4, &mut state, "req-t", "gemini-2.5-pro");
+        let out4 = evts4.concat();
+        assert!(out4.contains(r#""stop_reason":"tool_use""#));
+    }
+
+    #[test]
+    fn anthropic_stream_to_openai_chunks_tool_and_thinking() {
+        // 1. Tool start
+        let tool_start = r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_123","name":"Bash"}}"#;
+        let c1 = parse_anthropic_event_to_openai_chunks(tool_start, "req-oai", "gpt-4o");
+        assert_eq!(c1.len(), 1);
+        assert!(c1[0].contains(r#""id":"tool_123""#));
+        assert!(c1[0].contains(r#""name":"Bash""#));
+
+        // 2. Tool input delta
+        let tool_delta = r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"ls\"}"}}"#;
+        let c2 = parse_anthropic_event_to_openai_chunks(tool_delta, "req-oai", "gpt-4o");
+        assert_eq!(c2.len(), 1);
+        assert!(c2[0].contains(r#""arguments":"{\"cmd\":\"ls\"}""#));
+
+        // 3. Thinking delta
+        let think_delta = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me think"}}"#;
+        let c3 = parse_anthropic_event_to_openai_chunks(think_delta, "req-oai", "gpt-4o");
+        assert_eq!(c3.len(), 1);
+        assert!(c3[0].contains(r#""reasoning_content":"let me think""#));
+
+        // 4. Message delta with stop_reason = tool_use -> finish_reason = tool_calls
+        let msg_delta = r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}"#;
+        let c4 = parse_anthropic_event_to_openai_chunks(msg_delta, "req-oai", "gpt-4o");
+        assert_eq!(c4.len(), 1);
+        assert!(c4[0].contains(r#""finish_reason":"tool_calls""#));
+
+        // 5. Message stop -> [DONE]
+        let stop = r#"data: {"type":"message_stop"}"#;
+        let c5 = parse_anthropic_event_to_openai_chunks(stop, "req-oai", "gpt-4o");
+        assert_eq!(c5.len(), 1);
+        assert!(c5[0].contains("[DONE]"));
     }
 }

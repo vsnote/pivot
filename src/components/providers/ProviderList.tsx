@@ -439,6 +439,14 @@ function ProviderCard({
               默认
             </span>
           )}
+          {(provider.authType === 'subscription_pool' || provider.presetId === 'antigravity') && (
+            <span
+              title="官方账号订阅（多账号轮询）"
+              className="shrink-0 text-[10px] px-1.5 py-0.5 rounded font-normal bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800 leading-none"
+            >
+              订阅
+            </span>
+          )}
 
           <ProviderModelList provider={provider} />
         </div>

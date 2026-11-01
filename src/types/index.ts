@@ -6,6 +6,7 @@ export interface Provider {
   protocol: Protocol;
   baseUrl: string;
   presetId?: string | null;
+  authType?: string | null;
   apiKeys: string[];
   models: string[];
   /** Model to ask for when this provider does not declare the requested one. */
@@ -125,6 +126,35 @@ export interface InterceptorStatus {
   isOverwritten?: boolean;
 }
 
+export interface SubscriptionAccount {
+  id: string;
+  providerId: string;
+  accountType: string;
+  email?: string | null;
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresAt: number;
+  cooldownUntil: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QuotaBucket {
+  id: string;
+  label: string;
+  remainingFraction: number; // 0.0 ~ 1.0
+  resetTime?: string | null;
+  isExhausted: boolean;
+}
+
+export interface AccountQuota {
+  accountId: string;
+  updatedAt: number;
+  buckets: QuotaBucket[];
+  error?: string | null;
+}
+
 export interface Preset {
   id: string;
   name: string;
@@ -134,6 +164,7 @@ export interface Preset {
   description: string;
   icon?: string;
   category: string;
+  authType?: string | null;
 }
 
 export type SettingsSection = 'clients' | 'routes' | 'gateway' | 'logs' | 'about';

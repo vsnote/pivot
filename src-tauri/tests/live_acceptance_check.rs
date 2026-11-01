@@ -40,6 +40,7 @@ fn live_provider(id: &str, name: &str, url: &str, key: &str, models: &[String], 
         protocol: "openai".to_string(),
         base_url: url.to_string(),
         preset_id: None,
+        auth_type: None,
         api_keys: vec![key.to_string()],
         models: models.to_vec(),
         default_model: None,
@@ -203,4 +204,126 @@ async fn live_acceptance_with_providers_only() {
         .as_str()
         .unwrap_or_default()
         .contains("no default provider"));
+}
+
+#[tokio::test]
+#[ignore = "talks to real Antigravity upstream using ~/.pivot/pivot.db"]
+async fn test_live_real_antigravity_and_gemini() {
+    let home = dirs::home_dir().expect("no home dir");
+    let db_path = home.join(".pivot").join("pivot.db");
+    if !db_path.exists() {
+        println!("No ~/.pivot/pivot.db found, skipping live real test.");
+        return;
+    }
+    let db = Database::new(db_path).unwrap();
+    let stats = Arc::new(GatewayStatsInternal::default());
+    let router_engine = Arc::new(RoutingEngine::new());
+    let gw_state = GatewayState {
+        db: db.clone(),
+        router: router_engine,
+        http_client: reqwest::Client::new(),
+        app_handle: None,
+        stats: stats.clone(),
+    };
+
+    let gw_app = create_gateway_router(gw_state);
+    let port = 16920;
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, gw_app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = reqwest::Client::new();
+
+    // 1. Claude Code format with tools containing propertyNames and exclusiveMinimum (reproducing issue 7 & 8)
+    println!("Testing real Claude Code -> Antigravity Gemini upstream...");
+    let tool_schema = json!({
+        "type": "object",
+        "properties": {
+            "cmd": {
+                "type": "string",
+                "propertyNames": { "pattern": "^[a-z]+$" }
+            },
+            "timeout": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+            }
+        },
+        "required": ["cmd"]
+    });
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .json(&json!({
+            "model": "gemini-3.8-flash-high",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Please call the Bash tool with cmd 'echo hello'."}
+            ],
+            "tools": [{
+                "name": "Bash",
+                "description": "Run bash command",
+                "input_schema": tool_schema
+            }],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    println!("Real model response status: {}", status);
+    println!("Real model response body: {}", text);
+    assert!(status.is_success(), "Failed with status {}: {}", status, text);
+
+    // 2. Stream test
+    println!("Testing real streaming...");
+    let stream_resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .json(&json!({
+            "model": "gemini-3.8-flash-high",
+            "max_tokens": 50,
+            "messages": [
+                {"role": "user", "content": "Respond with 1 2 3."}
+            ],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(stream_resp.status().is_success());
+    let stream_body = stream_resp.text().await.unwrap();
+    println!("Real stream response events length: {}", stream_body.len());
+    assert!(stream_body.contains("event: message_start"));
+    assert!(stream_body.contains("event: content_block_delta"));
+
+    // 3. OpenAI format test (/v1/chat/completions -> real Antigravity upstream)
+    println!("Testing real OpenAI client (/v1/chat/completions) -> Antigravity Gemini upstream...");
+    let oai_resp = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .json(&json!({
+            "model": "gemini-3.8-flash-high",
+            "messages": [
+                {"role": "user", "content": "Say hello in one short sentence."}
+            ],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let oai_status = oai_resp.status();
+    let oai_val: Value = oai_resp.json().await.unwrap();
+    println!("Real OpenAI endpoint status: {}", oai_status);
+    println!("Real OpenAI response content: {:?}", oai_val["choices"][0]["message"]["content"]);
+    assert!(oai_status.is_success());
+    assert_eq!(oai_val["object"], "chat.completion");
+    assert!(oai_val["choices"][0]["message"]["content"].is_string());
+
+    println!("Real model live test PASSED!");
 }

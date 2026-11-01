@@ -14,6 +14,8 @@ import {
   AlertTriangle,
   HelpCircle,
   Zap,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Button } from '@/components/common/Button';
@@ -24,7 +26,8 @@ import {
   ProviderAvatar,
 } from '@/components/common/BrandIcons';
 import { useAppStore } from '@/store/useAppStore';
-import type { Preset, Protocol, Provider } from '@/types';
+import type { Preset, Protocol, Provider, SubscriptionAccount, AccountQuota } from '@/types';
+import clsx from 'clsx';
 import { Select } from '@/components/common/Select';
 import { Switch } from '@/components/common/Switch';
 import {
@@ -68,9 +71,34 @@ export function ProviderEditor() {
   );
   const [initial] = useState(() => createProviderDraft(editingProvider, presets, autoDefault));
   const [draft, setDraft] = useState(initial);
-  // 模型池：上游返回 ∪ 本次编辑中出现过的模型。
-  // 取消勾选只影响已选集合，模型留在池里，误点后可以立即选回
-  const [pool, setPool] = useState<string[]>(() => uniqueValues(initial.models));
+  const currentPreset = presets.find((p) => p.id === initial.presetId);
+  // 模型池：上游返回 ∪ 预设推荐 ∪ 本地已知候选池。
+  // 保持模型在池中的固有位置，不因模型被选中而置顶跳位
+  const [pool, setPool] = useState<string[]>(() => {
+    let cached: string[] = [];
+    if (initial.id) {
+      try {
+        const raw = localStorage.getItem(`pivot_provider_pool_${initial.id}`);
+        if (raw) cached = JSON.parse(raw);
+      } catch {}
+    }
+    const baseline = (currentPreset?.defaultModels && currentPreset.defaultModels.length > 0)
+      ? currentPreset.defaultModels
+      : cached;
+    return uniqueValues([
+      ...baseline,
+      ...cached,
+      ...(initial.models || []),
+    ]);
+  });
+
+  useEffect(() => {
+    if (draft.id && pool.length > 0) {
+      try {
+        localStorage.setItem(`pivot_provider_pool_${draft.id}`, JSON.stringify(pool));
+      } catch {}
+    }
+  }, [draft.id, pool]);
   const [choosing, setChoosing] = useState(!editingProvider);
   const [presetSearch, setPresetSearch] = useState('');
   const [showKeys, setShowKeys] = useState(false);
@@ -89,6 +117,209 @@ export function ProviderEditor() {
   const [latencyResult, setLatencyResult] = useState<{ success: boolean; ms?: number; error?: string } | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  const isSubscriptionPool = draft.authType === 'subscription_pool' || draft.presetId === 'antigravity';
+  const [subAccounts, setSubAccounts] = useState<SubscriptionAccount[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+
+  const [accountQuotas, setAccountQuotas] = useState<Record<string, AccountQuota>>({});
+  const [refreshingQuotaId, setRefreshingQuotaId] = useState<string | null>(null);
+  const [expandedQuotaAccounts, setExpandedQuotaAccounts] = useState<Record<string, boolean>>({});
+
+  const toggleExpandQuota = (accountId: string) => {
+    setExpandedQuotaAccounts((prev) => {
+      const nextState = !prev[accountId];
+      // 展开时若尚未查询额度，按需触发单账号实时查询
+      if (nextState && !accountQuotas[accountId]) {
+        fetchAccountQuota(accountId);
+      }
+      return { ...prev, [accountId]: nextState };
+    });
+  };
+
+  const formatResetTime = (resetTimeStr?: string | null) => {
+    if (!resetTimeStr) return null;
+    const target = new Date(resetTimeStr).getTime();
+    if (isNaN(target)) return null;
+    const diffMs = target - Date.now();
+    if (diffMs <= 0) return '即将重置';
+    const diffMins = Math.round(diffMs / 60000);
+    if (diffMins < 60) return `${diffMins}分钟后重置`;
+    const diffHours = Math.round(diffMins / 60);
+    if (diffHours < 24) {
+      const d = new Date(target);
+      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')} 重置`;
+    }
+    const days = Math.ceil(diffHours / 24);
+    return `${days}天后重置`;
+  };
+
+  const fetchAccountQuota = async (accountId: string) => {
+    if (!draft.id) return;
+    try {
+      setRefreshingQuotaId(accountId);
+      const quota = await invoke<AccountQuota>('get_subscription_account_quota', {
+        providerId: draft.id,
+        accountId,
+        baseUrl: draft.baseUrl || undefined,
+      });
+      setAccountQuotas((prev) => ({ ...prev, [accountId]: quota }));
+    } catch (e) {
+      console.warn(`获取账号 ${accountId} 额度失败:`, e);
+    } finally {
+      setRefreshingQuotaId(null);
+    }
+  };
+
+  const loadSubscriptionAccounts = async () => {
+    if (!draft.id) return;
+    try {
+      setLoadingAccounts(true);
+      const list = await invoke<SubscriptionAccount[]>('get_subscription_accounts', {
+        providerId: draft.id,
+      });
+      setSubAccounts(list);
+      // 若已绑定账号且候选池较少，后台静默补充拉取一次上游模型扩充 pool（保持已选模型不变）
+      if (list.length > 0 && pool.length <= draft.models.length) {
+        syncSubscriptionModels(draft.baseUrl, false);
+      }
+    } catch (e) {
+      console.error('加载订阅账号失败', e);
+    } finally {
+      setLoadingAccounts(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isSubscriptionPool) {
+      loadSubscriptionAccounts();
+    }
+  }, [draft.id, isSubscriptionPool]);
+
+  const [syncingModels, setSyncingModels] = useState(false);
+
+  const syncSubscriptionModels = async (baseUrl?: string, forceReplaceSelected = false): Promise<string[]> => {
+    const url = (baseUrl || draft.baseUrl || 'https://daily-cloudcode-pa.googleapis.com').trim();
+    try {
+      setSyncingModels(true);
+      setNotice('');
+      const models = await invoke<string[]>('sync_subscription_models', {
+        providerId: draft.id,
+        baseUrl: url,
+      });
+      if (models && models.length > 0) {
+        const unique = uniqueValues(models);
+        setPool((prev) => uniqueValues([...prev, ...unique]));
+
+        // 仅在初始未配置任何已选模型，或用户主动强制覆盖时，才全选模型；
+        // 否则一律保留用户当前已经勾选的模型集合，避免多账号登录或同步时冲掉用户自选
+        if (forceReplaceSelected || draft.models.length === 0) {
+          replaceModels(unique);
+          if (!draft.defaultModel || !unique.includes(draft.defaultModel)) {
+            update({ defaultModel: unique[0] });
+          }
+          setNotice(`已成功同步并接入账号的 ${unique.length} 个可用模型`);
+        } else {
+          setNotice(`已同步上游 ${unique.length} 个可用模型（保留当前已选）`);
+        }
+        return unique;
+      }
+    } catch (e: any) {
+      console.warn('同步上游模型失败，采用预设基线模型兜底', e);
+    } finally {
+      setSyncingModels(false);
+    }
+
+    // 容灾兜底：若上游接口暂不可用，载入官方推荐基线模型
+    const fallbackList = preset?.defaultModels ?? [
+      'claude-sonnet-4-6',
+      'claude-opus-4-6-thinking',
+      'gemini-3.8-flash-high',
+      'gemini-2.5-pro',
+      'gemini-3-flash',
+      'gemini-2.5-flash',
+      'gpt-oss-120b-medium',
+    ];
+    setPool((prev) => uniqueValues([...prev, ...fallbackList]));
+    if (forceReplaceSelected || draft.models.length === 0) {
+      replaceModels(fallbackList);
+      if (!draft.defaultModel || !fallbackList.includes(draft.defaultModel)) {
+        update({ defaultModel: fallbackList[0] });
+      }
+    }
+    setNotice(`上游模型接口受限，已载入支持的 ${fallbackList.length} 个推荐模型`);
+    return fallbackList;
+  };
+
+  const handleConnectGoogle = async () => {
+    try {
+      setAuthorizing(true);
+      setOauthError(null);
+      await invoke<SubscriptionAccount>('start_subscription_oauth', {
+        providerId: draft.id,
+        accountType: 'antigravity',
+      });
+      await loadSubscriptionAccounts();
+
+      // 如果当前已有自主选择的模型集合，同步时保留；仅在从未选过模型时全量启用
+      const shouldSelectAll = draft.models.length === 0;
+      const syncedModels = await syncSubscriptionModels(draft.baseUrl, shouldSelectAll);
+
+      const finalModels = draft.models.length > 0 ? draft.models : syncedModels;
+      const finalDefault = draft.defaultModel && finalModels.includes(draft.defaultModel)
+        ? draft.defaultModel
+        : finalModels[0] || null;
+
+      const providerToSave = prepareProvider({
+        ...draft,
+        models: finalModels,
+        defaultModel: finalDefault,
+        enabled: true,
+      });
+      await saveProvider(providerToSave);
+      setNotice('账号已连接，服务商已自动就绪并启用');
+    } catch (err: any) {
+      setOauthError(typeof err === 'string' ? err : err?.message || '授权失败，请重试');
+    } finally {
+      setAuthorizing(false);
+    }
+  };
+
+  const handleFinishSubscription = async () => {
+    try {
+      setSaving(true);
+      await saveProvider(prepareProvider(draft));
+      closeProviderEditor();
+    } catch (e) {
+      setErrors({ save: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteAccount = async (accountId: string) => {
+    try {
+      await invoke('delete_subscription_account', { accountId });
+      await loadSubscriptionAccounts();
+    } catch (e) {
+      console.error('删除账号失败', e);
+    }
+  };
+
+  const handleToggleAccount = async (accountId: string, enabled: boolean) => {
+    try {
+      await invoke('toggle_subscription_account', {
+        providerId: draft.id,
+        accountId,
+        enabled,
+      });
+      await loadSubscriptionAccounts();
+    } catch (e) {
+      console.error('切换账号状态失败', e);
+    }
+  };
 
   const requestId = useRef(0);
   const drawerRef = useRef<HTMLDivElement>(null);
@@ -110,6 +341,12 @@ export function ProviderEditor() {
     if (saving) return;
     if (confirmation) {
       setConfirmation(null);
+      return;
+    }
+    // 若为订阅服务商且已有账号：自动保存最新修改并平滑退出，零阻断
+    if (isSubscriptionPool && subAccounts.length > 0) {
+      void saveProvider(prepareProvider(draft));
+      closeProviderEditor();
       return;
     }
     // 1. 若在预设网格页面，返回即关闭编辑器退回主页
@@ -138,6 +375,12 @@ export function ProviderEditor() {
     if (saving) return;
     if (confirmation) {
       setConfirmation(null);
+      return;
+    }
+    // 若为订阅服务商且已有账号：自动保存最新修改并平滑退出，零阻断
+    if (isSubscriptionPool && subAccounts.length > 0) {
+      void saveProvider(prepareProvider(draft));
+      closeProviderEditor();
       return;
     }
     if (!hasUserChanges) {
@@ -539,23 +782,31 @@ export function ProviderEditor() {
 
                   {matchingPresets.map((p) => {
                     const cleanName = p.name.replace(/[\(（][^\)）]+[\)）]/g, '').trim();
+                    const isSub = p.authType === 'subscription_pool' || p.category === '官方订阅';
                     return (
                       <button
                         key={p.id}
                         type="button"
                         onClick={() => choosePreset(p)}
-                        className="h-10 px-2 rounded-md flex items-center gap-2.5 text-left transition-colors cursor-pointer hover:bg-accent/60"
+                        className="h-10 px-2 rounded-md flex items-center justify-between gap-2 text-left transition-colors cursor-pointer hover:bg-accent/60 group"
                       >
-                        <ProviderAvatar
-                          name={cleanName}
-                          protocol={p.protocol}
-                          iconKey={p.icon || p.id}
-                          sizeClass="w-6 h-6"
-                          dense
-                        />
-                        <span className="text-xs font-medium text-foreground truncate">
-                          {cleanName}
-                        </span>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <ProviderAvatar
+                            name={cleanName}
+                            protocol={p.protocol}
+                            iconKey={p.icon || p.id}
+                            sizeClass="w-6 h-6"
+                            dense
+                          />
+                          <span className="text-xs font-medium text-foreground truncate">
+                            {cleanName}
+                          </span>
+                        </div>
+                        {isSub && (
+                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 font-normal shrink-0">
+                            官方订阅
+                          </Badge>
+                        )}
                       </button>
                     );
                   })}
@@ -585,179 +836,417 @@ export function ProviderEditor() {
                   {errors.name && <p className="text-[11px] text-rose-500 mt-1">{errors.name}</p>}
                 </div>
 
-                {/* 协议与 URL */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                      协议格式
-                    </label>
-                    {preset ? (
-                      <div className="px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-700 dark:text-zinc-300">
-                        {protocols[draft.protocol]}
-                      </div>
-                    ) : (
-                      <Select
-                        value={draft.protocol}
-                        onChange={(e) => {
-                          invalidateModels();
-                          update({
-                            protocol: e.target.value as Protocol,
-                            apiKeys: [],
-                            models: [],
-                          });
-                          setNotice('协议已更改，请重新填写密钥并选择可用模型。');
-                        }}
-                        containerClassName="w-full"
-                      >
-                        {Object.entries(protocols).map(([id, label]) => (
-                          <option key={id} value={id}>
-                            {label}
-                          </option>
-                        ))}
-                      </Select>
-                    )}
+                {/* 协议与 URL：普通 API 服务商在此直接显示；订阅账号服务商收敛为状态说明，接口地址收起在底部高级设置 */}
+                {isSubscriptionPool ? (
+                  <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-500/[0.04] dark:bg-white/[0.04] border border-border text-xs text-foreground">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                      <span className="font-medium">官方订阅账号接入</span>
+                      <span className="text-[11px] text-muted-foreground hidden sm:inline">
+                        · 浏览器授权登录，支持多账号自动轮询与限流冷却
+                      </span>
+                    </div>
+                    <Badge variant="secondary" className="font-mono text-[10px]">
+                      OAuth
+                    </Badge>
                   </div>
-
-                  <div className="sm:col-span-2">
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                        接口基地址 (Base URL)
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                        协议格式
                       </label>
-                      {draft.baseUrl.trim() && (
-                        <div className="flex items-center gap-1.5 text-xs">
-                          {testingConnection ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
-                              <LoaderCircle className="w-3 h-3 animate-spin text-zinc-500" />
-                              <span>测试中…</span>
-                            </span>
-                          ) : latencyResult ? (
-                            <span
-                              className={`inline-flex items-center gap-1 text-[11px] font-mono ${
-                                latencyResult.success
-                                  ? 'text-emerald-600 dark:text-emerald-400 font-medium'
-                                  : 'text-rose-500 dark:text-rose-400'
-                              }`}
-                            >
-                              {latencyResult.success ? (
-                                <>
-                                  <Zap className="w-3 h-3 shrink-0" />
-                                  <span>{latencyResult.ms} ms</span>
-                                </>
-                              ) : (
-                                <span title={latencyResult.error} className="truncate max-w-[130px]">
-                                  {latencyResult.error}
-                                </span>
-                              )}
+                      {preset ? (
+                        <div className="px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-700 dark:text-zinc-300">
+                          {protocols[draft.protocol]}
+                        </div>
+                      ) : (
+                        <Select
+                          value={draft.protocol}
+                          onChange={(e) => {
+                            invalidateModels();
+                            update({
+                              protocol: e.target.value as Protocol,
+                              apiKeys: [],
+                              models: [],
+                            });
+                            setNotice('协议已更改，请重新填写密钥并选择可用模型。');
+                          }}
+                          containerClassName="w-full"
+                        >
+                          {Object.entries(protocols).map(([id, label]) => (
+                            <option key={id} value={id}>
+                              {label}
+                            </option>
+                          ))}
+                        </Select>
+                      )}
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                          接口基地址 (Base URL)
+                        </label>
+                        {draft.baseUrl.trim() && (
+                          <div className="flex items-center gap-1.5 text-xs">
+                            {testingConnection ? (
+                              <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+                                <LoaderCircle className="w-3 h-3 animate-spin text-zinc-500" />
+                                <span>测试中…</span>
+                              </span>
+                            ) : latencyResult ? (
+                              <span
+                                className={`inline-flex items-center gap-1 text-[11px] font-mono ${
+                                  latencyResult.success
+                                    ? 'text-emerald-600 dark:text-emerald-400 font-medium'
+                                    : 'text-rose-500 dark:text-rose-400'
+                                }`}
+                              >
+                                {latencyResult.success ? (
+                                  <>
+                                    <Zap className="w-3 h-3 shrink-0" />
+                                    <span>{latencyResult.ms} ms</span>
+                                  </>
+                                ) : (
+                                  <span title={latencyResult.error} className="truncate max-w-[130px]">
+                                    {latencyResult.error}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={testConnection}
+                                  className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 underline ml-0.5 cursor-pointer"
+                                >
+                                  重测
+                                </button>
+                              </span>
+                            ) : (
                               <button
                                 type="button"
                                 onClick={testConnection}
-                                className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 underline ml-0.5 cursor-pointer"
+                                className="text-[11px] text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 flex items-center gap-0.5 cursor-pointer transition-colors"
                               >
-                                重测
+                                <Zap className="w-3 h-3 shrink-0" />
+                                <span>测试连接</span>
                               </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <Input
+                        type="text"
+                        value={draft.baseUrl}
+                        onChange={(e) => changeUrl(e.target.value)}
+                        disabled={!urlEditable}
+                        placeholder="https://api.example.com/v1"
+                        className="font-mono"
+                      />
+                      {errors.baseUrl && (
+                        <p className="text-[11px] text-rose-500 mt-1">{errors.baseUrl}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 认证方式：官方订阅账号池 vs API 密钥 */}
+                <div>
+                  {isSubscriptionPool ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs font-bold text-foreground tracking-wider">
+                            账号池
+                          </label>
+                          <Badge variant="secondary" className="font-mono text-[10px]">
+                            {subAccounts.length > 0
+                              ? `${subAccounts.filter((a) => a.enabled).length} / ${subAccounts.length} 可用`
+                              : '未连接'}
+                          </Badge>
+                          {subAccounts.length > 1 && (
+                            <span className="text-[10px] text-muted-foreground hidden sm:inline select-none">
+                              · 自动轮询均衡
                             </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={testConnection}
-                              className="text-[11px] text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 flex items-center gap-0.5 cursor-pointer transition-colors"
-                            >
-                              <Zap className="w-3 h-3 shrink-0" />
-                              <span>测试连接</span>
-                            </button>
                           )}
+                          {loadingAccounts && <LoaderCircle className="w-3 h-3 animate-spin text-muted-foreground" />}
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px]">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={authorizing}
+                            onClick={handleConnectGoogle}
+                          >
+                            {authorizing ? (
+                              <>
+                                <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
+                                <span>等待浏览器授权…</span>
+                              </>
+                            ) : (
+                              <>
+                                <Plus className="w-3 h-3 mr-1" />
+                                <span>添加账号</span>
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+
+                      {oauthError && (
+                        <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 text-[11px] text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-900/60 flex items-start gap-2">
+                          <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                          <span>{oauthError}</span>
+                        </div>
+                      )}
+
+                      {subAccounts.length === 0 ? (
+                        <div className="p-6 rounded-xl border border-dashed border-border text-center bg-zinc-500/[0.02]">
+                          <div className="w-10 h-10 rounded-full bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2.5">
+                            <Zap className="w-5 h-5" />
+                          </div>
+                          <div className="text-xs font-semibold text-foreground mb-1">
+                            尚未连接账号
+                          </div>
+                          <div className="text-[11px] text-muted-foreground max-w-sm mx-auto mb-3.5 leading-relaxed">
+                            点击下方按钮在浏览器中完成授权登录，授权后将自动接入订阅配额与模型。
+                          </div>
+                          <Button
+                            type="button"
+                            variant="default"
+                            size="sm"
+                            disabled={authorizing}
+                            onClick={handleConnectGoogle}
+                          >
+                            {authorizing ? (
+                              <>
+                                <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                                <span>请在浏览器中完成授权…</span>
+                              </>
+                            ) : (
+                              <>
+                                <Plus className="w-3.5 h-3.5 mr-1.5" />
+                                <span>立即连接账号</span>
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {subAccounts.map((acc) => {
+                            const nowSec = Math.floor(Date.now() / 1000);
+                            const isCooldown = acc.cooldownUntil > nowSec;
+                            const cooldownRemaining = Math.ceil((acc.cooldownUntil - nowSec) / 60);
+                            const quota = accountQuotas[acc.id];
+                            const isRefreshingThis = refreshingQuotaId === acc.id;
+                            const isExpanded = !!expandedQuotaAccounts[acc.id];
+
+                            return (
+                              <div
+                                key={acc.id}
+                                className="p-2.5 rounded-lg border border-border/80 bg-background hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors shadow-2xs"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <span className="text-xs font-medium text-foreground truncate">
+                                      {acc.email || `账号 ${acc.id.slice(0, 8)}`}
+                                    </span>
+                                    {!acc.enabled ? (
+                                      <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">已禁用</span>
+                                    ) : isCooldown ? (
+                                      <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium shrink-0">
+                                        ● 429 冷却中 ({cooldownRemaining}m)
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1 shrink-0">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                                        <span>正常活跃</span>
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleExpandQuota(acc.id)}
+                                      className="h-7 px-2 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 cursor-pointer transition-colors flex items-center gap-1"
+                                      title={isExpanded ? "收起额度详情" : "展开并查看配额额度"}
+                                    >
+                                      <span>{isExpanded ? '收起配额' : '查看配额'}</span>
+                                      {isExpanded ? (
+                                        <ChevronUp className="w-3 h-3 text-zinc-400" />
+                                      ) : (
+                                        <ChevronDown className="w-3 h-3 text-zinc-400" />
+                                      )}
+                                    </button>
+                                    <div className="w-[1px] h-3.5 bg-border/60 mx-0.5" />
+                                    <Switch
+                                      checked={acc.enabled}
+                                      onCheckedChange={(checked) => handleToggleAccount(acc.id, checked)}
+                                      ariaLabel="启用账号"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteAccount(acc.id)}
+                                      className="p-1 rounded-md text-zinc-400 hover:text-rose-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
+                                      title="解绑并删除此账号"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* 额度按需展开展示 */}
+                                {isExpanded && (
+                                  <div className="mt-2.5 pt-2 border-t border-border/50">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
+                                        使用配额 (5小时 / 周周期)
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => fetchAccountQuota(acc.id)}
+                                        disabled={isRefreshingThis}
+                                        className="text-[10px] text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
+                                      >
+                                        <RefreshCw className={clsx("w-3 h-3", isRefreshingThis && "animate-spin text-primary")} />
+                                        <span>{isRefreshingThis ? '查询中…' : '刷新'}</span>
+                                      </button>
+                                    </div>
+
+                                    {isRefreshingThis && !quota ? (
+                                      <div className="py-2.5 flex items-center justify-center gap-2 text-[11px] text-muted-foreground">
+                                        <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                                        <span>正在拉取最新配额…</span>
+                                      </div>
+                                    ) : quota && quota.buckets.length > 0 ? (
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                        {quota.buckets.map((b) => {
+                                          const pct = Math.round(b.remainingFraction * 100);
+                                          const resetDesc = formatResetTime(b.resetTime);
+                                          const isLow = b.remainingFraction <= 0.2;
+                                          const isOut = b.isExhausted;
+
+                                          return (
+                                            <div key={b.id} className="space-y-1">
+                                              <div className="flex items-center justify-between text-[10px]">
+                                                <span className="text-zinc-500 dark:text-zinc-400 font-medium truncate">{b.label}</span>
+                                                <span
+                                                  className={clsx(
+                                                    "font-mono shrink-0",
+                                                    isOut
+                                                      ? "text-rose-500 dark:text-rose-400 font-semibold"
+                                                      : isLow
+                                                      ? "text-amber-500 font-medium"
+                                                      : "text-zinc-600 dark:text-zinc-300"
+                                                  )}
+                                                >
+                                                  {isOut ? `已耗尽${resetDesc ? ` · ${resetDesc}` : ''}` : `${pct}%${resetDesc ? ` · ${resetDesc}` : ''}`}
+                                                </span>
+                                              </div>
+                                              <div className="w-full h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800/80 overflow-hidden">
+                                                <div
+                                                  className={clsx(
+                                                    "h-full rounded-full transition-all duration-300",
+                                                    isOut ? "bg-rose-500" : isLow ? "bg-amber-500" : "bg-emerald-500"
+                                                  )}
+                                                  style={{ width: `${Math.max(pct, isOut ? 0 : 3)}%` }}
+                                                />
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <div className="py-2 text-center text-[10px] text-muted-foreground">
+                                        暂未获取到配额，可点击右上角「刷新」重试
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
-                    <Input
-                      type="text"
-                      value={draft.baseUrl}
-                      onChange={(e) => changeUrl(e.target.value)}
-                      disabled={!urlEditable}
-                      placeholder="https://api.example.com/v1"
-                      className="font-mono"
-                    />
-                    {errors.baseUrl && (
-                      <p className="text-[11px] text-rose-500 mt-1">{errors.baseUrl}</p>
-                    )}
-                  </div>
-                </div>
-
-                {/* API 密钥 */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                      API 密钥 (Key)
-                    </label>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => setShowAuthHelp(!showAuthHelp)}
-                        className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
-                      >
-                        <HelpCircle className="w-3 h-3" />
-                        <span>密钥说明</span>
-                      </button>
-                      <span className="text-zinc-300 dark:text-zinc-700">·</span>
-                      <button
-                        type="button"
-                        onClick={() => update({ apiKeys: [...keyInputs, ''] })}
-                        className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 font-medium cursor-pointer transition-colors"
-                      >
-                        + 多密钥轮询
-                      </button>
-                    </div>
-                  </div>
-
-                  {showAuthHelp && (
-                    <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-300 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
-                      密钥保存在本地 SQLite 中。留空时默认沿用客户端传入的密钥；本地模型（如 Ollama）通常无需填写。
-                    </div>
-                  )}
-
-                  <div className="space-y-2">
-                    {keyInputs.map((key, index) => (
-                      <div key={index} className="flex items-center gap-2">
-                        <div className="relative flex-1">
-                          <Input
-                            type={showKeys ? 'text' : 'password'}
-                            value={key}
-                            onChange={(e) => {
-                              const keys = [...keyInputs];
-                              keys[index] = e.target.value;
-                              invalidateModels();
-                              update({ apiKeys: keys });
-                            }}
-                            placeholder={index ? '添加备用密钥' : 'sk-ant-... / sk-...（可留空）'}
-                            className="font-mono pr-9"
-                          />
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                          API 密钥 (Key)
+                        </label>
+                        <div className="flex items-center gap-2 text-[11px]">
                           <button
                             type="button"
-                            onClick={() => setShowKeys(!showKeys)}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
-                            aria-label={showKeys ? '隐藏密钥' : '显示明文密钥'}
+                            onClick={() => setShowAuthHelp(!showAuthHelp)}
+                            className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
                           >
-                            {showKeys ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            <HelpCircle className="w-3 h-3" />
+                            <span>密钥说明</span>
+                          </button>
+                          <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                          <button
+                            type="button"
+                            onClick={() => update({ apiKeys: [...keyInputs, ''] })}
+                            className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 font-medium cursor-pointer transition-colors"
+                          >
+                            + 多密钥轮询
                           </button>
                         </div>
-
-                        {keyInputs.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              invalidateModels();
-                              update({ apiKeys: keyInputs.filter((_, i) => i !== index) });
-                            }}
-                            className="p-2 rounded-lg text-zinc-400 hover:text-rose-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        )}
                       </div>
-                    ))}
-                  </div>
 
-                  {notice && <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">{notice}</p>}
+                      {showAuthHelp && (
+                        <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-300 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
+                          密钥保存在本地 SQLite 中。留空时默认沿用客户端传入的密钥；本地模型（如 Ollama）通常无需填写。
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        {keyInputs.map((key, index) => (
+                          <div key={index} className="flex items-center gap-2">
+                            <div className="relative flex-1">
+                              <Input
+                                type={showKeys ? 'text' : 'password'}
+                                value={key}
+                                onChange={(e) => {
+                                  const keys = [...keyInputs];
+                                  keys[index] = e.target.value;
+                                  invalidateModels();
+                                  update({ apiKeys: keys });
+                                }}
+                                placeholder={index ? '添加备用密钥' : 'sk-ant-... / sk-...（可留空）'}
+                                className="font-mono pr-9"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowKeys(!showKeys)}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
+                                aria-label={showKeys ? '隐藏密钥' : '显示明文密钥'}
+                              >
+                                {showKeys ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+
+                            {keyInputs.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  invalidateModels();
+                                  update({ apiKeys: keyInputs.filter((_, i) => i !== index) });
+                                }}
+                                className="p-2 rounded-lg text-zinc-400 hover:text-rose-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {notice && <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">{notice}</p>}
+                    </div>
+                  )}
                 </div>
 
                 {/* 设为全局默认服务商 */}
@@ -832,16 +1321,32 @@ export function ProviderEditor() {
                     )}
                   </div>
 
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={fetchModels}
-                    disabled={fetching}
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${fetching ? 'animate-spin' : ''}`} />
-                    <span>{fetching ? '获取中…' : fetched ? '刷新上游' : '获取上游模型'}</span>
-                  </Button>
+                  {isSubscriptionPool ? (
+                    subAccounts.length > 0 ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => syncSubscriptionModels(draft.baseUrl, false)}
+                        disabled={syncingModels}
+                        className="h-7 text-xs"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 mr-1 ${syncingModels ? 'animate-spin' : ''}`} />
+                        <span>{syncingModels ? '同步中…' : '同步账号模型'}</span>
+                      </Button>
+                    ) : null
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={fetchModels}
+                      disabled={fetching}
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${fetching ? 'animate-spin' : ''}`} />
+                      <span>{fetching ? '获取中…' : fetched ? '刷新上游' : '获取上游模型'}</span>
+                    </Button>
+                  )}
                 </div>
 
                 {fetchError && (
@@ -975,7 +1480,11 @@ export function ProviderEditor() {
                     {filteredModels.length === 0 ? (
                       <div className="py-7 text-center text-xs text-zinc-400 space-y-1.5">
                         {pool.length === 0 ? (
-                          <p>暂无模型，点击右上角「获取上游模型」或在下方手动补充</p>
+                          isSubscriptionPool ? (
+                            <p>尚未连接账号，请在上方完成账号授权登录以自动同步模型</p>
+                          ) : (
+                            <p>暂无模型，点击右上角「获取上游模型」或在下方手动补充</p>
+                          )
                         ) : modelFilterTab === 'selected' ? (
                           <p>
                             尚未勾选任何模型，
@@ -1080,24 +1589,6 @@ export function ProviderEditor() {
                                 </span>
                               )}
 
-                              {/* 模型能力微徽章 */}
-                              {isReasoning && (
-                                <span
-                                  className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0"
-                                  title="支持深度思考 / 推理"
-                                >
-                                  思考
-                                </span>
-                              )}
-                              {isVision && (
-                                <span
-                                  className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 shrink-0"
-                                  title="支持图片输入"
-                                >
-                                  视觉
-                                </span>
-                              )}
-
                               {/* 上游缺失警示 */}
                               {isInvalid && (
                                 <span
@@ -1169,33 +1660,71 @@ export function ProviderEditor() {
 
                 <div className="flex items-center gap-2.5">
                   <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                    {fetching
-                      ? '正在获取上游模型…'
-                      : draft.models.length === 0
-                        ? '请先选择或添加至少一个模型'
-                        : ''}
+                    {fetching || syncingModels
+                      ? '正在同步上游模型…'
+                      : isSubscriptionPool && subAccounts.length > 0
+                        ? (
+                          <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                            <span>已自动保存并启用</span>
+                          </span>
+                        )
+                        : !isSubscriptionPool && draft.models.length === 0
+                          ? '请先选择或添加至少一个模型'
+                          : ''}
                   </span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="default"
-                    onClick={handleClose}
-                  >
-                    取消
-                  </Button>
-                  <Button
-                    type="submit"
-                    variant="default"
-                    size="default"
-                    disabled={saving || deleting || fetching || draft.models.length === 0}
-                  >
-                    {saving ? (
-                      <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+
+                  {isSubscriptionPool ? (
+                    subAccounts.length > 0 ? (
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="default"
+                        disabled={saving || syncingModels}
+                        onClick={handleFinishSubscription}
+                      >
+                        {saving ? (
+                          <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5 mr-1.5" />
+                        )}
+                        <span>完成</span>
+                      </Button>
                     ) : (
-                      <Check className="w-3.5 h-3.5" />
-                    )}
-                    <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '添加并启用'}</span>
-                  </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="default"
+                        onClick={handleClose}
+                      >
+                        返回
+                      </Button>
+                    )
+                  ) : (
+                    <>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="default"
+                        onClick={handleClose}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        type="submit"
+                        variant="default"
+                        size="default"
+                        disabled={saving || deleting || fetching || draft.models.length === 0}
+                      >
+                        {saving ? (
+                          <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                        <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '保存服务商'}</span>
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
             </form>

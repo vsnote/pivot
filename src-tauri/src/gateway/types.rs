@@ -220,6 +220,8 @@ pub struct GeminiPart {
     pub function_call: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_response: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", alias = "thought_signature")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

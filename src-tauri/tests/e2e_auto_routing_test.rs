@@ -132,6 +132,7 @@ fn provider(id: &str, name: &str, port: u16, models: &[&str], priority: i32) -> 
         protocol: "openai".to_string(),
         base_url: format!("http://127.0.0.1:{}", port),
         preset_id: None,
+        auth_type: None,
         api_keys: vec!["sk-test".to_string()],
         models: models.iter().map(|m| m.to_string()).collect(),
         default_model: None,

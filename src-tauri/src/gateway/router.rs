@@ -577,6 +577,7 @@ mod tests {
             protocol: "openai".to_string(),
             base_url: format!("https://{}.example/v1", id),
             preset_id: None,
+            auth_type: None,
             api_keys: vec![format!("sk-{}", id)],
             models: models.iter().map(|m| m.to_string()).collect(),
             default_model: None,

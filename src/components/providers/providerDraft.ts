@@ -20,11 +20,12 @@ export function createProviderDraft(
     const preset = provider.presetId === undefined ? presets.find((p) => p.id === provider.id &&
       p.protocol === provider.protocol && p.baseUrl.replace(/\/+$/, '') === provider.baseUrl.replace(/\/+$/, '')) : undefined;
     return { ...provider, presetId: provider.presetId ?? preset?.id ?? null,
+      authType: provider.authType ?? preset?.authType ?? null,
       apiKeys: [...provider.apiKeys], models: uniqueValues(provider.models),
       defaultModel: provider.defaultModel ?? null, isDefault: provider.isDefault ?? false };
   }
   return { id: `prov_${crypto.randomUUID()}`, name: '', protocol: 'openai', baseUrl: '',
-    presetId: null, apiKeys: [], models: [], defaultModel: null, isDefault: autoDefault,
+    presetId: null, authType: null, apiKeys: [], models: [], defaultModel: null, isDefault: autoDefault,
     enabled: true, priority: 10, weight: 1, timeoutSecs: 60 };
 }
 
@@ -38,6 +39,7 @@ export function applyProviderPreset(
   // that is about to become the library's first default keeps that role.
   return { ...draft, presetId: preset?.id ?? null, name: preset?.name ?? '',
     protocol: preset?.protocol ?? 'openai', baseUrl: preset?.baseUrl ?? '',
+    authType: preset?.authType ?? null,
     apiKeys: [], models: [], defaultModel: null,
     isDefault: preserveIsDefault ? draft.isDefault : false, latencyMs: undefined };
 }

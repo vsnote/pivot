@@ -13,6 +13,8 @@ pub struct Provider {
     pub protocol: String,
     pub base_url: String,
     pub preset_id: Option<String>,
+    #[serde(default)]
+    pub auth_type: Option<String>,
     pub api_keys: Vec<String>,
     pub models: Vec<String>,
     /// Model this provider is asked for when it cannot serve the requested name.
@@ -31,6 +33,22 @@ pub struct Provider {
     pub latency_ms: Option<i64>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionAccount {
+    pub id: String,
+    pub provider_id: String,
+    pub account_type: String,
+    pub email: Option<String>,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: i64,
+    pub cooldown_until: i64,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +230,22 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
 
+            
+            CREATE TABLE IF NOT EXISTS subscription_accounts (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                account_type TEXT NOT NULL,
+                email TEXT,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                expires_at INTEGER NOT NULL,
+                cooldown_until INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sub_accounts_provider ON subscription_accounts(provider_id);
             CREATE TABLE IF NOT EXISTS interceptor_state (
                 client_id TEXT PRIMARY KEY,
                 is_intercepted INTEGER NOT NULL DEFAULT 0,
@@ -224,6 +258,10 @@ impl Database {
         // Databases created by earlier versions miss the columns added since.
         // Every upgrade below is additive and keyed on the column actually being
         // absent, so running the whole block again is a no-op.
+        
+        if !has_column(&conn, "providers", "auth_type")? {
+            conn.execute("ALTER TABLE providers ADD COLUMN auth_type TEXT", [])?;
+        }
         if !has_column(&conn, "providers", "preset_id")? {
             conn.execute("ALTER TABLE providers ADD COLUMN preset_id TEXT", [])?;
             for preset in presets::get_default_presets() {
@@ -345,7 +383,7 @@ impl Database {
     pub fn get_providers(&self) -> Result<Vec<Provider>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default
+            "SELECT id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default, auth_type
              FROM providers ORDER BY priority DESC, name ASC",
         )?;
 
@@ -374,6 +412,7 @@ impl Database {
                 preset_id: row.get(13)?,
                 default_model: row.get(14)?,
                 is_default: is_default_int == 1,
+                auth_type: row.get(16)?,
             })
         })?;
 
@@ -408,8 +447,8 @@ impl Database {
             )?;
         }
         tx.execute(
-            "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default, auth_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 protocol = excluded.protocol,
@@ -424,7 +463,8 @@ impl Database {
                 updated_at = excluded.updated_at,
                 preset_id = excluded.preset_id,
                 default_model = excluded.default_model,
-                is_default = excluded.is_default;",
+                is_default = excluded.is_default,
+                auth_type = excluded.auth_type;",
             params![
                 provider.id,
                 provider.name,
@@ -442,6 +482,7 @@ impl Database {
                 provider.preset_id,
                 default_model,
                 if provider.is_default { 1 } else { 0 },
+                provider.auth_type.clone(),
             ],
         )?;
         tx.commit()?;
@@ -703,6 +744,99 @@ impl Database {
             Ok(None)
         }
     }
+
+    pub fn get_subscription_accounts(&self, provider_id: &str) -> Result<Vec<SubscriptionAccount>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, created_at, updated_at
+             FROM subscription_accounts WHERE provider_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![provider_id], |row| {
+            let enabled_int: i32 = row.get(8)?;
+            Ok(SubscriptionAccount {
+                id: row.get(0)?,
+                provider_id: row.get(1)?,
+                account_type: row.get(2)?,
+                email: row.get(3)?,
+                access_token: row.get(4)?,
+                refresh_token: row.get(5)?,
+                expires_at: row.get(6)?,
+                cooldown_until: row.get(7)?,
+                enabled: enabled_int == 1,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn save_subscription_account(&self, account: &SubscriptionAccount) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO subscription_accounts (id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                email = excluded.email,
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                expires_at = excluded.expires_at,
+                cooldown_until = excluded.cooldown_until,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at;",
+            params![
+                account.id,
+                account.provider_id,
+                account.account_type,
+                account.email,
+                account.access_token,
+                account.refresh_token,
+                account.expires_at,
+                account.cooldown_until,
+                if account.enabled { 1 } else { 0 },
+                account.created_at,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_account_tokens(&self, account_id: &str, access_token: &str, refresh_token: Option<&str>, expires_at: i64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(rf) = refresh_token {
+            conn.execute(
+                "UPDATE subscription_accounts SET access_token = ?1, refresh_token = ?2, expires_at = ?3, updated_at = ?4 WHERE id = ?5",
+                params![access_token, rf, expires_at, now, account_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE subscription_accounts SET access_token = ?1, expires_at = ?2, updated_at = ?3 WHERE id = ?4",
+                params![access_token, expires_at, now, account_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn set_account_cooldown(&self, account_id: &str, cooldown_until: i64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE subscription_accounts SET cooldown_until = ?1 WHERE id = ?2",
+            params![cooldown_until, account_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_subscription_account(&self, account_id: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM subscription_accounts WHERE id = ?1", params![account_id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -728,6 +862,7 @@ mod provider_tests {
             protocol: "openai".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             preset_id: preset_id.map(str::to_string),
+            auth_type: None,
             api_keys: vec!["keep-test-key".to_string()],
             models: vec!["model-a".to_string()],
             default_model: None,

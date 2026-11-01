@@ -11,10 +11,37 @@ pub struct Preset {
     pub description: String,
     pub category: String,
     pub icon: Option<String>,
+    #[serde(default)]
+    pub auth_type: Option<String>,
 }
 
 pub fn get_default_presets() -> Vec<Preset> {
     vec![
+        Preset {
+            id: "antigravity".to_string(),
+            name: "Antigravity".to_string(),
+            protocol: "gemini".to_string(),
+            base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
+            default_models: vec![
+                "claude-sonnet-4-6".to_string(),
+                "claude-opus-4-6-thinking".to_string(),
+                "gemini-3.8-flash-high".to_string(),
+                "gemini-2.5-pro".to_string(),
+                "gemini-3-flash".to_string(),
+                "gemini-2.5-flash-thinking".to_string(),
+                "gemini-2.5-flash".to_string(),
+                "gemini-2.5-flash-lite".to_string(),
+                "gemini-3.1-flash-lite".to_string(),
+                "gemini-3.1-flash-image".to_string(),
+                "gemini-3.5-flash-lite".to_string(),
+                "gpt-oss-120b-medium".to_string(),
+            ],
+            description: "Antigravity 官方订阅账号池，免 API Key 聚合调用 Claude 3.7 / 3.5、Sonnet 4.6 与 Gemini 2.5".to_string(),
+            category: "官方订阅".to_string(),
+            icon: Some("antigravity".to_string()),
+            auth_type: Some("subscription_pool".to_string()),
+        },
+
         Preset {
             id: "anthropic".to_string(),
             name: "Anthropic".to_string(),
@@ -30,6 +57,7 @@ pub fn get_default_presets() -> Vec<Preset> {
                 .to_string(),
             category: "商业大模型".to_string(),
             icon: Some("anthropic".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "openai".to_string(),
@@ -46,6 +74,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "OpenAI 官方 API，包含 GPT-4o、o1 以及高推理 o3-mini 模型".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("openai".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "gemini".to_string(),
@@ -58,9 +87,10 @@ pub fn get_default_presets() -> Vec<Preset> {
                 "gemini-1.5-pro".to_string(),
                 "gemini-1.5-flash".to_string(),
             ],
-            description: "Google 官方 Gemini 2.0 Flash 与 1.5 Pro 长上下文多模态模型".to_string(),
+            description: "Google Gemini 官方 API，支持 Gemini 2.0 / 1.5 开发者 API Key 直连".to_string(),
             category: "商业大模型".to_string(),
-            icon: Some("google".to_string()),
+            icon: Some("gemini".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "deepseek".to_string(),
@@ -71,6 +101,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "DeepSeek 官方 API，提供高性价比 DeepSeek-V3 与 R1 深度推理".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("deepseek".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "openrouter".to_string(),
@@ -87,6 +118,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "全球领先的通用聚合平台，单个 Key 聚合 200+ 主流与开源大模型".to_string(),
             category: "模型聚合平台".to_string(),
             icon: Some("openrouter".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "ollama".to_string(),
@@ -102,6 +134,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "本地纯离线运行开源模型，完全保障代码隐私与零网络依赖".to_string(),
             category: "开源 / 本地部署".to_string(),
             icon: Some("ollama".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "groq".to_string(),
@@ -116,6 +149,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "基于自研 LPU 架构的极速推理云，输出吞吐高达数百 Token/s".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("groq".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "mistral".to_string(),
@@ -130,6 +164,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "欧洲前沿 AI 团队打造，旗舰编码模型 Codestral 专为编程优化".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("mistral".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "siliconflow".to_string(),
@@ -145,6 +180,7 @@ pub fn get_default_presets() -> Vec<Preset> {
                 .to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("siliconflow".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "moonshot".to_string(),
@@ -159,6 +195,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "Kimi 超长文本上下文技术，擅长超长代码与工程文档深度理解".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("moonshot".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "zhipu".to_string(),
@@ -173,6 +210,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "智谱清言 GLM-4 旗舰大模型及 CodeGeeX 编程专属代码模型".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("zhipu".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "qwen".to_string(),
@@ -188,6 +226,7 @@ pub fn get_default_presets() -> Vec<Preset> {
                 .to_string(),
             category: "商业大模型".to_string(),
             icon: Some("qwen".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "minimax".to_string(),
@@ -198,6 +237,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "自研 MoE 架构文本大模型，长文本处理与推理表现优异".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("minimax".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "stepfun".to_string(),
@@ -208,6 +248,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "阶跃星辰自研 Step 系列基座模型，逻辑推理表现扎实".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("stepfun".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "baichuan".to_string(),
@@ -218,6 +259,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "百川高智能中英文双语大模型与快速响应版本".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("baichuan".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "lingyiwanwu".to_string(),
@@ -232,6 +274,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "李开复团队自研 Yi 系列大模型，推理性价比突出".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("01ai".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "together".to_string(),
@@ -246,6 +289,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "全球高可用开源大模型托管平台，支持 Llama 与 Qwen 旗舰版本".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("together".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "cerebras".to_string(),
@@ -256,6 +300,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "基于超大晶圆芯片的算力云，输出生成速度超过 2000 词/秒".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("cerebras".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "perplexity".to_string(),
@@ -270,6 +315,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "内置实时联网搜索与推理能力，适合前沿技术与实时库检索".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("perplexity".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "cohere".to_string(),
@@ -280,6 +326,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "Cohere Command-R 与 R+ 专为长文本 RAG 与企业工作流优化".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("cohere".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "github_models".to_string(),
@@ -294,6 +341,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "支持使用 GitHub Personal Access Token 直接体验最新主流模型".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("github".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "fireworks".to_string(),
@@ -307,6 +355,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "专注于生产级极速低延迟的模型微调与推理平台".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("fireworks".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "xai".to_string(),
@@ -320,6 +369,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "马斯克旗下 xAI Grok-2 旗舰大模型，具备强劲逻辑推理能力".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("xai".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "novita".to_string(),
@@ -333,6 +383,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "弹性无服务器 AI 推理平台，按量付费且延迟极低".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("novita".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "deepinfra".to_string(),
@@ -346,6 +397,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "超高性价比的高并发大模型托管服务商".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("deepinfra".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "hyperbolic".to_string(),
@@ -359,6 +411,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "去中心化开放 AI 算力与开源模型高并发推理接口".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("hyperbolic".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "sambanova".to_string(),
@@ -372,6 +425,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "搭载 SN40L 芯片的高速企业全栈 AI 平台".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("sambanova".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "tencent_hunyuan".to_string(),
@@ -382,6 +436,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "腾讯混元企业级大模型服务，针对中文工程场景全方位优化".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("tencent".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "baidu_qianfan".to_string(),
@@ -395,6 +450,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "百度千帆大模型平台，提供文心一言 4.0 旗舰及超长上下文极速版".to_string(),
             category: "商业大模型".to_string(),
             icon: Some("baidu".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "lmstudio".to_string(),
@@ -405,6 +461,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "通过 LM Studio 桌面端本地加载并运行各类量化 GGUF 模型".to_string(),
             category: "开源 / 本地部署".to_string(),
             icon: Some("lmstudio".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "vllm".to_string(),
@@ -415,6 +472,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "高吞吐量本地或私有云自建 vLLM 实例 OpenAI 兼容网关".to_string(),
             category: "开源 / 本地部署".to_string(),
             icon: Some("vllm".to_string()),
+            auth_type: None,
         },
         Preset {
             id: "cloudflare_ai".to_string(),
@@ -429,6 +487,7 @@ pub fn get_default_presets() -> Vec<Preset> {
             description: "部署在 Cloudflare 全球边缘节点上的 Serverless GPU 推理集群".to_string(),
             category: "云端推理服务".to_string(),
             icon: Some("cloudflare".to_string()),
+            auth_type: None,
         },
     ]
 }

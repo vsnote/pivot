@@ -158,6 +158,7 @@ async fn test_e2e_gateway_routing_and_failover() {
         protocol: "openai".to_string(),
         base_url: "http://127.0.0.1:17881".to_string(),
         preset_id: None,
+        auth_type: None,
         api_keys: vec!["sk-test-key-a".to_string()],
         models: vec!["gpt-4o".to_string(), "claude-3-7-sonnet".to_string()],
         default_model: None,
@@ -177,6 +178,7 @@ async fn test_e2e_gateway_routing_and_failover() {
         protocol: "openai".to_string(),
         base_url: "http://127.0.0.1:17882".to_string(),
         preset_id: None,
+        auth_type: None,
         api_keys: vec!["sk-test-key-b".to_string()],
         models: vec!["deepseek-chat".to_string()],
         // The primary is asked for "gpt-4o"; this provider only knows deepseek-chat,
@@ -379,4 +381,151 @@ async fn test_e2e_gateway_routing_and_failover() {
     assert_eq!(logs[1].completion_tokens, 12);
 
     println!("E2E Gateway Routing, Fallback, Usage & Chat Test PASSED!");
+}
+
+#[tokio::test]
+async fn test_e2e_gateway_gemini_cross_protocol_and_cli() {
+    let mock_gemini_app = Router::new()
+        .route(
+            "/models/gemini-2.5-pro:generateContent",
+            post(|| async {
+                Json(json!({
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "text": "Gemini response text" }]
+                        },
+                        "finishReason": "STOP"
+                    }],
+                    "usageMetadata": {
+                        "promptTokenCount": 10,
+                        "candidatesTokenCount": 6
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/models/gemini-2.5-pro:streamGenerateContent",
+            post(|| async {
+                let stream_body = concat!(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello stream from Gemini!\"}]}}]}\n\n",
+                    "data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":5}}\n\n"
+                );
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from(stream_body))
+                    .unwrap()
+            }),
+        );
+
+    let gemini_listener = tokio::net::TcpListener::bind("127.0.0.1:16911").await.unwrap();
+    tokio::spawn(async move {
+        axum::serve(gemini_listener, mock_gemini_app).await.unwrap();
+    });
+
+    let db_path = "/tmp/pivot_test_gemini_gw.db";
+    let _ = std::fs::remove_file(db_path);
+    let db = Database::new(db_path.into()).unwrap();
+
+    let gemini_prov = Provider {
+        id: "prov-gemini".to_string(),
+        name: "Google Gemini".to_string(),
+        protocol: "gemini".to_string(),
+        base_url: "http://127.0.0.1:16911".to_string(),
+        preset_id: None,
+        auth_type: None,
+        api_keys: vec!["dummy-key".to_string()],
+        models: vec!["gemini-2.5-pro".to_string()],
+        default_model: None,
+        is_default: false,
+        enabled: true,
+        priority: 1,
+        weight: 1,
+        timeout_secs: 30,
+        latency_ms: None,
+        created_at: None,
+        updated_at: None,
+    };
+    db.save_provider(&gemini_prov).unwrap();
+
+    let stats = Arc::new(GatewayStatsInternal::default());
+    let router_engine = Arc::new(RoutingEngine::new());
+    let gw_state = GatewayState {
+        db: db.clone(),
+        router: router_engine,
+        http_client: reqwest::Client::new(),
+        app_handle: None,
+        stats: stats.clone(),
+    };
+
+    let gw_app = create_gateway_router(gw_state);
+    let gw_listener = tokio::net::TcpListener::bind("127.0.0.1:16912").await.unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw_listener, gw_app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let client = reqwest::Client::new();
+
+    // 1. OpenAI client calls /v1/chat/completions -> routed to Gemini upstream (Non-stream)
+    let oai_resp = client
+        .post("http://127.0.0.1:16912/v1/chat/completions")
+        .json(&json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oai_resp.status(), 200);
+    let oai_val: Value = oai_resp.json().await.unwrap();
+    assert_eq!(oai_val["object"], "chat.completion");
+    assert_eq!(
+        oai_val["choices"][0]["message"]["content"],
+        "Gemini response text"
+    );
+
+    // 2. OpenAI client calls /v1/chat/completions -> routed to Gemini upstream (Stream)
+    let stream_resp = client
+        .post("http://127.0.0.1:16912/v1/chat/completions")
+        .json(&json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hi stream"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_resp.status(), 200);
+    let stream_text = stream_resp.text().await.unwrap();
+    assert!(stream_text.contains("Hello stream from Gemini!"));
+    assert!(stream_text.contains("[DONE]"));
+
+    // 3. Gemini CLI calls GET /v1beta/models
+    let models_resp = client
+        .get("http://127.0.0.1:16912/v1beta/models")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(models_resp.status(), 200);
+    let models_val: Value = models_resp.json().await.unwrap();
+    let models_arr = models_val["models"].as_array().unwrap();
+    assert!(models_arr.iter().any(|m| m["name"] == "models/gemini-2.5-pro"));
+
+    // 4. Gemini CLI calls POST /v1beta/models/gemini-2.5-pro:generateContent
+    let gemini_cli_resp = client
+        .post("http://127.0.0.1:16912/v1beta/models/gemini-2.5-pro:generateContent")
+        .json(&json!({
+            "contents": [{"parts": [{"text": "Hello Gemini CLI"}]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gemini_cli_resp.status(), 200);
+    let gemini_cli_val: Value = gemini_cli_resp.json().await.unwrap();
+    assert_eq!(
+        gemini_cli_val["candidates"][0]["content"]["parts"][0]["text"],
+        "Gemini response text"
+    );
 }

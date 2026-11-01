@@ -9,13 +9,14 @@ use crate::gateway::types::*;
 use async_stream::stream;
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -141,6 +142,10 @@ pub fn create_gateway_router(state: GatewayState) -> Router {
         .route("/v1/messages", post(handle_messages))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/v1/responses", post(handle_responses).get(handle_responses_get))
+        .route("/v1beta/models", get(handle_gemini_list_models))
+        .route("/v1beta/models/{*action}", post(handle_gemini_generate_content).get(handle_gemini_get_model))
+        .route("/models", get(handle_gemini_list_models))
+        .route("/models/{*action}", post(handle_gemini_generate_content).get(handle_gemini_get_model))
         .route("/api/stats", get(get_stats))
         .layer(cors)
         .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
@@ -219,6 +224,43 @@ async fn list_models(State(state): State<GatewayState>) -> Json<Value> {
         "object": "list",
         "data": model_list
     }))
+}
+
+async fn handle_gemini_list_models(State(state): State<GatewayState>) -> Json<Value> {
+    let providers = state.db.get_providers().unwrap_or_default();
+    let mut model_list = Vec::new();
+
+    for p in providers.iter().filter(|p| p.enabled) {
+        for m in &p.models {
+            model_list.push(json!({
+                "name": format!("models/{}", m),
+                "version": "001",
+                "displayName": m,
+                "description": format!("Model {} via Pivot provider {}", m, p.name),
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent", "countTokens"]
+            }));
+        }
+    }
+
+    Json(json!({ "models": model_list }))
+}
+
+async fn handle_gemini_get_model(
+    State(_state): State<GatewayState>,
+    Path(action): Path<String>,
+) -> Response {
+    let clean_action = action.trim_start_matches('/');
+    let model_id = clean_action.strip_prefix("models/").unwrap_or(clean_action);
+    Json(json!({
+        "name": format!("models/{}", model_id),
+        "version": "001",
+        "displayName": model_id,
+        "inputTokenLimit": 1048576,
+        "outputTokenLimit": 8192,
+        "supportedGenerationMethods": ["generateContent", "streamGenerateContent", "countTokens"]
+    })).into_response()
 }
 
 fn extract_session_id(headers: &HeaderMap) -> Option<String> {
@@ -758,27 +800,68 @@ async fn dispatch_anthropic_request(
             }
         }
         "gemini" => {
-            let api_key = cand.api_key.as_deref().unwrap_or("");
             let base = cand.provider.base_url.trim_end_matches('/');
             let gemini_req = anthropic_to_gemini::convert_anthropic_req_to_gemini(req);
+            let is_subscription_pool = cand.provider.auth_type.as_deref() == Some("subscription_pool");
 
-            let endpoint = if is_stream {
-                format!(
-                    "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-                    base, cand.target_model, api_key
+            let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
+                let account = crate::oauth::acquire_subscription_account(
+                    &state.db,
+                    &state.http_client,
+                    &cand.provider.id,
+                )
+                .await?;
+                let ep = if is_stream {
+                    format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+                } else {
+                    format!("{}/v1internal:generateContent", base)
+                };
+                (
+                    Some(account.id),
+                    ep,
+                    Some(format!("Bearer {}", account.access_token)),
                 )
             } else {
-                format!(
-                    "{}/models/{}:generateContent?key={}",
-                    base, cand.target_model, api_key
-                )
+                let api_key = cand.api_key.as_deref().unwrap_or("");
+                let ep = if is_stream {
+                    format!(
+                        "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                        base, cand.target_model, api_key
+                    )
+                } else {
+                    format!(
+                        "{}/models/{}:generateContent?key={}",
+                        base, cand.target_model, api_key
+                    )
+                };
+                (None, ep, None)
             };
 
-            let res = client
+            let mut req_builder = client
                 .post(&endpoint)
                 .timeout(timeout)
-                .header("content-type", "application/json")
-                .json(&gemini_req)
+                .header("content-type", "application/json");
+
+            let req_body_val = if is_subscription_pool {
+                json!({
+                    "model": cand.target_model,
+                    "request": serde_json::to_value(&gemini_req).unwrap_or(json!({}))
+                })
+            } else {
+                serde_json::to_value(&gemini_req).unwrap_or(json!({}))
+            };
+
+            if let Some(auth) = auth_header {
+                req_builder = req_builder
+                    .header("authorization", auth)
+                    .header(
+                        "user-agent",
+                        "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
+                    );
+            }
+
+            let res = req_builder
+                .json(&req_body_val)
                 .send()
                 .await
                 .map_err(|e| {
@@ -789,6 +872,11 @@ async fn dispatch_anthropic_request(
                 })?;
 
             if !res.status().is_success() {
+                if res.status() == StatusCode::TOO_MANY_REQUESTS {
+                    if let Some(ref acc_id) = sub_account_id {
+                        crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
+                    }
+                }
                 let status =
                     StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let text = res.text().await.unwrap_or_default();
@@ -820,7 +908,8 @@ async fn dispatch_anthropic_request(
                                         if line.starts_with("data:") {
                                             let payload = line.trim_start_matches("data:").trim();
                                             if let Ok(val) = serde_json::from_str::<Value>(payload) {
-                                                if let Some(usage) = val.get("usageMetadata") {
+                                                let actual_val = val.get("response").unwrap_or(&val);
+                                                if let Some(usage) = actual_val.get("usageMetadata") {
                                                     if let Some(pt) = usage.get("promptTokenCount").and_then(Value::as_u64) {
                                                         if pt > 0 { final_prompt_tokens = pt as u32; }
                                                     }
@@ -858,7 +947,12 @@ async fn dispatch_anthropic_request(
                         }
                     }
 
-                    for event in finish_gemini_stream(&mut sse_state, "end_turn") {
+                    let final_stop_reason = if sse_state.current_tool_id.is_some() {
+                        "tool_use"
+                    } else {
+                        "end_turn"
+                    };
+                    for event in finish_gemini_stream(&mut sse_state, final_stop_reason) {
                         yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
                     }
 
@@ -889,7 +983,14 @@ async fn dispatch_anthropic_request(
                     completion_tokens: 0,
                 })
             } else {
-                let gemini_resp: GeminiResponse = res.json().await.map_err(|e| {
+                let raw_val: Value = res.json().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse Gemini response: {}", e),
+                    )
+                })?;
+                let resp_val = raw_val.get("response").unwrap_or(&raw_val);
+                let gemini_resp: GeminiResponse = serde_json::from_value(resp_val.clone()).map_err(|e| {
                     (
                         StatusCode::BAD_GATEWAY,
                         format!("Failed to parse Gemini response: {}", e),
@@ -1646,10 +1747,691 @@ async fn dispatch_openai_request(
                 })
             }
         }
+        "gemini" => {
+            let anthropic_req =
+                openai_to_anthropic::convert_openai_req_to_anthropic(req, &cand.target_model);
+            let gemini_req = anthropic_to_gemini::convert_anthropic_req_to_gemini(&anthropic_req);
+
+            let is_subscription_pool =
+                cand.provider.auth_type.as_deref() == Some("subscription_pool");
+            let base = cand.provider.base_url.trim_end_matches('/');
+
+            let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
+                let account = crate::oauth::acquire_subscription_account(
+                    &state.db,
+                    &state.http_client,
+                    &cand.provider.id,
+                )
+                .await?;
+                let ep = if is_stream {
+                    format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+                } else {
+                    format!("{}/v1internal:generateContent", base)
+                };
+                (
+                    Some(account.id),
+                    ep,
+                    Some(format!("Bearer {}", account.access_token)),
+                )
+            } else {
+                let api_key = cand.api_key.as_deref().or(client_key).unwrap_or("");
+                let ep = if is_stream {
+                    format!(
+                        "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                        base, cand.target_model, api_key
+                    )
+                } else {
+                    format!(
+                        "{}/models/{}:generateContent?key={}",
+                        base, cand.target_model, api_key
+                    )
+                };
+                (None, ep, None)
+            };
+
+            let mut req_builder = client
+                .post(&endpoint)
+                .timeout(timeout)
+                .header("content-type", "application/json");
+
+            let req_body_val = if is_subscription_pool {
+                json!({
+                    "model": cand.target_model,
+                    "request": serde_json::to_value(&gemini_req).unwrap_or(json!({}))
+                })
+            } else {
+                serde_json::to_value(&gemini_req).unwrap_or(json!({}))
+            };
+
+            if let Some(auth) = auth_header {
+                req_builder = req_builder
+                    .header("authorization", auth)
+                    .header(
+                        "user-agent",
+                        "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
+                    );
+            }
+
+            let res = req_builder
+                .json(&req_body_val)
+                .send()
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Gemini upstream connection failed: {}", e),
+                    )
+                })?;
+
+            if !res.status().is_success() {
+                if res.status() == StatusCode::TOO_MANY_REQUESTS {
+                    if let Some(ref acc_id) = sub_account_id {
+                        crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
+                    }
+                }
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let text = res.text().await.unwrap_or_default();
+                return Err((status, text));
+            }
+
+            if is_stream {
+                let req_id_str = req_id.to_string();
+                let model_str = req.model.clone();
+                let byte_stream = res.bytes_stream();
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
+
+                let sse_stream = stream! {
+                    let mut buffer = String::new();
+                    let mut sse_state = SseState::new();
+                    let mut final_prompt_tokens = estimated_prompt;
+                    let mut final_completion_tokens = 0u32;
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            if let Ok(s) = std::str::from_utf8(&bytes) {
+                                buffer.push_str(s);
+
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].trim().to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+
+                                    if !line.is_empty() {
+                                        if line.starts_with("data:") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                let actual_val = val.get("response").unwrap_or(&val);
+                                                if let Some(usage) = actual_val.get("usageMetadata") {
+                                                    if let Some(pt) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                    }
+                                                    if let Some(ct) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+                                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        let anthropic_events = parse_gemini_chunk_to_anthropic_events(
+                                            &line,
+                                            &mut sse_state,
+                                            &req_id_str,
+                                            &model_str,
+                                        );
+                                        for a_evt in anthropic_events {
+                                            let oai_chunks = parse_anthropic_event_to_openai_chunks(
+                                                &a_evt,
+                                                &req_id_str,
+                                                &model_str,
+                                            );
+                                            for o_chunk in oai_chunks {
+                                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !buffer.trim().is_empty() {
+                        let anthropic_events = parse_gemini_chunk_to_anthropic_events(
+                            buffer.trim(),
+                            &mut sse_state,
+                            &req_id_str,
+                            &model_str,
+                        );
+                        for a_evt in anthropic_events {
+                            let oai_chunks = parse_anthropic_event_to_openai_chunks(
+                                &a_evt,
+                                &req_id_str,
+                                &model_str,
+                            );
+                            for o_chunk in oai_chunks {
+                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
+                            }
+                        }
+                    }
+
+                    let final_stop_reason = if sse_state.current_tool_id.is_some() {
+                        "tool_use"
+                    } else {
+                        "end_turn"
+                    };
+                    for a_evt in finish_gemini_stream(&mut sse_state, final_stop_reason) {
+                        let oai_chunks = parse_anthropic_event_to_openai_chunks(
+                            &a_evt,
+                            &req_id_str,
+                            &model_str,
+                        );
+                        for o_chunk in oai_chunks {
+                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
+                        }
+                    }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = sse_state.total_output_tokens.max(1);
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > estimated_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - estimated_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
+                };
+
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(sse_stream))
+                        .unwrap(),
+                    prompt_tokens: estimated_prompt,
+                    completion_tokens: 0,
+                })
+            } else {
+                let raw_val: Value = res.json().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse Gemini response: {}", e),
+                    )
+                })?;
+                let resp_val = raw_val.get("response").unwrap_or(&raw_val);
+                let gemini_resp: GeminiResponse = serde_json::from_value(resp_val.clone()).map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse Gemini response: {}", e),
+                    )
+                })?;
+                let usage = gemini_resp.usage_metadata.clone();
+                let prompt_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.prompt_token_count)
+                    .unwrap_or(estimated_prompt);
+                let completion_tokens = usage
+                    .as_ref()
+                    .and_then(|u| u.candidates_token_count)
+                    .unwrap_or(0);
+
+                let anthropic_resp = anthropic_to_gemini::convert_gemini_resp_to_anthropic(
+                    &gemini_resp,
+                    &cand.target_model,
+                );
+                let openai_resp = openai_to_anthropic::convert_anthropic_resp_to_openai(
+                    &anthropic_resp,
+                    &req.model,
+                );
+
+                Ok(DispatchResult {
+                    response: Json(openai_resp).into_response(),
+                    prompt_tokens,
+                    completion_tokens,
+                })
+            }
+        }
         _ => Err((
             StatusCode::BAD_GATEWAY,
             format!(
                 "Unsupported protocol for chat completions: {}",
+                cand.provider.protocol
+            ),
+        )),
+    }
+}
+
+async fn handle_gemini_generate_content(
+    State(state): State<GatewayState>,
+    Path(action): Path<String>,
+    Query(query_params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    Json(req_body): Json<Value>,
+) -> Response {
+    let start_time = Instant::now();
+    let req_id = uuid::Uuid::new_v4().to_string();
+    state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
+    state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+
+    let clean_action = action.trim_start_matches('/');
+    let model_and_method = clean_action.strip_prefix("models/").unwrap_or(clean_action);
+    let (model, method) = match model_and_method.split_once(':') {
+        Some((m, method)) => (m, method),
+        None => (model_and_method, "generateContent"),
+    };
+    let is_stream = method.contains("streamGenerateContent")
+        || query_params.get("alt").map(|s| s.as_str()) == Some("sse");
+
+    let client_key = headers
+        .get("x-goog-api-key")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| query_params.get("key").map(|s| s.as_str()))
+        .or_else(|| {
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "))
+        });
+
+    let client_type = detect_client_type(&headers, "gemini_cli");
+    let session_id = extract_session_id(&headers);
+    let providers = state.db.get_providers().unwrap_or_default();
+    let routes = state.db.get_routes().unwrap_or_default();
+
+    let route_match = match state.router.resolve_route(
+        model,
+        session_id.as_deref(),
+        &providers,
+        &routes,
+    ) {
+        Ok(rm) => rm,
+        Err(err) => {
+            state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+            log_request(
+                &state,
+                RequestLog {
+                    id: req_id.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    method: "POST".to_string(),
+                    path: format!("/models/{}", action),
+                    client_type: client_type.clone(),
+                    incoming_model: model.to_string(),
+                    routed_provider_id: "none".to_string(),
+                    routed_provider_name: None,
+                    routed_model: String::new(),
+                    status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
+                    latency_ms: start_time.elapsed().as_millis() as i64,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error_message: Some(err.clone()),
+                    is_stream,
+                    fallback_used: false,
+                    attempts: vec![],
+                },
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": {
+                        "code": 502,
+                        "message": err,
+                        "status": "UNAVAILABLE"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut candidates = vec![route_match.primary];
+    candidates.extend(route_match.fallbacks);
+
+    let mut attempts: Vec<LogAttempt> = Vec::new();
+    let mut last_error = String::new();
+    let mut last_status = StatusCode::BAD_GATEWAY;
+    let mut fallback_used = false;
+
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        if cand_idx > 0 {
+            fallback_used = true;
+            tracing::warn!(
+                "Failing over Gemini request to fallback candidate {} ({})",
+                cand.provider.name,
+                cand.target_model
+            );
+        }
+
+        let attempt_started = Instant::now();
+        let resp_result = dispatch_gemini_request(
+            &state,
+            &req_body,
+            cand,
+            &req_id,
+            is_stream,
+            method,
+            client_key,
+        )
+        .await;
+
+        match resp_result {
+            Ok(result) => {
+                let latency_ms = start_time.elapsed().as_millis() as i64;
+                attempts.push(attempt(
+                    cand,
+                    StatusCode::OK,
+                    None,
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
+                state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_prompt_tokens
+                    .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_completion_tokens
+                    .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
+
+                let log = RequestLog {
+                    id: req_id,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    method: "POST".to_string(),
+                    path: format!("/models/{}", action),
+                    client_type,
+                    incoming_model: model.to_string(),
+                    routed_provider_id: cand.provider.id.clone(),
+                    routed_provider_name: Some(cand.provider.name.clone()),
+                    routed_model: cand.target_model.clone(),
+                    status_code: StatusCode::OK.as_u16() as i32,
+                    latency_ms,
+                    prompt_tokens: result.prompt_tokens as i32,
+                    completion_tokens: result.completion_tokens as i32,
+                    error_message: None,
+                    is_stream,
+                    fallback_used,
+                    attempts,
+                };
+                log_request(&state, log.clone());
+                emit_log_event(&state, &log);
+                return result.response;
+            }
+            Err((status, err_text)) => {
+                let attempt_latency = attempt_started.elapsed().as_millis() as i64;
+                attempts.push(attempt(cand, status, Some(err_text.clone()), attempt_latency));
+                last_error = err_text;
+                last_status = status;
+                tracing::warn!(
+                    "Gemini candidate {} ({}) failed with status {}: {}",
+                    cand.provider.name,
+                    cand.target_model,
+                    status,
+                    last_error
+                );
+            }
+        }
+    }
+
+    state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+    state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+
+    let log = RequestLog {
+        id: req_id,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        method: "POST".to_string(),
+        path: format!("/models/{}", action),
+        client_type,
+        incoming_model: model.to_string(),
+        routed_provider_id: "none".to_string(),
+        routed_provider_name: None,
+        routed_model: String::new(),
+        status_code: last_status.as_u16() as i32,
+        latency_ms: start_time.elapsed().as_millis() as i64,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        error_message: Some(last_error.clone()),
+        is_stream,
+        fallback_used,
+        attempts,
+    };
+    log_request(&state, log.clone());
+    emit_log_event(&state, &log);
+
+    (
+        last_status,
+        Json(json!({
+            "error": {
+                "code": last_status.as_u16(),
+                "message": last_error,
+                "status": "UNAVAILABLE"
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn dispatch_gemini_request(
+    state: &GatewayState,
+    req_body: &Value,
+    cand: &RouteCandidate,
+    req_id: &str,
+    is_stream: bool,
+    _method: &str,
+    client_key: Option<&str>,
+) -> Result<DispatchResult, (StatusCode, String)> {
+    let client = &state.http_client;
+    let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
+
+    match cand.provider.protocol.as_str() {
+        "gemini" => {
+            let mut sanitized_req = req_body.clone();
+            if let Some(tools) = sanitized_req.get_mut("tools").and_then(Value::as_array_mut) {
+                for tool in tools {
+                    let decls_opt = if tool.get("functionDeclarations").is_some() {
+                        tool.get_mut("functionDeclarations").and_then(Value::as_array_mut)
+                    } else {
+                        tool.get_mut("function_declarations").and_then(Value::as_array_mut)
+                    };
+                    if let Some(decls) = decls_opt {
+                        for decl in decls {
+                            if let Some(params) = decl.get_mut("parameters") {
+                                anthropic_to_gemini::sanitize_gemini_schema(params);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let is_subscription_pool =
+                cand.provider.auth_type.as_deref() == Some("subscription_pool");
+            let base = cand.provider.base_url.trim_end_matches('/');
+
+            let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
+                let account = crate::oauth::acquire_subscription_account(
+                    &state.db,
+                    &state.http_client,
+                    &cand.provider.id,
+                )
+                .await?;
+                let ep = if is_stream {
+                    format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+                } else {
+                    format!("{}/v1internal:generateContent", base)
+                };
+                (
+                    Some(account.id),
+                    ep,
+                    Some(format!("Bearer {}", account.access_token)),
+                )
+            } else {
+                let api_key = cand.api_key.as_deref().or(client_key).unwrap_or("");
+                let ep = if is_stream {
+                    format!(
+                        "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                        base, cand.target_model, api_key
+                    )
+                } else {
+                    format!(
+                        "{}/models/{}:generateContent?key={}",
+                        base, cand.target_model, api_key
+                    )
+                };
+                (None, ep, None)
+            };
+
+            let mut req_builder = client
+                .post(&endpoint)
+                .timeout(timeout)
+                .header("content-type", "application/json");
+
+            let req_body_val = if is_subscription_pool {
+                json!({
+                    "model": cand.target_model,
+                    "request": sanitized_req
+                })
+            } else {
+                sanitized_req
+            };
+
+            if let Some(auth) = auth_header {
+                req_builder = req_builder
+                    .header("authorization", auth)
+                    .header(
+                        "user-agent",
+                        "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
+                    );
+            }
+
+            let res = req_builder
+                .json(&req_body_val)
+                .send()
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Gemini upstream connection failed: {}", e),
+                    )
+                })?;
+
+            if !res.status().is_success() {
+                if res.status() == StatusCode::TOO_MANY_REQUESTS {
+                    if let Some(ref acc_id) = sub_account_id {
+                        crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
+                    }
+                }
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let text = res.text().await.unwrap_or_default();
+                return Err((status, text));
+            }
+
+            if is_stream {
+                let req_id_str = req_id.to_string();
+                let byte_stream = res.bytes_stream();
+                let db_clone = state.db.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
+
+                let sse_stream = stream! {
+                    let mut buffer = String::new();
+                    let mut final_prompt_tokens = 0u32;
+                    let mut final_completion_tokens = 0u32;
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            if let Ok(s) = std::str::from_utf8(&bytes) {
+                                buffer.push_str(s);
+
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].trim().to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+
+                                    if !line.is_empty() {
+                                        if line.starts_with("data:") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                let actual_val = val.get("response").unwrap_or(&val);
+                                                if let Some(usage) = actual_val.get("usageMetadata") {
+                                                    if let Some(pt) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                    }
+                                                    if let Some(ct) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+                                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                                    }
+                                                }
+
+                                                if val.get("response").is_some() {
+                                                    let clean_line = format!("data: {}\n\n", serde_json::to_string(actual_val).unwrap_or_default());
+                                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(clean_line));
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
+                                        let out_line = format!("{}\n", line);
+                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(out_line));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    let _ = db_clone.update_request_log_tokens(
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    stats_clone.total_prompt_tokens.fetch_add(final_prompt_tokens as u64, Ordering::Relaxed);
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
+                };
+
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(sse_stream))
+                        .unwrap(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                })
+            } else {
+                let raw_val: Value = res.json().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse Gemini response: {}", e),
+                    )
+                })?;
+                let resp_val = raw_val.get("response").unwrap_or(&raw_val).clone();
+                let usage = resp_val.get("usageMetadata");
+                let prompt_tokens = usage
+                    .and_then(|u| u.get("promptTokenCount"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
+                let completion_tokens = usage
+                    .and_then(|u| u.get("candidatesTokenCount"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
+
+                Ok(DispatchResult {
+                    response: Json(resp_val).into_response(),
+                    prompt_tokens,
+                    completion_tokens,
+                })
+            }
+        }
+        _ => Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Gemini endpoint currently only supports Gemini providers (got protocol {})",
                 cand.provider.protocol
             ),
         )),

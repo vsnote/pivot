@@ -22,7 +22,7 @@ try {
       '01ai': true, together: true, cerebras: true, perplexity: true, cohere: true,
       github: true, fireworks: true, xai: true, novita: true, deepinfra: true,
       hyperbolic: true, sambanova: true, hunyuan: true, wenxin: true, lmstudio: true,
-      vllm: true, cloudflare: true, claude: true, claudecode: true, pi: true
+      vllm: true, cloudflare: true, claude: true, claudecode: true, pi: true, antigravity: true
     };`,
   );
 
@@ -101,6 +101,7 @@ try {
       { name: 'GitHub Models', expected: 'github' },
       { name: 'xAI', expected: 'xai' },
       { name: 'Pi Agent', expected: 'pi' },
+      { name: 'Antigravity', expected: 'antigravity' },
     ];
 
     for (const { name, expected } of checks) {

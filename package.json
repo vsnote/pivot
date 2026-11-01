@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "node --test scripts/test_*.mjs",
-    "test:cli": "node scripts/simulate_claude_cli.mjs"
+    "test:cli": "node scripts/simulate_claude_cli.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.3.1",

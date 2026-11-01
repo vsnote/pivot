@@ -5,6 +5,7 @@ pub mod gateway;
 pub mod interceptor;
 pub mod macos_tab;
 pub mod model_catalog;
+pub mod oauth;
 pub mod state;
 pub mod tray;
 
@@ -148,6 +149,13 @@ pub fn run() {
             fetch_provider_models,
             sync_native_tab,
             set_native_toolbar_enabled,
+            start_subscription_oauth,
+            get_subscription_accounts,
+            delete_subscription_account,
+            toggle_subscription_account,
+            sync_subscription_models,
+            get_subscription_account_quota,
+            get_all_subscription_quotas,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

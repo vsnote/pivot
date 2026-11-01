@@ -1,7 +1,8 @@
 use crate::db::presets::{self, Preset};
 use crate::gateway::router as gateway_router;
-use crate::db::{Provider, RequestLog, RouteRule};
+use crate::db::{Provider, RequestLog, RouteRule, SubscriptionAccount};
 use crate::interceptor::{InterceptorInfo, InterceptorManager};
+use crate::oauth;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -371,6 +372,7 @@ pub async fn import_third_party_provider(
                 protocol: third_party.protocol,
                 base_url: third_party.endpoint,
                 preset_id: None,
+                auth_type: None,
                 api_keys: third_party
                     .auth_token
                     .filter(|s| !s.trim().is_empty())
@@ -437,5 +439,239 @@ pub async fn set_provider_enabled(state: State<'_, AppState>, id: String, enable
     let _ = mgr.sync_pi_models_if_intercepted();
     Ok(())
 }
+
+#[tauri::command]
+pub async fn start_subscription_oauth(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    provider_id: String,
+    account_type: String,
+) -> Result<SubscriptionAccount, String> {
+    let pkce = oauth::generate_pkce();
+    let state_str = uuid::Uuid::new_v4().to_string();
+    let auth_url = oauth::build_auth_url(&pkce, &state_str);
+
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(&auth_url, None::<&str>)
+        .map_err(|e| format!("无法打开浏览器: {}", e))?;
+
+    let code = oauth::listen_for_code(&state_str, 120).await?;
+
+    let token_resp =
+        oauth::exchange_code_for_tokens(&state.http_client, &code, &pkce.verifier).await?;
+
+    let now_sec = chrono::Utc::now().timestamp();
+    let expires_at = now_sec + token_resp.expires_in;
+    let now_str = chrono::Utc::now().to_rfc3339();
+
+    let existing_accounts = state.db.get_subscription_accounts(&provider_id).unwrap_or_default();
+    if let Some(target) = existing_accounts
+        .into_iter()
+        .find(|a| a.email == token_resp.email && token_resp.email.is_some())
+    {
+        state
+            .db
+            .update_account_tokens(
+                &target.id,
+                &token_resp.access_token,
+                token_resp.refresh_token.as_deref(),
+                expires_at,
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut updated = target;
+        updated.access_token = token_resp.access_token;
+        if let Some(rf) = token_resp.refresh_token {
+            updated.refresh_token = Some(rf);
+        }
+        updated.expires_at = expires_at;
+        updated.updated_at = now_str;
+        return Ok(updated);
+    }
+
+    let account = SubscriptionAccount {
+        id: format!("sub_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        provider_id,
+        account_type,
+        email: token_resp.email,
+        access_token: token_resp.access_token,
+        refresh_token: token_resp.refresh_token,
+        expires_at,
+        cooldown_until: 0,
+        enabled: true,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    };
+
+    state
+        .db
+        .save_subscription_account(&account)
+        .map_err(|e| e.to_string())?;
+    Ok(account)
+}
+
+#[tauri::command]
+pub fn get_subscription_accounts(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Vec<SubscriptionAccount>, String> {
+    state
+        .db
+        .get_subscription_accounts(&provider_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_subscription_account(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_subscription_account(&account_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn toggle_subscription_account(
+    state: State<'_, AppState>,
+    provider_id: String,
+    account_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let accounts = state
+        .db
+        .get_subscription_accounts(&provider_id)
+        .map_err(|e| e.to_string())?;
+    if let Some(mut account) = accounts.into_iter().find(|a| a.id == account_id) {
+        account.enabled = enabled;
+        state
+            .db
+            .save_subscription_account(&account)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_subscription_models(
+    state: State<'_, AppState>,
+    provider_id: String,
+    base_url: String,
+) -> Result<Vec<String>, String> {
+    let account = oauth::acquire_subscription_account(&state.db, &state.http_client, &provider_id)
+        .await
+        .map_err(|(_, msg)| msg)?;
+
+    oauth::fetch_antigravity_models(&state.http_client, &account.access_token, &base_url).await
+}
+
+#[tauri::command]
+pub async fn get_subscription_account_quota(
+    state: State<'_, AppState>,
+    provider_id: String,
+    account_id: String,
+    base_url: Option<String>,
+) -> Result<oauth::AccountQuota, String> {
+    let accounts = state
+        .db
+        .get_subscription_accounts(&provider_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut account = accounts
+        .into_iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "未找到指定订阅账号".to_string())?;
+
+    let now_sec = chrono::Utc::now().timestamp();
+    // 检查 Token 是否需要刷新
+    if account.expires_at - now_sec < 300 {
+        if let Some(ref refresh_token) = account.refresh_token {
+            if let Ok((new_token, expires_in)) =
+                oauth::refresh_antigravity_token(&state.http_client, refresh_token).await
+            {
+                let new_expires_at = now_sec + expires_in;
+                let _ = state.db.update_account_tokens(
+                    &account.id,
+                    &new_token,
+                    account.refresh_token.as_deref(),
+                    new_expires_at,
+                );
+                account.access_token = new_token;
+                account.expires_at = new_expires_at;
+            }
+        }
+    }
+
+    let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
+
+    match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
+        Ok(buckets) => {
+            let mut any_exhausted = false;
+            let mut max_reset_sec = 0i64;
+
+            for b in &buckets {
+                if b.is_exhausted {
+                    any_exhausted = true;
+                    if let Some(ref rt) = b.reset_time {
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rt) {
+                            let reset_sec = dt.timestamp();
+                            if reset_sec > max_reset_sec {
+                                max_reset_sec = reset_sec;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if any_exhausted && max_reset_sec > now_sec {
+                let _ = state.db.set_account_cooldown(&account.id, max_reset_sec);
+            } else if !any_exhausted && account.cooldown_until > 0 && account.cooldown_until <= now_sec {
+                // 已过冷却时间或额度已恢复，解除冷却标记
+                let _ = state.db.set_account_cooldown(&account.id, 0);
+            }
+
+            Ok(oauth::AccountQuota {
+                account_id,
+                updated_at: now_sec,
+                buckets,
+                error: None,
+            })
+        }
+        Err(e) => Ok(oauth::AccountQuota {
+            account_id,
+            updated_at: now_sec,
+            buckets: Vec::new(),
+            error: Some(e),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn get_all_subscription_quotas(
+    state: State<'_, AppState>,
+    provider_id: String,
+    base_url: Option<String>,
+) -> Result<Vec<oauth::AccountQuota>, String> {
+    let accounts = state
+        .db
+        .get_subscription_accounts(&provider_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+    for acc in accounts {
+        let quota = get_subscription_account_quota(
+            state.clone(),
+            provider_id.clone(),
+            acc.id.clone(),
+            base_url.clone(),
+        )
+        .await?;
+        results.push(quota);
+    }
+    Ok(results)
+}
+
 
 

@@ -174,6 +174,8 @@ pub fn convert_anthropic_req_to_openai(
         None
     };
 
+    let tool_choice = convert_anthropic_tool_choice_to_openai(&req.tool_choice);
+
     OpenAIChatRequest {
         model: target_model.to_string(),
         messages: openai_messages,
@@ -182,12 +184,35 @@ pub fn convert_anthropic_req_to_openai(
         max_completion_tokens: req.max_tokens,
         reasoning_effort,
         tools: openai_tools,
-        tool_choice: req.tool_choice.clone(),
+        tool_choice,
         stream: req.stream,
         stream_options: req
             .stream
             .filter(|s| *s)
             .map(|_| json!({ "include_usage": true })),
+    }
+}
+
+pub fn convert_anthropic_tool_choice_to_openai(choice: &Option<Value>) -> Option<Value> {
+    match choice {
+        Some(Value::Object(map)) => {
+            let t = map.get("type").and_then(Value::as_str).unwrap_or("");
+            match t {
+                "auto" => Some(json!("auto")),
+                "any" => Some(json!("required")),
+                "tool" => {
+                    let name = map.get("name").and_then(Value::as_str).unwrap_or("");
+                    Some(json!({
+                        "type": "function",
+                        "function": { "name": name }
+                    }))
+                }
+                _ => Some(Value::Object(map.clone())),
+            }
+        }
+        Some(Value::String(s)) => Some(Value::String(s.clone())),
+        Some(other) => Some(other.clone()),
+        None => None,
     }
 }
 
@@ -330,5 +355,25 @@ mod tests {
             Some("call_123".to_string())
         );
         assert_eq!(oai_req.tools.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_anthropic_tool_choice_to_openai() {
+        assert_eq!(
+            convert_anthropic_tool_choice_to_openai(&Some(json!({"type": "auto"}))),
+            Some(json!("auto"))
+        );
+        assert_eq!(
+            convert_anthropic_tool_choice_to_openai(&Some(json!({"type": "any"}))),
+            Some(json!("required"))
+        );
+        assert_eq!(
+            convert_anthropic_tool_choice_to_openai(&Some(json!({"type": "tool", "name": "Bash"}))),
+            Some(json!({"type": "function", "function": {"name": "Bash"}}))
+        );
+        assert_eq!(
+            convert_anthropic_tool_choice_to_openai(&None),
+            None
+        );
     }
 }

@@ -41,12 +41,18 @@ export const PiLogo: React.FC<{ className?: string }> = ({ className = 'w-4 h-4'
   return Component ? <Component className={className} /> : null;
 };
 
+export const AntigravityLogo: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => {
+  const Component = BrandIconRenderers.antigravity;
+  return Component ? <Component className={className} /> : null;
+};
+
 export type BrandType =
   | 'openai'
   | 'anthropic'
   | 'claude'
   | 'claudecode'
   | 'gemini'
+  | 'antigravity'
   | 'deepseek'
   | 'openrouter'
   | 'ollama'
@@ -115,6 +121,7 @@ export function detectProviderBrand(
   const p = (protocol || '').toLowerCase();
 
   // 2. 识别品牌名称与协议
+  if (n.includes('antigravity') || n.includes('anti-gravity')) return 'antigravity';
   if (n.includes('deepseek') || n.includes('深度求索')) return 'deepseek';
   if (n.includes('claudecode') || n.includes('claude code')) return 'claudecode';
   if (n.includes('claude')) return 'claude';

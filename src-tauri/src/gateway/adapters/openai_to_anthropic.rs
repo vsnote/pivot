@@ -131,6 +131,8 @@ pub fn convert_openai_req_to_anthropic(
         )
     };
 
+    let tool_choice = convert_openai_tool_choice_to_anthropic(&req.tool_choice);
+
     AnthropicMessageRequest {
         model: target_model.to_string(),
         messages: anthropic_messages,
@@ -142,10 +144,39 @@ pub fn convert_openai_req_to_anthropic(
         max_tokens,
         temperature,
         tools: anthropic_tools,
-        tool_choice: req.tool_choice.clone(),
+        tool_choice,
         stream: req.stream,
         thinking,
         metadata: None,
+    }
+}
+
+pub fn convert_openai_tool_choice_to_anthropic(choice: &Option<Value>) -> Option<Value> {
+    match choice {
+        Some(Value::String(s)) => match s.as_str() {
+            "auto" => Some(json!({ "type": "auto" })),
+            "required" => Some(json!({ "type": "any" })),
+            "none" => None,
+            _ => Some(json!({ "type": "auto" })),
+        },
+        Some(Value::Object(map)) => {
+            let t = map.get("type").and_then(Value::as_str).unwrap_or("");
+            if t == "function" {
+                let name = map
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                Some(json!({
+                    "type": "tool",
+                    "name": name
+                }))
+            } else {
+                Some(Value::Object(map.clone()))
+            }
+        }
+        Some(other) => Some(other.clone()),
+        None => None,
     }
 }
 
@@ -231,5 +262,35 @@ pub fn convert_anthropic_resp_to_openai(
             completion_tokens: resp.usage.output_tokens,
             total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_openai_tool_choice_to_anthropic() {
+        assert_eq!(
+            convert_openai_tool_choice_to_anthropic(&Some(json!("none"))),
+            None
+        );
+        assert_eq!(
+            convert_openai_tool_choice_to_anthropic(&Some(json!("auto"))),
+            Some(json!({"type": "auto"}))
+        );
+        assert_eq!(
+            convert_openai_tool_choice_to_anthropic(&Some(json!("required"))),
+            Some(json!({"type": "any"}))
+        );
+        assert_eq!(
+            convert_openai_tool_choice_to_anthropic(&Some(json!({"type": "function", "function": {"name": "Bash"}}))),
+            Some(json!({"type": "tool", "name": "Bash"}))
+        );
+        assert_eq!(
+            convert_openai_tool_choice_to_anthropic(&None),
+            None
+        );
     }
 }

@@ -37,6 +37,8 @@ dirs = "5.0"
 regex = "1.11"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
+sha2 = "0.10"
+base64 = "0.22"
 futures-util = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"

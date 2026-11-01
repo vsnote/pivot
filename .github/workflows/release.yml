@@ -1,0 +1,243 @@
+name: Release macOS App
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: '发布版本标签 (例如 v0.1.0，留空则自动读取 package.json)'
+        required: false
+        type: string
+      draft:
+        description: '是否保持为草稿 (Draft)'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: '是否标记为预发布 (Pre-release)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.prepare_release.outputs.release_id }}
+      tag_name: ${{ steps.prepare_release.outputs.tag_name }}
+      should_release: ${{ steps.prepare_release.outputs.should_release }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Version & Prepare Release
+        id: prepare_release
+        uses: actions/github-script@v7
+        env:
+          INPUT_TAG: ${{ inputs.tag_name || '' }}
+          DRAFT: ${{ inputs.draft || 'false' }}
+          PRERELEASE: ${{ inputs.prerelease || 'false' }}
+        with:
+          script: |
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            const pkgVersion = pkg.version;
+
+            let tagName = process.env.INPUT_TAG;
+            if (!tagName) {
+              if (context.ref && context.ref.startsWith('refs/tags/')) {
+                tagName = context.ref.replace('refs/tags/', '');
+              } else {
+                tagName = `v${pkgVersion}`;
+              }
+            }
+            console.log(`Target release tag: ${tagName}`);
+
+            const isPrerelease = process.env.PRERELEASE === 'true';
+            const isPushBranch = context.eventName === 'push' && (!context.ref || !context.ref.startsWith('refs/tags/'));
+
+            // 如果是 master 分支推送，检查该 tag 是否已经存在已发布的 release
+            if (isPushBranch) {
+              try {
+                const existing = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: tagName,
+                });
+                if (existing && existing.data && !existing.data.draft) {
+                  console.log(`Release for tag ${tagName} already exists and is published. Skipping auto-release.`);
+                  core.setOutput('should_release', 'false');
+                  return;
+                }
+              } catch (err) {
+                console.log(`No existing published release for tag ${tagName}. Proceeding with auto-release.`);
+              }
+            }
+
+            core.setOutput('should_release', 'true');
+            core.setOutput('tag_name', tagName);
+
+            // 查找或创建 Release
+            let release;
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tagName,
+              });
+              release = existing.data;
+              console.log(`Found existing release ID: ${release.id}`);
+            } catch (err) {
+              console.log(`Creating release for tag ${tagName}...`);
+
+              let generatedNotes = '';
+              try {
+                const notesRes = await github.rest.repos.generateReleaseNotes({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tagName,
+                  target_commitish: context.sha,
+                });
+                generatedNotes = notesRes.data.body || '';
+              } catch (notesErr) {
+                console.log('generateReleaseNotes warning:', notesErr.message);
+              }
+
+              const macosNotice = [
+                '### 🍎 macOS 安装与下载说明',
+                '',
+                '| 芯片架构 | 适用机型 | 安装包推荐 |',
+                '| :--- | :--- | :--- |',
+                '| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | `Pivot_*_aarch64.dmg` |',
+                '| **Intel** | 采用 Intel 处理器的传统 Mac | `Pivot_*_x64.dmg` |',
+                '',
+                '> **💡 首次打开提示「已损坏」或「无法打开」？**',
+                '> 由于开源分发未内置苹果商业付费证书签名，macOS Gatekeeper 可能会弹出拦截提示。可通过以下方式解决：',
+                '> 1. 打开系统「设置」->「隐私与安全性」，在安全性部分找到提示并点击「仍要打开」。',
+                '> 2. 或在终端 (Terminal) 中执行以下命令去除隔离标记：',
+                '>    ```bash',
+                '>    sudo xattr -r -d com.apple.quarantine /Applications/Pivot.app',
+                '>    ```',
+                '',
+                '---',
+                '',
+              ].join('\n');
+
+              const finalBody = generatedNotes
+                ? `${macosNotice}${generatedNotes}`
+                : `${macosNotice}### 📦 变更说明\n\n发布版本 ${tagName}。`;
+
+              const created = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tagName,
+                target_commitish: context.sha,
+                name: `Pivot ${tagName}`,
+                body: finalBody,
+                draft: true,
+                prerelease: isPrerelease,
+              });
+              release = created.data;
+            }
+
+            core.setOutput('release_id', release.id.toString());
+
+  build-macos:
+    name: Build macOS (${{ matrix.name }})
+    needs: create-release
+    if: needs.create-release.outputs.should_release == 'true'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            name: Apple Silicon (aarch64)
+          - target: x86_64-apple-darwin
+            name: Intel (x64)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri DMG & Upload to Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple Developer credentials for signing & notarization (optional)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tagName: ${{ needs.create-release.outputs.tag_name }}
+          args: --target ${{ matrix.target }}
+
+  publish-release:
+    name: Publish Release
+    needs: [create-release, build-macos]
+    if: needs.create-release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish Release if not requested as Draft
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          DRAFT: ${{ inputs.draft || 'false' }}
+        with:
+          script: |
+            const releaseId = parseInt(process.env.RELEASE_ID, 10);
+            const isDraftRequested = process.env.DRAFT === 'true';
+
+            if (!isDraftRequested) {
+              console.log(`Publishing release ID: ${releaseId}`);
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+                draft: false,
+              });
+              console.log('Release published successfully.');
+            } else {
+              console.log('Draft release preserved as requested.');
+            }
