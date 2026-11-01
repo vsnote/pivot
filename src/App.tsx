@@ -122,7 +122,7 @@ export const App: React.FC = () => {
       {error && (
         <div
           role="alert"
-          className="mx-4 sm:mx-6 mt-3 flex items-center justify-between gap-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/90 dark:bg-red-950/50 px-4 py-2.5 text-xs text-red-700 dark:text-red-300 shadow-xs animate-in fade-in"
+          className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/90 dark:bg-red-950/50 px-4 py-2.5 text-xs text-red-700 dark:text-red-300 shadow-xs animate-in fade-in"
         >
           <div className="flex items-center gap-2 min-w-0">
             <AlertCircle className="w-4 h-4 shrink-0 text-red-500 dark:text-red-400" />
@@ -140,8 +140,8 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* 主视图内容区域：根据当前页面自适应宽度 */}
-      <main className="flex-1 min-h-0 w-full overflow-y-auto px-4 sm:px-6 py-4">
+      {/* 主视图内容区域：统一定宽与内边距 */}
+      <main className="flex-1 min-h-0 w-full overflow-y-auto px-4 py-4">
         <div
           className={`mx-auto w-full transition-[max-width] duration-150 ${
             activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')
