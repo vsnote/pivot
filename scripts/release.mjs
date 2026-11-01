@@ -101,12 +101,13 @@ function main() {
   try {
     run(`git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock`);
     run(`git commit -m "chore(release): ${tagName}"`);
-    run(`git tag ${tagName}`);
+    run(`git tag -a ${tagName} -m "Release ${tagName}"`);
     console.log(`✔ 已创建 Git 提交与标签: ${tagName}`);
 
     if (!noPush) {
       console.log(`\n📤 正在推送至 GitHub 触发自动发布流水线...`);
-      run(`git push origin HEAD --follow-tags`);
+      run(`git push origin HEAD`);
+      run(`git push origin ${tagName}`);
       console.log(`\n🎉 推送成功！GitHub Actions 正在打包 macOS 安装包并生成发布说明。`);
     } else {
       console.log(`\n💡 已打标签（未推送）。你可以稍后执行: git push origin HEAD --follow-tags`);
