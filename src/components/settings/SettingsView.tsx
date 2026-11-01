@@ -1,13 +1,18 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Button } from '@/components/common/Button';
 import { PivotLogo } from '@/components/common/PivotLogo';
+import { check, type Update } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import {
   Download,
   Upload,
   CheckCircle2,
   AlertCircle,
+  RefreshCw,
+  Sparkles,
+  ArrowUpCircle,
 } from 'lucide-react';
 
 const themeOptions = [
@@ -33,6 +38,86 @@ export const SettingsView: React.FC = () => {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 自动更新状态管理
+  const [updateState, setUpdateState] = useState<
+    'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'ready' | 'error'
+  >('idle');
+  const [updateInstance, setUpdateInstance] = useState<Update | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [updateError, setUpdateError] = useState('');
+
+  // 检查更新
+  const handleCheckUpdate = async (isManual = true) => {
+    try {
+      setUpdateState('checking');
+      setUpdateError('');
+      const update = await check();
+      if (update && update.available) {
+        setUpdateInstance(update);
+        setUpdateState('available');
+      } else {
+        setUpdateState('up-to-date');
+        setTimeout(() => {
+          setUpdateState((prev) => (prev === 'up-to-date' ? 'idle' : prev));
+        }, 3500);
+      }
+    } catch (err: unknown) {
+      if (isManual) {
+        setUpdateState('error');
+        const msg = err instanceof Error ? err.message : String(err);
+        setUpdateError(msg.includes('404') ? '未检测到新发布版本' : msg);
+      } else {
+        setUpdateState('idle');
+      }
+    }
+  };
+
+  // 下载并安装更新
+  const handleDownloadAndInstall = async () => {
+    if (!updateInstance) return;
+    try {
+      setUpdateState('downloading');
+      setDownloadProgress(0);
+      let downloaded = 0;
+      let total = 0;
+
+      await updateInstance.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          total = event.data.contentLength || 0;
+        } else if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          if (total > 0) {
+            setDownloadProgress(Math.round((downloaded / total) * 100));
+          }
+        } else if (event.event === 'Finished') {
+          setDownloadProgress(100);
+        }
+      });
+
+      setUpdateState('ready');
+    } catch (err: unknown) {
+      setUpdateState('error');
+      setUpdateError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // 重启应用
+  const handleRelaunch = async () => {
+    try {
+      await relaunch();
+    } catch (err) {
+      console.error('重启应用失败:', err);
+    }
+  };
+
+  // 启动时在后台静默检测一次是否有新版本
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      handleCheckUpdate(false);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleExportBackup = () => {
     try {
@@ -211,6 +296,119 @@ export const SettingsView: React.FC = () => {
               className="hidden"
             />
           </div>
+        </div>
+      </div>
+
+      {/* 卡片：软件更新 */}
+      <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
+        <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
+          <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
+            软件更新
+          </span>
+          <span className="text-[10px] font-mono text-zinc-400">当前版本 v0.1.0</span>
+        </div>
+
+        <div className="p-4 space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                <span>自动检查与升级</span>
+                {updateState === 'available' && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                    <Sparkles className="w-2.5 h-2.5" />
+                    发现新版本 v{updateInstance?.version}
+                  </span>
+                )}
+                {updateState === 'up-to-date' && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 className="w-2.5 h-2.5" />
+                    已是最新版本
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
+                直接从 GitHub Releases 获取经过签名验证的安全升级包
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {updateState === 'ready' ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleRelaunch}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>重启应用生效</span>
+                </Button>
+              ) : updateState === 'available' ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleDownloadAndInstall}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                >
+                  <ArrowUpCircle className="w-3.5 h-3.5" />
+                  <span>更新至 v{updateInstance?.version}</span>
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleCheckUpdate(true)}
+                  disabled={updateState === 'checking' || updateState === 'downloading'}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${updateState === 'checking' ? 'animate-spin' : ''}`} />
+                  <span>{updateState === 'checking' ? '正在检查…' : '检查更新'}</span>
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {/* 下载进度条 */}
+          {updateState === 'downloading' && (
+            <div className="p-3 rounded-md bg-muted/40 border border-border space-y-1.5 animate-in fade-in">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-zinc-600 dark:text-zinc-300">正在下载升级包…</span>
+                <span className="font-mono text-zinc-500">{downloadProgress}%</span>
+              </div>
+              <div className="w-full h-1.5 bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all duration-200"
+                  style={{ width: `${downloadProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* 发现新版本时的更新日志摘要 */}
+          {updateState === 'available' && updateInstance?.body && (
+            <div className="p-3 rounded-md bg-muted/40 border border-border text-[11px] space-y-1 animate-in fade-in max-h-36 overflow-y-auto">
+              <div className="font-medium text-zinc-700 dark:text-zinc-300">更新内容摘要：</div>
+              <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap leading-relaxed">
+                {updateInstance.body}
+              </div>
+            </div>
+          )}
+
+          {/* 错误提示 */}
+          {updateState === 'error' && updateError && (
+            <div className="px-3 py-2 rounded-md bg-rose-500/10 text-rose-700 dark:text-rose-300 text-[11px] flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-500" />
+                <span className="truncate">{updateError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUpdateState('idle')}
+                className="opacity-70 hover:opacity-100 text-[10px] shrink-0"
+              >
+                忽略
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
