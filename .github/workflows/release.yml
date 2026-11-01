@@ -2,8 +2,6 @@ name: Release macOS App
 
 on:
   push:
-    branches:
-      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -37,7 +35,6 @@ jobs:
     outputs:
       release_id: ${{ steps.prepare_release.outputs.release_id }}
       tag_name: ${{ steps.prepare_release.outputs.tag_name }}
-      should_release: ${{ steps.prepare_release.outputs.should_release }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,28 +65,6 @@ jobs:
             console.log(`Target release tag: ${tagName}`);
 
             const isPrerelease = process.env.PRERELEASE === 'true';
-            const isPushBranch = context.eventName === 'push' && (!context.ref || !context.ref.startsWith('refs/tags/'));
-
-            // 如果是 master 分支推送，检查该 tag 是否已经存在已发布的 release
-            if (isPushBranch) {
-              try {
-                const existing = await github.rest.repos.getReleaseByTag({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  tag: tagName,
-                });
-                if (existing && existing.data && !existing.data.draft) {
-                  console.log(`Release for tag ${tagName} already exists and is published. Skipping auto-release.`);
-                  core.setOutput('should_release', 'false');
-                  return;
-                }
-              } catch (err) {
-                console.log(`No existing published release for tag ${tagName}. Proceeding with auto-release.`);
-              }
-            }
-
-            core.setOutput('should_release', 'true');
-            core.setOutput('tag_name', tagName);
 
             // 查找或创建 Release
             let release;
@@ -148,18 +123,18 @@ jobs:
                 target_commitish: context.sha,
                 name: `Pivot ${tagName}`,
                 body: finalBody,
-                draft: true,
+                draft: true, // 先建为 draft，等安装包全部构建上传完成后再发布
                 prerelease: isPrerelease,
               });
               release = created.data;
             }
 
             core.setOutput('release_id', release.id.toString());
+            core.setOutput('tag_name', tagName);
 
   build-macos:
     name: Build macOS (${{ matrix.name }})
     needs: create-release
-    if: needs.create-release.outputs.should_release == 'true'
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -201,13 +176,6 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Apple Developer credentials for signing & notarization (optional)
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ needs.create-release.outputs.tag_name }}
@@ -216,7 +184,6 @@ jobs:
   publish-release:
     name: Publish Release
     needs: [create-release, build-macos]
-    if: needs.create-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Publish Release if not requested as Draft
