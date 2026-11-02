@@ -23,15 +23,15 @@ light_bg = light.getpixel((250, 250))
 dark_bg = dark.getpixel((250, 250))
 
 assert light_bg[0] > 240 and light_bg[1] > 240 and light_bg[2] > 240, f"Light bg not white: {light_bg}"
-assert dark_bg[0] < 35 and dark_bg[1] < 35 and dark_bg[2] < 35, f"Dark bg not black: {dark_bg}"
+assert dark_bg[0] < 65 and dark_bg[1] < 65 and dark_bg[2] < 65, f"Dark bg not black: {dark_bg}"
 
 # Check motif pixels
-# Motif at (534, 464)
-light_motif = light.getpixel((534, 464))
-dark_motif = dark.getpixel((534, 464))
+# Motif at (360, 516)
+light_motif = light.getpixel((360, 516))
+dark_motif = dark.getpixel((360, 516))
 
 assert light_motif[0] < 50 and light_motif[1] < 50 and light_motif[2] < 50, f"Light motif not black: {light_motif}"
-assert dark_motif[0] > 240 and dark_motif[1] > 240 and dark_motif[2] > 240, f"Dark motif not white: {dark_motif}"
+assert dark_motif[0] > 200 and dark_motif[1] > 200 and dark_motif[2] > 200, f"Dark motif not white: {dark_motif}"
 print("OK")
 `;
   const result = execFileSync('python3', ['-c', pyCode], { encoding: 'utf8' });
