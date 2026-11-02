@@ -799,6 +799,70 @@ async fn dispatch_anthropic_request(
                 })
             }
         }
+        "chatgpt" => {
+            let openai_req =
+                anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
+            let dispatch_res =
+                dispatch_chatgpt_request(state, &openai_req, cand, req_id, is_stream).await?;
+            if is_stream {
+                let stream_id = format!("chatgpt_sub_{}", req_id.replace('-', ""));
+                let byte_stream = dispatch_res.response.into_body().into_data_stream();
+                let model_str = req.model.clone();
+                let anthropic_stream = stream! {
+                    let mut sse_state = crate::gateway::adapters::SseState::new();
+                    let mut buffer = String::new();
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            if let Ok(s) = std::str::from_utf8(&bytes) {
+                                buffer.push_str(s);
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].trim().to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+                                    if line.starts_with("data:") {
+                                        let events = crate::gateway::adapters::parse_openai_chunk_to_anthropic_events(
+                                            &line,
+                                            &mut sse_state,
+                                            &stream_id,
+                                            &model_str,
+                                        );
+                                        for ev in events {
+                                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(anthropic_stream))
+                        .unwrap(),
+                    prompt_tokens: dispatch_res.prompt_tokens,
+                    completion_tokens: dispatch_res.completion_tokens,
+                })
+            } else {
+                let body_bytes = axum::body::to_bytes(dispatch_res.response.into_body(), 10 * 1024 * 1024)
+                    .await
+                    .unwrap_or_default();
+                let chat_resp: OpenAIChatResponse = serde_json::from_slice(&body_bytes).map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse ChatGPT response: {}", e),
+                    )
+                })?;
+                let anthropic_resp =
+                    anthropic_to_openai::convert_openai_resp_to_anthropic(&chat_resp, &req.model);
+                Ok(DispatchResult {
+                    response: Json(anthropic_resp).into_response(),
+                    prompt_tokens: dispatch_res.prompt_tokens,
+                    completion_tokens: dispatch_res.completion_tokens,
+                })
+            }
+        }
         "gemini" => {
             let base = cand.provider.base_url.trim_end_matches('/');
             let gemini_req = anthropic_to_gemini::convert_anthropic_req_to_gemini(req);
@@ -1461,6 +1525,163 @@ async fn handle_responses(
         .into_response()
 }
 
+async fn dispatch_chatgpt_request(
+    state: &GatewayState,
+    req: &OpenAIChatRequest,
+    cand: &RouteCandidate,
+    req_id: &str,
+    is_stream: bool,
+) -> Result<DispatchResult, (StatusCode, String)> {
+    let client = &state.http_client;
+    let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
+    let estimated_prompt = estimate_openai_req_prompt_tokens(req);
+
+    let account = crate::oauth::acquire_subscription_account(
+        &state.db,
+        &state.http_client,
+        &cand.provider.id,
+    )
+    .await?;
+
+    let upstream_url = "https://chatgpt.com/backend-api/codex/responses";
+
+    let mut responses_body = responses::convert_chat_req_to_responses(req, &cand.target_model);
+    responses_body["store"] = json!(false);
+    responses_body["stream"] = json!(true);
+
+    let req_builder = client
+        .post(upstream_url)
+        .timeout(timeout)
+        .header("authorization", format!("Bearer {}", account.access_token))
+        .header("user-agent", "codex-cli/0.154.0")
+        .header("content-type", "application/json");
+
+    let res = req_builder.json(&responses_body).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Upstream ChatGPT connection failed: {}", e),
+        )
+    })?;
+
+    if !res.status().is_success() {
+        let status =
+            StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let text = res.text().await.unwrap_or_default();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            crate::oauth::mark_account_cooldown(&state.db, &account.id, 300);
+        }
+        return Err((status, text));
+    }
+
+    if is_stream {
+        let req_id_str = req_id.to_string();
+        let byte_stream = res.bytes_stream();
+        let model_str = cand.target_model.clone();
+
+        let sse_stream = stream! {
+            let mut parser = responses::ResponsesToChatSseParser::new(&req_id_str, &model_str);
+            let mut buffer = String::new();
+
+            for await chunk_res in byte_stream {
+                if let Ok(bytes) = chunk_res {
+                    if let Ok(s) = std::str::from_utf8(&bytes) {
+                        buffer.push_str(s);
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].trim().to_string();
+                            buffer = buffer[pos + 1..].to_string();
+                            let chat_lines = parser.process_line(&line);
+                            for cl in chat_lines {
+                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(cl));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let finish_lines = parser.finish();
+            for fl in finish_lines {
+                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(fl));
+            }
+        };
+
+        Ok(DispatchResult {
+            response: Response::builder()
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .header("connection", "keep-alive")
+                .body(Body::from_stream(sse_stream))
+                .unwrap(),
+            prompt_tokens: estimated_prompt as u32,
+            completion_tokens: 0,
+        })
+    } else {
+        let byte_stream = res.bytes_stream();
+        let req_id_str = req_id.to_string();
+        let model_str = cand.target_model.clone();
+
+        let mut parser = responses::ResponsesToChatSseParser::new(&req_id_str, &model_str);
+        let mut buffer = String::new();
+        let mut full_content = String::new();
+        let mut prompt_tokens = estimated_prompt as u32;
+        let mut completion_tokens = 0u32;
+
+        use tokio_stream::StreamExt;
+        tokio::pin!(byte_stream);
+        while let Some(chunk_res) = byte_stream.next().await {
+            if let Ok(bytes) = chunk_res {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    buffer.push_str(s);
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim().to_string();
+                        buffer = buffer[pos + 1..].to_string();
+                        let chat_lines = parser.process_line(&line);
+                        for cl in chat_lines {
+                            let trimmed = cl.trim();
+                            if trimmed.starts_with("data:") && !trimmed.contains("[DONE]") {
+                                if let Ok(val) = serde_json::from_str::<Value>(trimmed.trim_start_matches("data:").trim()) {
+                                    if let Some(c) = val["choices"][0]["delta"]["content"].as_str() {
+                                        full_content.push_str(c);
+                                    }
+                                    if let Some(u) = val.get("usage") {
+                                        prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(prompt_tokens as u64) as u32;
+                                        completion_tokens = u["completion_tokens"].as_u64().unwrap_or(completion_tokens as u64) as u32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let resp_json = json!({
+            "id": format!("chatcmpl_{}", req_id_str.replace('-', "")),
+            "object": "chat.completion",
+            "created": chrono::Utc::now().timestamp(),
+            "model": model_str,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": full_content
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
+        });
+
+        Ok(DispatchResult {
+            response: Json(resp_json).into_response(),
+            prompt_tokens,
+            completion_tokens,
+        })
+    }
+}
+
 async fn dispatch_openai_request(
     state: &GatewayState,
     req: &OpenAIChatRequest,
@@ -1475,6 +1696,9 @@ async fn dispatch_openai_request(
     let estimated_prompt = estimate_openai_req_prompt_tokens(req);
 
     match cand.provider.protocol.as_str() {
+        "chatgpt" => {
+            dispatch_chatgpt_request(state, req, cand, req_id, is_stream).await
+        }
         "openai" | "openrouter" | "ollama" => {
             let url = resolve_upstream_endpoint(&cand.provider.base_url, "/chat/completions");
 

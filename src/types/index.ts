@@ -1,4 +1,4 @@
-export type Protocol = 'anthropic' | 'openai' | 'gemini' | 'openrouter' | 'ollama';
+export type Protocol = 'anthropic' | 'openai' | 'gemini' | 'openrouter' | 'ollama' | 'chatgpt';
 
 export interface Provider {
   id: string;

@@ -987,6 +987,271 @@ pub fn chat_response_to_responses_full(
     })
 }
 
+/// Convert an `OpenAIChatRequest` into a Responses API JSON body for Codex / ChatGPT subscription backend.
+pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str) -> Value {
+    let mut input_items: Vec<Value> = Vec::new();
+    let mut instructions: Option<String> = None;
+
+    for msg in &req.messages {
+        let role = msg.role.as_str();
+        if role == "system" {
+            let text = if let Some(ref c) = msg.content {
+                if let Some(s) = c.as_str() {
+                    s.to_string()
+                } else {
+                    c.to_string()
+                }
+            } else {
+                String::new()
+            };
+            if instructions.is_none() {
+                instructions = Some(text);
+            } else if let Some(ref mut inst) = instructions {
+                inst.push_str("\n\n");
+                inst.push_str(&text);
+            }
+            continue;
+        }
+
+        if role == "user" {
+            let content_val = msg.content.clone().unwrap_or(Value::Null);
+            input_items.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": if let Some(s) = content_val.as_str() {
+                    json!([{ "type": "input_text", "text": s }])
+                } else if content_val.is_array() {
+                    content_val
+                } else {
+                    json!([{ "type": "input_text", "text": content_val.to_string() }])
+                }
+            }));
+        } else if role == "assistant" {
+            if let Some(ref c) = msg.content {
+                let text = c.as_str().unwrap_or("");
+                if !text.is_empty() {
+                    input_items.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": text }]
+                    }));
+                }
+            }
+            if let Some(ref tool_calls) = msg.tool_calls {
+                for tc in tool_calls {
+                    input_items.push(json!({
+                        "type": "function_call",
+                        "call_id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }));
+                }
+            }
+        } else if role == "tool" {
+            let output_str = if let Some(ref c) = msg.content {
+                if let Some(s) = c.as_str() {
+                    s.to_string()
+                } else {
+                    c.to_string()
+                }
+            } else {
+                String::new()
+            };
+            let call_id = msg.tool_call_id.as_deref().unwrap_or("call_default");
+            input_items.push(json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output_str
+            }));
+        }
+    }
+
+    let mut body = json!({
+        "model": target_model,
+        "store": false,
+        "stream": true,
+        "input": input_items
+    });
+
+    if let Some(inst) = instructions {
+        body["instructions"] = json!(inst);
+    }
+
+    if let Some(ref tools) = req.tools {
+        let resp_tools: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.function.name,
+                    "description": t.function.description.as_deref().unwrap_or(""),
+                    "parameters": t.function.parameters
+                })
+            })
+            .collect();
+        if !resp_tools.is_empty() {
+            body["tools"] = json!(resp_tools);
+        }
+    }
+
+    body
+}
+
+/// Parses streaming SSE chunks from Codex / ChatGPT Responses API and converts them into OpenAI Chat Completion chunks.
+#[derive(Debug, Clone)]
+pub struct ResponsesToChatSseParser {
+    pub id: String,
+    pub model: String,
+    pub created: i64,
+    pub current_event: String,
+    pub has_tool_calls: bool,
+    pub completed: bool,
+}
+
+impl ResponsesToChatSseParser {
+    pub fn new(req_id: &str, model: &str) -> Self {
+        Self {
+            id: format!("chatcmpl_{}", req_id.replace('-', "")),
+            model: model.to_string(),
+            created: chrono::Utc::now().timestamp(),
+            current_event: String::new(),
+            has_tool_calls: false,
+            completed: false,
+        }
+    }
+
+    pub fn process_line(&mut self, line: &str) -> Vec<String> {
+        let trimmed = line.trim();
+        if trimmed.starts_with("event:") {
+            self.current_event = trimmed["event:".len()..].trim().to_string();
+            return Vec::new();
+        }
+
+        if !trimmed.starts_with("data:") {
+            return Vec::new();
+        }
+
+        let payload = trimmed["data:".len()..].trim();
+        if payload == "[DONE]" {
+            self.completed = true;
+            return vec!["data: [DONE]\n\n".to_string()];
+        }
+
+        let Ok(data) = serde_json::from_str::<Value>(payload) else {
+            return Vec::new();
+        };
+
+        let ev_type = data.get("type").and_then(Value::as_str).unwrap_or(&self.current_event);
+        let mut results = Vec::new();
+
+        if ev_type == "response.output_text.delta" {
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                let chunk = json!({
+                    "id": self.id,
+                    "object": "chat.completion.chunk",
+                    "created": self.created,
+                    "model": self.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": delta },
+                        "finish_reason": null
+                    }]
+                });
+                results.push(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+            }
+        } else if ev_type == "response.output_item.added" {
+            if let Some(item) = data.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    self.has_tool_calls = true;
+                    let out_idx = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+                    let call_id = item.get("call_id").or_else(|| item.get("id")).and_then(Value::as_str).unwrap_or("call_default");
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    let chunk = json!({
+                        "id": self.id,
+                        "object": "chat.completion.chunk",
+                        "created": self.created,
+                        "model": self.model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": out_idx,
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": ""
+                                    }
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    });
+                    results.push(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+                }
+            }
+        } else if ev_type == "response.function_call_arguments.delta" {
+            let out_idx = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                let chunk = json!({
+                    "id": self.id,
+                    "object": "chat.completion.chunk",
+                    "created": self.created,
+                    "model": self.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": out_idx,
+                                "function": {
+                                    "arguments": delta
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                });
+                results.push(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+            }
+        } else if ev_type == "response.completed" {
+            self.completed = true;
+            let finish_reason = if self.has_tool_calls { "tool_calls" } else { "stop" };
+            let usage = data.get("response").and_then(|r| r.get("usage"));
+            let mut chunk = json!({
+                "id": self.id,
+                "object": "chat.completion.chunk",
+                "created": self.created,
+                "model": self.model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason
+                }]
+            });
+            if let Some(u) = usage {
+                chunk["usage"] = json!({
+                    "prompt_tokens": u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    "completion_tokens": u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    "total_tokens": u.get("total_tokens").and_then(Value::as_u64).unwrap_or(0)
+                });
+            }
+            results.push(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+            results.push("data: [DONE]\n\n".to_string());
+        }
+
+        results
+    }
+
+    pub fn finish(&mut self) -> Vec<String> {
+        if !self.completed {
+            self.completed = true;
+            vec!["data: [DONE]\n\n".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1281,5 +1546,63 @@ mod tests {
         assert_eq!(outputs[0]["type"], "custom_tool_call");
         assert_eq!(outputs[0]["name"], "exec");
         assert_eq!(outputs[0]["input"], "console.log(456);");
+    }
+
+    #[test]
+    fn test_convert_chat_req_to_responses_and_chat_parser() {
+        let chat_req = OpenAIChatRequest {
+            model: "gpt-5.6-sol".to_string(),
+            messages: vec![
+                OpenAIMessage {
+                    role: "system".to_string(),
+                    content: Some(json!("You are helpful")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "user".to_string(),
+                    content: Some(json!("Hello")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            reasoning_effort: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(true),
+            stream_options: None,
+        };
+
+        let responses_val = convert_chat_req_to_responses(&chat_req, "gpt-5.6-sol");
+        assert_eq!(responses_val["model"], "gpt-5.6-sol");
+        assert_eq!(responses_val["instructions"], "You are helpful");
+        let input_arr = responses_val["input"].as_array().unwrap();
+        assert_eq!(input_arr.len(), 1);
+        assert_eq!(input_arr[0]["role"], "user");
+
+        // Test parser
+        let mut parser = ResponsesToChatSseParser::new("test_req_1", "gpt-5.6-sol");
+        let line1 = "event: response.output_text.delta";
+        let res1 = parser.process_line(line1);
+        assert!(res1.is_empty());
+
+        let line2 = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi there\"}";
+        let res2 = parser.process_line(line2);
+        assert_eq!(res2.len(), 1);
+        assert!(res2[0].contains("Hi there"));
+        assert!(res2[0].contains("chat.completion.chunk"));
+
+        let line3 = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7}}}";
+        let res3 = parser.process_line(line3);
+        assert_eq!(res3.len(), 2);
+        assert!(res3[0].contains("\"prompt_tokens\":5"));
+        assert_eq!(res3[1], "data: [DONE]\n\n");
     }
 }

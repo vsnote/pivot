@@ -447,19 +447,31 @@ pub async fn start_subscription_oauth(
     provider_id: String,
     account_type: String,
 ) -> Result<SubscriptionAccount, String> {
-    let pkce = oauth::generate_pkce();
-    let state_str = uuid::Uuid::new_v4().to_string();
-    let auth_url = oauth::build_auth_url(&pkce, &state_str);
+    let token_resp = if account_type == "chatgpt" {
+        let pkce = oauth::generate_pkce();
+        let state_str = uuid::Uuid::new_v4().to_string();
+        let auth_url = oauth::build_chatgpt_auth_url(&pkce, &state_str);
 
-    use tauri_plugin_opener::OpenerExt;
-    app.opener()
-        .open_url(&auth_url, None::<&str>)
-        .map_err(|e| format!("无法打开浏览器: {}", e))?;
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_url(&auth_url, None::<&str>)
+            .map_err(|e| format!("无法打开浏览器: {}", e))?;
 
-    let code = oauth::listen_for_code(&state_str, 120).await?;
+        let code = oauth::listen_for_chatgpt_code(&state_str, 120).await?;
+        oauth::exchange_chatgpt_code(&state.http_client, &code, &pkce.verifier).await?
+    } else {
+        let pkce = oauth::generate_pkce();
+        let state_str = uuid::Uuid::new_v4().to_string();
+        let auth_url = oauth::build_auth_url(&pkce, &state_str);
 
-    let token_resp =
-        oauth::exchange_code_for_tokens(&state.http_client, &code, &pkce.verifier).await?;
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_url(&auth_url, None::<&str>)
+            .map_err(|e| format!("无法打开浏览器: {}", e))?;
+
+        let code = oauth::listen_for_code(&state_str, 120).await?;
+        oauth::exchange_code_for_tokens(&state.http_client, &code, &pkce.verifier).await?
+    };
 
     let now_sec = chrono::Utc::now().timestamp();
     let expires_at = now_sec + token_resp.expires_in;
@@ -468,7 +480,7 @@ pub async fn start_subscription_oauth(
     let existing_accounts = state.db.get_subscription_accounts(&provider_id).unwrap_or_default();
     if let Some(target) = existing_accounts
         .into_iter()
-        .find(|a| a.email == token_resp.email && token_resp.email.is_some())
+        .find(|a| (a.email == token_resp.email && token_resp.email.is_some()) || (account_type == "chatgpt" && a.account_type == "chatgpt"))
     {
         state
             .db
@@ -494,6 +506,63 @@ pub async fn start_subscription_oauth(
         id: format!("sub_{}", &uuid::Uuid::new_v4().to_string()[..8]),
         provider_id,
         account_type,
+        email: token_resp.email,
+        access_token: token_resp.access_token,
+        refresh_token: token_resp.refresh_token,
+        expires_at,
+        cooldown_until: 0,
+        enabled: true,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    };
+
+    state
+        .db
+        .save_subscription_account(&account)
+        .map_err(|e| e.to_string())?;
+    Ok(account)
+}
+
+#[tauri::command]
+pub async fn import_codex_subscription_account(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<SubscriptionAccount, String> {
+    let token_resp = oauth::import_local_codex_account(&state.http_client).await?;
+
+    let now_sec = chrono::Utc::now().timestamp();
+    let expires_at = now_sec + token_resp.expires_in;
+    let now_str = chrono::Utc::now().to_rfc3339();
+
+    let existing_accounts = state.db.get_subscription_accounts(&provider_id).unwrap_or_default();
+    if let Some(target) = existing_accounts
+        .into_iter()
+        .find(|a| (a.email == token_resp.email && token_resp.email.is_some()) || a.account_type == "chatgpt")
+    {
+        state
+            .db
+            .update_account_tokens(
+                &target.id,
+                &token_resp.access_token,
+                token_resp.refresh_token.as_deref(),
+                expires_at,
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut updated = target;
+        updated.access_token = token_resp.access_token;
+        if let Some(rf) = token_resp.refresh_token {
+            updated.refresh_token = Some(rf);
+        }
+        updated.expires_at = expires_at;
+        updated.updated_at = now_str;
+        return Ok(updated);
+    }
+
+    let account = SubscriptionAccount {
+        id: format!("sub_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        provider_id,
+        account_type: "chatgpt".to_string(),
         email: token_resp.email,
         access_token: token_resp.access_token,
         refresh_token: token_resp.refresh_token,
@@ -564,7 +633,11 @@ pub async fn sync_subscription_models(
         .await
         .map_err(|(_, msg)| msg)?;
 
-    oauth::fetch_antigravity_models(&state.http_client, &account.access_token, &base_url).await
+    if account.account_type == "chatgpt" {
+        oauth::fetch_chatgpt_models(&state.http_client, &account.access_token).await
+    } else {
+        oauth::fetch_antigravity_models(&state.http_client, &account.access_token, &base_url).await
+    }
 }
 
 #[tauri::command]
@@ -588,9 +661,12 @@ pub async fn get_subscription_account_quota(
     // 检查 Token 是否需要刷新
     if account.expires_at - now_sec < 300 {
         if let Some(ref refresh_token) = account.refresh_token {
-            if let Ok((new_token, expires_in)) =
+            let refresh_res = if account.account_type == "chatgpt" {
+                oauth::refresh_chatgpt_token(&state.http_client, refresh_token).await
+            } else {
                 oauth::refresh_antigravity_token(&state.http_client, refresh_token).await
-            {
+            };
+            if let Ok((new_token, expires_in)) = refresh_res {
                 let new_expires_at = now_sec + expires_in;
                 let _ = state.db.update_account_tokens(
                     &account.id,
@@ -602,6 +678,24 @@ pub async fn get_subscription_account_quota(
                 account.expires_at = new_expires_at;
             }
         }
+    }
+
+    if account.account_type == "chatgpt" {
+        let buckets = oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token)
+            .await
+            .unwrap_or_else(|_| vec![oauth::QuotaBucket {
+                id: "chatgpt_subscription_status".to_string(),
+                label: "ChatGPT 订阅有效".to_string(),
+                remaining_fraction: 1.0,
+                reset_time: None,
+                is_exhausted: false,
+            }]);
+        return Ok(oauth::AccountQuota {
+            account_id,
+            updated_at: chrono::Utc::now().timestamp(),
+            buckets,
+            error: None,
+        });
     }
 
     let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());

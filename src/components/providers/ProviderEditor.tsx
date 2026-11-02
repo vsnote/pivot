@@ -58,6 +58,7 @@ const protocols: Record<Protocol, string> = {
   gemini: 'Google Gemini',
   openrouter: 'OpenRouter',
   ollama: 'Ollama',
+  chatgpt: 'ChatGPT 订阅',
 };
 
 export function ProviderEditor() {
@@ -118,10 +119,12 @@ export function ProviderEditor() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  const isSubscriptionPool = draft.authType === 'subscription_pool' || draft.presetId === 'antigravity';
+  const isSubscriptionPool = draft.authType === 'subscription_pool' || draft.presetId === 'antigravity' || draft.presetId === 'chatgpt_subscription' || draft.protocol === 'chatgpt';
+  const isChatGPT = draft.presetId === 'chatgpt_subscription' || draft.protocol === 'chatgpt';
   const [subAccounts, setSubAccounts] = useState<SubscriptionAccount[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
+  const [importingCodex, setImportingCodex] = useState(false);
   const [oauthError, setOauthError] = useState<string | null>(null);
 
   const [accountQuotas, setAccountQuotas] = useState<Record<string, AccountQuota>>({});
@@ -201,7 +204,8 @@ export function ProviderEditor() {
   const [syncingModels, setSyncingModels] = useState(false);
 
   const syncSubscriptionModels = async (baseUrl?: string, forceReplaceSelected = false): Promise<string[]> => {
-    const url = (baseUrl || draft.baseUrl || 'https://daily-cloudcode-pa.googleapis.com').trim();
+    const defaultUrl = isChatGPT ? 'https://chatgpt.com/backend-api' : 'https://daily-cloudcode-pa.googleapis.com';
+    const url = (baseUrl || draft.baseUrl || defaultUrl).trim();
     try {
       setSyncingModels(true);
       setNotice('');
@@ -233,7 +237,16 @@ export function ProviderEditor() {
     }
 
     // 容灾兜底：若上游接口暂不可用，载入官方推荐基线模型
-    const fallbackList = preset?.defaultModels ?? [
+    const fallbackList = preset?.defaultModels ?? (isChatGPT ? [
+      'gpt-5',
+      'gpt-5-codex',
+      'gpt-5-pro',
+      'gpt-5.1',
+      'gpt-5.1-codex',
+      'gpt-5.1-codex-max',
+      'gpt-5.2',
+      'gpt-5.2-codex',
+    ] : [
       'claude-sonnet-4-6',
       'claude-opus-4-6-thinking',
       'gemini-3.8-flash-high',
@@ -241,7 +254,7 @@ export function ProviderEditor() {
       'gemini-3-flash',
       'gemini-2.5-flash',
       'gpt-oss-120b-medium',
-    ];
+    ]);
     setPool((prev) => uniqueValues([...prev, ...fallbackList]));
     if (forceReplaceSelected || draft.models.length === 0) {
       replaceModels(fallbackList);
@@ -253,6 +266,28 @@ export function ProviderEditor() {
     return fallbackList;
   };
 
+  const postAccountConnect = async (successNotice: string) => {
+    await loadSubscriptionAccounts();
+
+    // 如果当前已有自主选择的模型集合，同步时保留；仅在从未选过模型时全量启用
+    const shouldSelectAll = draft.models.length === 0;
+    const syncedModels = await syncSubscriptionModels(draft.baseUrl, shouldSelectAll);
+
+    const finalModels = draft.models.length > 0 ? draft.models : syncedModels;
+    const finalDefault = draft.defaultModel && finalModels.includes(draft.defaultModel)
+      ? draft.defaultModel
+      : finalModels[0] || null;
+
+    const providerToSave = prepareProvider({
+      ...draft,
+      models: finalModels,
+      defaultModel: finalDefault,
+      enabled: true,
+    });
+    await saveProvider(providerToSave);
+    setNotice(successNotice);
+  };
+
   const handleConnectGoogle = async () => {
     try {
       setAuthorizing(true);
@@ -261,29 +296,42 @@ export function ProviderEditor() {
         providerId: draft.id,
         accountType: 'antigravity',
       });
-      await loadSubscriptionAccounts();
-
-      // 如果当前已有自主选择的模型集合，同步时保留；仅在从未选过模型时全量启用
-      const shouldSelectAll = draft.models.length === 0;
-      const syncedModels = await syncSubscriptionModels(draft.baseUrl, shouldSelectAll);
-
-      const finalModels = draft.models.length > 0 ? draft.models : syncedModels;
-      const finalDefault = draft.defaultModel && finalModels.includes(draft.defaultModel)
-        ? draft.defaultModel
-        : finalModels[0] || null;
-
-      const providerToSave = prepareProvider({
-        ...draft,
-        models: finalModels,
-        defaultModel: finalDefault,
-        enabled: true,
-      });
-      await saveProvider(providerToSave);
-      setNotice('账号已连接，服务商已自动就绪并启用');
+      await postAccountConnect('账号已连接，服务商已自动就绪并启用');
     } catch (err: any) {
       setOauthError(typeof err === 'string' ? err : err?.message || '授权失败，请重试');
     } finally {
       setAuthorizing(false);
+    }
+  };
+
+  const handleConnectChatGPT = async () => {
+    try {
+      setAuthorizing(true);
+      setOauthError(null);
+      await invoke<SubscriptionAccount>('start_subscription_oauth', {
+        providerId: draft.id,
+        accountType: 'chatgpt',
+      });
+      await postAccountConnect('ChatGPT 订阅账号已连接并启用');
+    } catch (err: any) {
+      setOauthError(typeof err === 'string' ? err : err?.message || '授权失败，请重试');
+    } finally {
+      setAuthorizing(false);
+    }
+  };
+
+  const handleImportCodex = async () => {
+    try {
+      setImportingCodex(true);
+      setOauthError(null);
+      await invoke<SubscriptionAccount>('import_codex_subscription_account', {
+        providerId: draft.id,
+      });
+      await postAccountConnect('已从本地 Codex 导入凭证并启用');
+    } catch (err: any) {
+      setOauthError(typeof err === 'string' ? err : err?.message || '导入失败，请确保本地已登录 Codex CLI');
+    } finally {
+      setImportingCodex(false);
     }
   };
 
@@ -971,25 +1019,65 @@ export function ProviderEditor() {
                           {loadingAccounts && <LoaderCircle className="w-3 h-3 animate-spin text-muted-foreground" />}
                         </div>
                         <div className="flex items-center gap-2 text-[11px]">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={authorizing}
-                            onClick={handleConnectGoogle}
-                          >
-                            {authorizing ? (
-                              <>
-                                <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
-                                <span>等待浏览器授权…</span>
-                              </>
-                            ) : (
-                              <>
-                                <Plus className="w-3 h-3 mr-1" />
-                                <span>添加账号</span>
-                              </>
-                            )}
-                          </Button>
+                          {isChatGPT ? (
+                            <>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={importingCodex || authorizing}
+                                onClick={handleImportCodex}
+                              >
+                                {importingCodex ? (
+                                  <>
+                                    <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
+                                    <span>导入中…</span>
+                                  </>
+                                ) : (
+                                  <span>导入本地凭据</span>
+                                )}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={authorizing || importingCodex}
+                                onClick={handleConnectChatGPT}
+                              >
+                                {authorizing ? (
+                                  <>
+                                    <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
+                                    <span>等待浏览器授权…</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Plus className="w-3 h-3 mr-1" />
+                                    <span>添加账号</span>
+                                  </>
+                                )}
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={authorizing}
+                              onClick={handleConnectGoogle}
+                            >
+                              {authorizing ? (
+                                <>
+                                  <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
+                                  <span>等待浏览器授权…</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Plus className="w-3 h-3 mr-1" />
+                                  <span>添加账号</span>
+                                </>
+                              )}
+                            </Button>
+                          )}
                         </div>
                       </div>
 
@@ -1009,27 +1097,69 @@ export function ProviderEditor() {
                             尚未连接账号
                           </div>
                           <div className="text-[11px] text-muted-foreground max-w-sm mx-auto mb-3.5 leading-relaxed">
-                            点击下方按钮在浏览器中完成授权登录，授权后将自动接入订阅配额与模型。
+                            {isChatGPT
+                              ? '可一键导入本地 ~/.codex/auth.json 凭据，或在浏览器中登录 ChatGPT 订阅账号。'
+                              : '点击下方按钮在浏览器中完成授权登录，授权后将自动接入订阅配额与模型。'}
                           </div>
-                          <Button
-                            type="button"
-                            variant="default"
-                            size="sm"
-                            disabled={authorizing}
-                            onClick={handleConnectGoogle}
-                          >
-                            {authorizing ? (
-                              <>
-                                <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
-                                <span>请在浏览器中完成授权…</span>
-                              </>
-                            ) : (
-                              <>
-                                <Plus className="w-3.5 h-3.5 mr-1.5" />
-                                <span>立即连接账号</span>
-                              </>
-                            )}
-                          </Button>
+                          {isChatGPT ? (
+                            <div className="flex items-center justify-center gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={importingCodex || authorizing}
+                                onClick={handleImportCodex}
+                              >
+                                {importingCodex ? (
+                                  <>
+                                    <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                                    <span>导入中…</span>
+                                  </>
+                                ) : (
+                                  <span>从本地 Codex 导入</span>
+                                )}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="default"
+                                size="sm"
+                                disabled={authorizing || importingCodex}
+                                onClick={handleConnectChatGPT}
+                              >
+                                {authorizing ? (
+                                  <>
+                                    <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                                    <span>请在浏览器中完成授权…</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Plus className="w-3.5 h-3.5 mr-1.5" />
+                                    <span>网页授权登录</span>
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="default"
+                              size="sm"
+                              disabled={authorizing}
+                              onClick={handleConnectGoogle}
+                            >
+                              {authorizing ? (
+                                <>
+                                  <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                                  <span>请在浏览器中完成授权…</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Plus className="w-3.5 h-3.5 mr-1.5" />
+                                  <span>立即连接账号</span>
+                                </>
+                              )}
+                            </Button>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-2">
@@ -1101,7 +1231,7 @@ export function ProviderEditor() {
                                   <div className="mt-2.5 pt-2 border-t border-border/50">
                                     <div className="flex items-center justify-between mb-2">
                                       <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
-                                        使用配额 (5小时 / 周周期)
+                                        {isChatGPT ? '订阅状态与配额' : '使用配额 (5小时 / 周周期)'}
                                       </span>
                                       <button
                                         type="button"

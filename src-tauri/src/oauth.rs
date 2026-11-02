@@ -12,6 +12,10 @@ pub const ANTIGRAVITY_CLIENT_SECRET: &str = "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
 pub const ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
 pub const OAUTH_PORT: u16 = 51121;
 
+pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+pub const OPENAI_OAUTH_PORT: u16 = 1455;
+
 pub struct PkcePair {
     pub verifier: String,
     pub challenge: String,
@@ -280,6 +284,328 @@ pub async fn refresh_antigravity_token(
     Ok((access_token, expires_in))
 }
 
+/// 生成 OpenAI ChatGPT Codex OAuth 授权 URL
+pub fn build_chatgpt_auth_url(pkce: &PkcePair, state: &str) -> String {
+    let scopes = "openid profile email offline_access api.connectors.read api.connectors.invoke";
+
+    format!(
+        "https://auth.openai.com/oauth/authorize?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
+        url_encode(OPENAI_CODEX_CLIENT_ID),
+        url_encode(OPENAI_REDIRECT_URI),
+        url_encode(scopes),
+        url_encode(&pkce.challenge),
+        url_encode(state),
+    )
+}
+
+/// 监听本地 1455 端口等待 OpenAI OAuth 回调，超时时间默认 120 秒
+pub async fn listen_for_chatgpt_code(expected_state: &str, timeout_secs: u64) -> Result<String, String> {
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", OPENAI_OAUTH_PORT))
+        .await
+        .map_err(|e| format!("无法绑定本地 OpenAI 回调端口 {}: {}", OPENAI_OAUTH_PORT, e))?;
+
+    let receive_fut = async {
+        loop {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .map_err(|e| format!("接收 OAuth 连接失败: {}", e))?;
+
+            let mut buf = [0u8; 4096];
+            let n = socket
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("读取请求失败: {}", e))?;
+            let request = String::from_utf8_lossy(&buf[..n]);
+
+            if let Some(first_line) = request.lines().next() {
+                let parts: Vec<&str> = first_line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let path = parts[1];
+                    if path.starts_with("/auth/callback") {
+                        let query = path.split_once('?').map(|x| x.1).unwrap_or("");
+                        let mut code = None;
+                        let mut state = None;
+
+                        for pair in query.split('&') {
+                            if let Some((k, v)) = pair.split_once('=') {
+                                if k == "code" {
+                                    code = Some(url_decode(v));
+                                } else if k == "state" {
+                                    state = Some(url_decode(v));
+                                }
+                            }
+                        }
+
+                        let html_body = r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Pivot 授权成功</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:80vh;background:#fafafa;color:#18181b;">
+  <div style="background:#fff;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.08);text-align:center;max-width:400px;">
+    <div style="width:48px;height:48px;background:#10b981;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;color:#fff;font-size:24px;">✓</div>
+    <h2 style="margin:0 0 8px;font-size:20px;font-weight:600;">授权成功</h2>
+    <p style="margin:0 0 20px;color:#71717a;font-size:14px;">您的 OpenAI ChatGPT 订阅账号已成功连接至 Pivot，现在可以关闭此标签页。</p>
+  </div>
+</body>
+</html>"#;
+
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            html_body.len(),
+                            html_body
+                        );
+
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.flush().await;
+
+                        if let Some(s) = state {
+                            if s != expected_state {
+                                return Err("OAuth State 校验失败，可能存在 CSRF 风险".to_string());
+                            }
+                        }
+
+                        if let Some(c) = code {
+                            return Ok(c);
+                        } else {
+                            return Err("OAuth 回调中未找到授权码 code".to_string());
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(timeout_secs), receive_fut)
+        .await
+        .map_err(|_| "OAuth 登录超时，请在浏览器中完成授权并重试".to_string())?
+}
+
+/// 用授权码向 OpenAI 换取 Token 并获取邮箱
+pub async fn exchange_chatgpt_code(
+    client: &reqwest::Client,
+    code: &str,
+    pkce_verifier: &str,
+) -> Result<TokenResponse, String> {
+    let params = [
+        ("client_id", OPENAI_CODEX_CLIENT_ID),
+        ("code", code),
+        ("code_verifier", pkce_verifier),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", OPENAI_REDIRECT_URI),
+    ];
+
+    let resp = client
+        .post("https://auth.openai.com/oauth/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("请求 OpenAI Token 端点失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("换取 OpenAI Token 失败: {}", err_body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 Token 响应失败: {}", e))?;
+
+    let access_token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| "响应中缺少 access_token".to_string())?
+        .to_string();
+
+    let refresh_token = json["refresh_token"].as_str().map(str::to_string);
+    let expires_in = json["expires_in"].as_i64().unwrap_or(86400 * 7);
+
+    // 获取用户邮箱
+    let mut email = None;
+    if let Ok(user_resp) = client
+        .get("https://chatgpt.com/backend-api/me")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "codex-cli/0.154.0")
+        .send()
+        .await
+    {
+        if let Ok(user_json) = user_resp.json::<serde_json::Value>().await {
+            email = user_json["email"].as_str().map(str::to_string);
+        }
+    }
+
+    Ok(TokenResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+        email,
+    })
+}
+
+/// 刷新 OpenAI Token
+pub async fn refresh_chatgpt_token(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<(String, i64), String> {
+    let params = [
+        ("client_id", OPENAI_CODEX_CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ];
+
+    let resp = client
+        .post("https://auth.openai.com/oauth/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("刷新 OpenAI Token 请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("刷新 OpenAI Token 失败: {}", err_body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析刷新 Token 响应失败: {}", e))?;
+
+    let access_token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| "刷新响应缺少 access_token".to_string())?
+        .to_string();
+
+    let expires_in = json["expires_in"].as_i64().unwrap_or(86400 * 7);
+
+    Ok((access_token, expires_in))
+}
+
+/// 读取本地已登录的 ~/.codex/auth.json 凭据
+pub async fn import_local_codex_account(client: &reqwest::Client) -> Result<TokenResponse, String> {
+    let home = dirs::home_dir().ok_or_else(|| "无法获取用户主目录".to_string())?;
+    let auth_file = home.join(".codex").join("auth.json");
+    if !auth_file.exists() {
+        return Err("未在 ~/.codex/auth.json 找到本地 Codex 凭证，请先在终端运行 codex login 或使用浏览器登录".to_string());
+    }
+
+    let content = std::fs::read_to_string(&auth_file)
+        .map_err(|e| format!("读取 ~/.codex/auth.json 失败: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 ~/.codex/auth.json 失败: {}", e))?;
+
+    let tokens = json.get("tokens").ok_or_else(|| "凭证文件中未找到 tokens 字段".to_string())?;
+    let access_token = tokens["access_token"]
+        .as_str()
+        .ok_or_else(|| "缺少 access_token".to_string())?
+        .to_string();
+    let refresh_token = tokens["refresh_token"].as_str().map(str::to_string);
+
+    // 获取用户邮箱
+    let mut email = None;
+    if let Ok(user_resp) = client
+        .get("https://chatgpt.com/backend-api/me")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "codex-cli/0.154.0")
+        .send()
+        .await
+    {
+        if let Ok(user_json) = user_resp.json::<serde_json::Value>().await {
+            email = user_json["email"].as_str().map(str::to_string);
+        }
+    }
+
+    Ok(TokenResponse {
+        access_token,
+        refresh_token,
+        expires_in: 86400 * 7,
+        email,
+    })
+}
+
+/// 获取 ChatGPT 可用模型列表
+pub async fn fetch_chatgpt_models(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<Vec<String>, String> {
+    let resp = client
+        .get("https://chatgpt.com/backend-api/codex/models?client_version=0.154.0")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "codex-cli/0.154.0")
+        .send()
+        .await;
+
+    let fallback_models = vec![
+        "gpt-5.6-sol".to_string(),
+        "gpt-6-astra".to_string(),
+        "gpt-5.6-terra".to_string(),
+        "gpt-5.6-luna".to_string(),
+        "gpt-5.5".to_string(),
+        "gpt-5.4".to_string(),
+        "gpt-4o".to_string(),
+    ];
+
+    match resp {
+        Ok(res) if res.status().is_success() => {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(arr) = json["models"].as_array() {
+                    let mut models = Vec::new();
+                    for m in arr {
+                        if let Some(slug) = m["slug"].as_str() {
+                            models.push(slug.to_string());
+                        }
+                    }
+                    if !models.is_empty() {
+                        return Ok(models);
+                    }
+                }
+            }
+            Ok(fallback_models)
+        }
+        _ => Ok(fallback_models),
+    }
+}
+
+/// 获取 ChatGPT 订阅状态与配额
+pub async fn fetch_chatgpt_quota(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<Vec<QuotaBucket>, String> {
+    let resp = client
+        .get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "codex-cli/0.154.0")
+        .send()
+        .await;
+
+    let mut plan_name = "ChatGPT 订阅有效".to_string();
+    if let Ok(res) = resp {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(accs) = json["accounts"].as_object() {
+                    if let Some(first) = accs.values().next() {
+                        if let Some(pt) = first["account"]["plan_type"].as_str() {
+                            plan_name = match pt {
+                                "pro" => "ChatGPT Pro 订阅 (有效)".to_string(),
+                                "prolite" => "ChatGPT Pro Lite 订阅 (有效)".to_string(),
+                                "plus" => "ChatGPT Plus 订阅 (有效)".to_string(),
+                                "team" => "ChatGPT Team 订阅 (有效)".to_string(),
+                                other => format!("ChatGPT {} 订阅 (有效)", other),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(vec![QuotaBucket {
+        id: "chatgpt_subscription_status".to_string(),
+        label: plan_name,
+        remaining_fraction: 1.0,
+        reset_time: None,
+        is_exhausted: false,
+    }])
+}
+
 /// 为指定 provider 获取一个可用的订阅账号（自动轮询、检查冷却、自动续期 Token）
 pub async fn acquire_subscription_account(
     db: &crate::db::Database,
@@ -313,7 +639,12 @@ pub async fn acquire_subscription_account(
     // 检查是否临近过期（剩余不足 5 分钟），自动刷新
     if account.expires_at - now_sec < 300 {
         if let Some(ref refresh_token) = account.refresh_token {
-            match refresh_antigravity_token(http_client, refresh_token).await {
+            let refresh_res = if account.account_type == "chatgpt" {
+                refresh_chatgpt_token(http_client, refresh_token).await
+            } else {
+                refresh_antigravity_token(http_client, refresh_token).await
+            };
+            match refresh_res {
                 Ok((new_token, expires_in)) => {
                     let new_expires_at = now_sec + expires_in;
                     let _ = db.update_account_tokens(
@@ -326,7 +657,7 @@ pub async fn acquire_subscription_account(
                     account.expires_at = new_expires_at;
                 }
                 Err(e) => {
-                    tracing::warn!("刷新 Antigravity 订阅账号 {} Token 失败: {}", account.id, e);
+                    tracing::warn!("刷新订阅账号 {} Token 失败: {}", account.id, e);
                     if account.expires_at <= now_sec {
                         return Err((
                             axum::http::StatusCode::UNAUTHORIZED,

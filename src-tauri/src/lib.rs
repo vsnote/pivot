@@ -152,6 +152,7 @@ pub fn run() {
             sync_native_tab,
             set_native_toolbar_enabled,
             start_subscription_oauth,
+            import_codex_subscription_account,
             get_subscription_accounts,
             delete_subscription_account,
             toggle_subscription_account,
