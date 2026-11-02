@@ -395,7 +395,7 @@ mod tests {
         assert!(validate_provider(&mut provider).is_err());
 
         let mut chatgpt_prov: Provider = serde_json::from_value(json!({
-            "id":"prov-chatgpt", "presetId":"chatgpt_subscription", "name":"ChatGPT (官方订阅)", "protocol":"chatgpt",
+            "id":"prov-chatgpt", "presetId":"chatgpt_subscription", "name":"ChatGPT", "protocol":"chatgpt",
             "baseUrl":"https://chatgpt.com/backend-api", "apiKeys":[], "models":["gpt-5"],
             "enabled":true, "priority":10, "weight":1, "timeoutSecs":60
         })).unwrap();

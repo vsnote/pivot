@@ -1,8 +1,9 @@
 use crate::db::{Database, LogAttempt, RequestLog};
 use crate::gateway::adapters::{
-    anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, openai_to_anthropic,
-    parse_anthropic_event_to_openai_chunks, parse_gemini_chunk_to_anthropic_events,
-    parse_openai_chunk_to_anthropic_events, responses, SseState,
+    anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, finish_openai_stream,
+    openai_to_anthropic, parse_anthropic_event_to_openai_chunks,
+    parse_gemini_chunk_to_anthropic_events, parse_openai_chunk_to_anthropic_events, responses,
+    SseState,
 };
 use crate::gateway::router::{RouteCandidate, RoutingEngine};
 use crate::gateway::types::*;
@@ -705,46 +706,70 @@ async fn dispatch_anthropic_request(
 
                 let sse_stream = stream! {
                     let mut sse_state = SseState::new();
-                    let mut buffer = String::new();
+                    let mut byte_buffer: Vec<u8> = Vec::new();
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
                         if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
+                            byte_buffer.extend_from_slice(&bytes);
 
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
+                            while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
+                                let line_bytes = &byte_buffer[..pos];
+                                let line = String::from_utf8_lossy(line_bytes).trim().to_string();
+                                byte_buffer.drain(..=pos);
 
-                                    if !line.is_empty() {
-                                        if line.starts_with("data:") && !line.contains("[DONE]") {
-                                            let payload = line.trim_start_matches("data:").trim();
-                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
-                                                if let Some(usage) = val.get("usage") {
-                                                    if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
-                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
-                                                    }
-                                                    if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
-                                                        if ct > 0 { final_completion_tokens = ct as u32; }
-                                                    }
+                                if !line.is_empty() {
+                                    if line.starts_with("data:") && !line.contains("[DONE]") {
+                                        let payload = line.trim_start_matches("data:").trim();
+                                        if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                            if let Some(usage) = val.get("usage") {
+                                                if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                                    if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                }
+                                                if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                                    if ct > 0 { final_completion_tokens = ct as u32; }
                                                 }
                                             }
                                         }
+                                    }
 
-                                        let events = parse_openai_chunk_to_anthropic_events(
-                                            &line,
-                                            &mut sse_state,
-                                            &req_id_str,
-                                            &model_str,
-                                        );
-                                        for ev in events {
-                                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
-                                        }
+                                    let events = parse_openai_chunk_to_anthropic_events(
+                                        &line,
+                                        &mut sse_state,
+                                        &req_id_str,
+                                        &model_str,
+                                    );
+                                    for ev in events {
+                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Flush any trailing line in byte_buffer that didn't end with '\n'
+                    if !byte_buffer.is_empty() {
+                        let line = String::from_utf8_lossy(&byte_buffer).trim().to_string();
+                        byte_buffer.clear();
+                        if !line.is_empty() {
+                            let events = parse_openai_chunk_to_anthropic_events(
+                                &line,
+                                &mut sse_state,
+                                &req_id_str,
+                                &model_str,
+                            );
+                            for ev in events {
+                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                            }
+                        }
+                    }
+
+                    // Safeguard: Ensure stream is cleanly closed with content_block_stop & message_stop
+                    if !sse_state.stream_finished {
+                        let final_events = finish_openai_stream(&mut sse_state, "end_turn");
+                        for ev in final_events {
+                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
                         }
                     }
 

@@ -424,7 +424,7 @@ pub async fn exchange_chatgpt_code(
     if let Ok(user_resp) = client
         .get("https://chatgpt.com/backend-api/me")
         .header("authorization", format!("Bearer {}", access_token))
-        .header("user-agent", "codex-cli/0.154.0")
+        .header("user-agent", codex_user_agent())
         .send()
         .await
     {
@@ -504,7 +504,7 @@ pub async fn import_local_codex_account(client: &reqwest::Client) -> Result<Toke
     if let Ok(user_resp) = client
         .get("https://chatgpt.com/backend-api/me")
         .header("authorization", format!("Bearer {}", access_token))
-        .header("user-agent", "codex-cli/0.154.0")
+        .header("user-agent", codex_user_agent())
         .send()
         .await
     {
@@ -521,46 +521,113 @@ pub async fn import_local_codex_account(client: &reqwest::Client) -> Result<Toke
     })
 }
 
+pub fn codex_client_version() -> String {
+    if let Some(home) = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from)) {
+        let cache_path = home.join(".codex").join("models_cache.json");
+        if let Ok(content) = std::fs::read_to_string(&cache_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(ver) = v["client_version"].as_str() {
+                    if !ver.is_empty() {
+                        return ver.to_string();
+                    }
+                }
+            }
+        }
+    }
+    "0.166.0".to_string()
+}
+
+pub fn codex_user_agent() -> String {
+    format!("codex-cli/{}", codex_client_version())
+}
+
+/// 尝试从本地 ~/.codex/models_cache.json 直接读取并解析模型列表（按 priority 排序并过滤掉内部审查机器人）
+pub fn get_local_codex_cached_models() -> Option<Vec<String>> {
+    let home = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))?;
+    let cache_path = home.join(".codex").join("models_cache.json");
+    let content = std::fs::read_to_string(cache_path).ok()?;
+    let v = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let arr = v["models"].as_array()?;
+    let mut entries = Vec::new();
+    for m in arr {
+        if let Some(slug) = m["slug"].as_str() {
+            if slug == "codex-auto-review" {
+                continue;
+            }
+            let priority = m["priority"].as_i64().unwrap_or(999);
+            entries.push((priority, slug.to_string()));
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort_by_key(|e| e.0);
+    Some(entries.into_iter().map(|e| e.1).collect())
+}
+
 /// 获取 ChatGPT 可用模型列表
 pub async fn fetch_chatgpt_models(
     client: &reqwest::Client,
     access_token: &str,
 ) -> Result<Vec<String>, String> {
+    let client_version = codex_client_version();
+    let url = format!(
+        "https://chatgpt.com/backend-api/codex/models?client_version={}",
+        client_version
+    );
+    let ua = codex_user_agent();
+
     let resp = client
-        .get("https://chatgpt.com/backend-api/codex/models?client_version=0.154.0")
+        .get(&url)
         .header("authorization", format!("Bearer {}", access_token))
-        .header("user-agent", "codex-cli/0.154.0")
+        .header("user-agent", &ua)
         .send()
         .await;
 
     let fallback_models = vec![
-        "gpt-5.6-sol".to_string(),
+        "gpt-6.1-sol".to_string(),
         "gpt-6-astra".to_string(),
+        "gpt-6.1-terra".to_string(),
+        "gpt-6-sol".to_string(),
+        "gpt-reserve".to_string(),
+        "gpt-6-luna".to_string(),
+        "gpt-5.6-sol".to_string(),
         "gpt-5.6-terra".to_string(),
         "gpt-5.6-luna".to_string(),
-        "gpt-5.5".to_string(),
-        "gpt-5.4".to_string(),
-        "gpt-4o".to_string(),
     ];
 
     match resp {
         Ok(res) if res.status().is_success() => {
             if let Ok(json) = res.json::<serde_json::Value>().await {
                 if let Some(arr) = json["models"].as_array() {
-                    let mut models = Vec::new();
+                    let mut entries = Vec::new();
                     for m in arr {
                         if let Some(slug) = m["slug"].as_str() {
-                            models.push(slug.to_string());
+                            if slug == "codex-auto-review" {
+                                continue;
+                            }
+                            let priority = m["priority"].as_i64().unwrap_or(999);
+                            entries.push((priority, slug.to_string()));
                         }
                     }
-                    if !models.is_empty() {
-                        return Ok(models);
+                    if !entries.is_empty() {
+                        entries.sort_by_key(|e| e.0);
+                        return Ok(entries.into_iter().map(|e| e.1).collect());
                     }
                 }
             }
+            if let Some(local) = get_local_codex_cached_models() {
+                return Ok(local);
+            }
             Ok(fallback_models)
         }
-        _ => Ok(fallback_models),
+        _ => {
+            if let Some(local) = get_local_codex_cached_models() {
+                Ok(local)
+            } else {
+                Ok(fallback_models)
+            }
+        }
     }
 }
 
@@ -640,70 +707,55 @@ pub fn parse_chatgpt_usage_json(json: &serde_json::Value) -> Vec<QuotaBucket> {
         buckets.push(secondary);
     }
 
-    // 重置卡支持 (rate_limit_reset_credits)
-    if let Some(credits) = json.get("rate_limit_reset_credits") {
-        let available = credits["available_count"].as_u64().unwrap_or(0);
-        if available > 0 {
-            buckets.push(QuotaBucket {
-                id: "chatgpt_reset_credits".to_string(),
-                label: format!("限流重置卡 ({} 次可用)", available),
-                remaining_fraction: 1.0,
-                reset_time: None,
-                is_exhausted: false,
-            });
-        }
-    }
-
     buckets
 }
 
-/// 获取 ChatGPT 订阅状态与配额
+/// 获取 ChatGPT 订阅状态、配额与限流重置卡
 pub async fn fetch_chatgpt_quota(
     client: &reqwest::Client,
     access_token: &str,
-) -> Result<Vec<QuotaBucket>, String> {
+) -> Result<(Vec<QuotaBucket>, Vec<ResetCredit>), String> {
     // 1. 尝试直接请求 Codex 官方额度接口 /wham/usage 获取真实可用额度
     let usage_resp = client
         .get("https://chatgpt.com/backend-api/wham/usage")
         .header("authorization", format!("Bearer {}", access_token))
-        .header("user-agent", "codex-cli/0.154.0")
+        .header("user-agent", codex_user_agent())
         .header("accept", "application/json")
         .send()
         .await;
 
+    let mut buckets = Vec::new();
     if let Ok(res) = usage_resp {
         if res.status().is_success() {
             if let Ok(json) = res.json::<serde_json::Value>().await {
-                let buckets = parse_chatgpt_usage_json(&json);
-                if !buckets.is_empty() {
-                    return Ok(buckets);
-                }
+                buckets = parse_chatgpt_usage_json(&json);
             }
         }
     }
 
-    // 2. 兜底回退：通过账号状态检查接口读取套餐类型
-    let resp = client
-        .get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27")
+    // 2. 请求限流重置卡详情 /wham/rate-limit-reset-credits
+    let mut reset_credits = Vec::new();
+    let credits_resp = client
+        .get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
         .header("authorization", format!("Bearer {}", access_token))
-        .header("user-agent", "codex-cli/0.154.0")
+        .header("user-agent", codex_user_agent())
+        .header("accept", "application/json")
         .send()
         .await;
 
-    let mut plan_name = "ChatGPT 订阅有效".to_string();
-    if let Ok(res) = resp {
+    if let Ok(res) = credits_resp {
         if res.status().is_success() {
             if let Ok(json) = res.json::<serde_json::Value>().await {
-                if let Some(accs) = json["accounts"].as_object() {
-                    if let Some(first) = accs.values().next() {
-                        if let Some(pt) = first["account"]["plan_type"].as_str() {
-                            plan_name = match pt {
-                                "pro" => "ChatGPT Pro 订阅 (有效)".to_string(),
-                                "prolite" => "ChatGPT Pro Lite 订阅 (有效)".to_string(),
-                                "plus" => "ChatGPT Plus 订阅 (有效)".to_string(),
-                                "team" => "ChatGPT Team 订阅 (有效)".to_string(),
-                                other => format!("ChatGPT {} 订阅 (有效)", other),
-                            };
+                if let Some(arr) = json["credits"].as_array() {
+                    for c in arr {
+                        let status = c["status"].as_str().unwrap_or("available");
+                        if status == "available" {
+                            reset_credits.push(ResetCredit {
+                                id: c["id"].as_str().unwrap_or("").to_string(),
+                                status: status.to_string(),
+                                expires_at: c["expires_at"].as_str().unwrap_or("").to_string(),
+                                granted_at: c["granted_at"].as_str().map(ToString::to_string),
+                            });
                         }
                     }
                 }
@@ -711,13 +763,78 @@ pub async fn fetch_chatgpt_quota(
         }
     }
 
-    Ok(vec![QuotaBucket {
-        id: "chatgpt_subscription_status".to_string(),
-        label: plan_name,
-        remaining_fraction: 1.0,
-        reset_time: None,
-        is_exhausted: false,
-    }])
+    // 按过期时间从小到大排序（最先过期的排最前）
+    reset_credits.sort_by(|a, b| a.expires_at.cmp(&b.expires_at));
+
+    if buckets.is_empty() {
+        // 兜底回退：通过账号状态检查接口读取套餐类型
+        let resp = client
+            .get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27")
+            .header("authorization", format!("Bearer {}", access_token))
+            .header("user-agent", codex_user_agent())
+            .send()
+            .await;
+
+        let mut plan_name = "ChatGPT有效".to_string();
+        if let Ok(res) = resp {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    if let Some(accs) = json["accounts"].as_object() {
+                        if let Some(first) = accs.values().next() {
+                            if let Some(pt) = first["account"]["plan_type"].as_str() {
+                                plan_name = match pt {
+                                    "pro" => "ChatGPT Pro 订阅 (有效)".to_string(),
+                                    "prolite" => "ChatGPT Pro Lite 订阅 (有效)".to_string(),
+                                    "plus" => "ChatGPT Plus 订阅 (有效)".to_string(),
+                                    "team" => "ChatGPT Team 订阅 (有效)".to_string(),
+                                    other => format!("ChatGPT {} 订阅 (有效)", other),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        buckets.push(QuotaBucket {
+            id: "chatgpt_subscription_status".to_string(),
+            label: plan_name,
+            remaining_fraction: 1.0,
+            reset_time: None,
+            is_exhausted: false,
+        });
+    }
+
+    Ok((buckets, reset_credits))
+}
+
+/// 消耗一张限流重置卡立即重置限流
+pub async fn consume_chatgpt_reset_credit(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<serde_json::Value, String> {
+    let req_id = uuid::Uuid::new_v4().to_string();
+    let resp = client
+        .post("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", codex_user_agent())
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "redeem_request_id": req_id
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("请求重置卡接口失败: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err(format!("使用重置卡失败 ({}): {}", status, err_text));
+    }
+
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("解析重置响应失败: {}", e))
 }
 
 /// 为指定 provider 获取一个可用的订阅账号（自动轮询、检查冷却、自动续期 Token）
@@ -930,10 +1047,21 @@ pub struct QuotaBucket {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResetCredit {
+    pub id: String,
+    pub status: String,
+    pub expires_at: String,
+    pub granted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountQuota {
     pub account_id: String,
     pub updated_at: i64,
     pub buckets: Vec<QuotaBucket>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<Vec<ResetCredit>>,
     pub error: Option<String>,
 }
 
@@ -1289,16 +1417,12 @@ mod tests {
         });
 
         let buckets = parse_chatgpt_usage_json(&json);
-        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0].id, "chatgpt_primary_window");
         assert_eq!(buckets[0].label, "Pro Lite 周周期配额");
         assert!((buckets[0].remaining_fraction - 0.03).abs() < 1e-4);
         assert_eq!(buckets[0].is_exhausted, false);
         assert!(buckets[0].reset_time.is_some());
-
-        assert_eq!(buckets[1].id, "chatgpt_reset_credits");
-        assert_eq!(buckets[1].label, "限流重置卡 (3 次可用)");
-        assert_eq!(buckets[1].remaining_fraction, 1.0);
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub fn convert_anthropic_req_to_openai(
             Value::Array(blocks) => {
                 let mut text_parts = String::new();
                 let mut tool_calls = Vec::new();
+                let mut thinking_parts = String::new();
 
                 for block in blocks {
                     let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -57,6 +58,11 @@ pub fn convert_anthropic_req_to_openai(
                         "text" => {
                             if let Some(t) = block.get("text").and_then(|s| s.as_str()) {
                                 text_parts.push_str(t);
+                            }
+                        }
+                        "thinking" => {
+                            if let Some(t) = block.get("thinking").and_then(|s| s.as_str()) {
+                                thinking_parts.push_str(t);
                             }
                         }
                         "tool_use" => {
@@ -119,7 +125,13 @@ pub fn convert_anthropic_req_to_openai(
                     }
                 }
 
-                if !text_parts.is_empty() || !tool_calls.is_empty() {
+                let reasoning_content = if !thinking_parts.is_empty() {
+                    Some(thinking_parts)
+                } else {
+                    None
+                };
+
+                if !text_parts.is_empty() || !tool_calls.is_empty() || reasoning_content.is_some() {
                     openai_messages.push(OpenAIMessage {
                         role: msg.role.clone(),
                         content: if text_parts.is_empty() {
@@ -133,7 +145,7 @@ pub fn convert_anthropic_req_to_openai(
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        reasoning_content: None,
+                        reasoning_content,
                         name: None,
                     });
                 }
@@ -158,7 +170,10 @@ pub fn convert_anthropic_req_to_openai(
     });
 
     let reasoning_effort = if let Some(ref th) = req.thinking {
-        if th.thinking_type == "enabled" {
+        // Only map reasoning_effort for models that officially support it (e.g. OpenAI o1/o3)
+        // DeepSeek and standard models reject unexpected reasoning_effort values with 400 Bad Request
+        let is_o_series = target_model.contains("o1") || target_model.contains("o3");
+        if is_o_series && th.thinking_type == "enabled" {
             let budget = th.budget_tokens.unwrap_or(8192);
             if budget <= 3000 {
                 Some("low".to_string())
@@ -181,7 +196,7 @@ pub fn convert_anthropic_req_to_openai(
         messages: openai_messages,
         temperature: req.temperature,
         max_tokens: req.max_tokens,
-        max_completion_tokens: req.max_tokens,
+        max_completion_tokens: None,
         reasoning_effort,
         tools: openai_tools,
         tool_choice,
@@ -375,5 +390,55 @@ mod tests {
             convert_anthropic_tool_choice_to_openai(&None),
             None
         );
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_preserves_thinking_block() {
+        let req = AnthropicMessageRequest {
+            model: "claude-3-7-sonnet".to_string(),
+            messages: vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Please think".to_string()),
+                },
+                AnthropicMessage {
+                    role: "assistant".to_string(),
+                    content: Value::Array(vec![
+                        json!({
+                            "type": "thinking",
+                            "thinking": "Deep internal reasoning...",
+                            "signature": "sig123"
+                        }),
+                        json!({
+                            "type": "text",
+                            "text": "Final answer"
+                        }),
+                    ]),
+                },
+            ],
+            system: None,
+            max_tokens: Some(2048),
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            thinking: None,
+            metadata: None,
+        };
+
+        let oai_req = convert_anthropic_req_to_openai(&req, "deepseek-reasoner");
+        assert_eq!(oai_req.messages.len(), 2);
+        assert_eq!(oai_req.messages[1].role, "assistant");
+        assert_eq!(
+            oai_req.messages[1].reasoning_content,
+            Some("Deep internal reasoning...".to_string())
+        );
+        assert_eq!(
+            oai_req.messages[1].content,
+            Some(Value::String("Final answer".to_string()))
+        );
+        // Only max_tokens should be set, not max_completion_tokens
+        assert_eq!(oai_req.max_tokens, Some(2048));
+        assert_eq!(oai_req.max_completion_tokens, None);
     }
 }

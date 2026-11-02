@@ -159,6 +159,7 @@ pub fn run() {
             sync_subscription_models,
             get_subscription_account_quota,
             get_all_subscription_quotas,
+            consume_subscription_reset_credit,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

@@ -148,10 +148,18 @@ export interface QuotaBucket {
   isExhausted: boolean;
 }
 
+export interface ResetCredit {
+  id: string;
+  status: string;
+  expiresAt: string;
+  grantedAt?: string | null;
+}
+
 export interface AccountQuota {
   accountId: string;
   updatedAt: number;
   buckets: QuotaBucket[];
+  resetCredits?: ResetCredit[];
   error?: string | null;
 }
 

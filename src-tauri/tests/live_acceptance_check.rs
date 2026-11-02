@@ -327,3 +327,143 @@ async fn test_live_real_antigravity_and_gemini() {
 
     println!("Real model live test PASSED!");
 }
+
+#[tokio::test]
+async fn test_live_real_deepseek_claude_code_stream() {
+    let home = dirs::home_dir().expect("no home dir");
+    let db_path = home.join(".pivot").join("pivot.db");
+    if !db_path.exists() {
+        println!("No ~/.pivot/pivot.db found, skipping.");
+        return;
+    }
+    let db = Database::new(db_path).unwrap();
+    let stats = Arc::new(GatewayStatsInternal::default());
+    let router_engine = Arc::new(RoutingEngine::new());
+    let gw_state = GatewayState {
+        db: db.clone(),
+        router: router_engine,
+        http_client: reqwest::Client::new(),
+        app_handle: None,
+        stats: stats.clone(),
+    };
+
+    let gw_app = create_gateway_router(gw_state);
+    let port = 16938;
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, gw_app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = reqwest::Client::new();
+
+    println!("Testing live DeepSeek with Claude Code streaming request...");
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": "deepseek-flash",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "请用一句话打招呼"}
+            ],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    println!("DeepSeek streaming HTTP status: {}", status);
+    assert!(status.is_success(), "HTTP status failed: {}", status);
+
+    let sse_body = resp.text().await.unwrap();
+    println!("DeepSeek SSE Body received:\n{}", sse_body);
+
+    assert!(sse_body.contains("event: message_start"), "Missing message_start");
+    assert!(sse_body.contains("event: content_block_start"), "Missing content_block_start");
+    assert!(sse_body.contains("event: content_block_stop"), "Missing content_block_stop");
+    assert!(sse_body.contains("event: message_delta"), "Missing message_delta");
+    assert!(sse_body.contains("event: message_stop"), "Missing message_stop");
+    println!("Live DeepSeek real streaming test PASSED!");
+}
+
+#[tokio::test]
+async fn test_live_real_deepseek_claude_code_tool_use_stream() {
+    let home = dirs::home_dir().expect("no home dir");
+    let db_path = home.join(".pivot").join("pivot.db");
+    if !db_path.exists() {
+        println!("No ~/.pivot/pivot.db found, skipping.");
+        return;
+    }
+    let db = Database::new(db_path).unwrap();
+    let stats = Arc::new(GatewayStatsInternal::default());
+    let router_engine = Arc::new(RoutingEngine::new());
+    let gw_state = GatewayState {
+        db: db.clone(),
+        router: router_engine,
+        http_client: reqwest::Client::new(),
+        app_handle: None,
+        stats: stats.clone(),
+    };
+
+    let gw_app = create_gateway_router(gw_state);
+    let port = 16939;
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, gw_app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = reqwest::Client::new();
+
+    println!("Testing live DeepSeek with Claude Code tool_use streaming request...");
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": "deepseek-flash",
+            "max_tokens": 150,
+            "messages": [
+                {"role": "user", "content": "请务必调用 Bash 工具执行命令 'ls -la'，不要直接回答文本"}
+            ],
+            "tools": [{
+                "name": "Bash",
+                "description": "Execute a bash shell command",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The command to run" }
+                    },
+                    "required": ["command"]
+                }
+            }],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    println!("DeepSeek tool_use streaming HTTP status: {}", status);
+    assert!(status.is_success(), "HTTP status failed: {}", status);
+
+    let sse_body = resp.text().await.unwrap();
+    println!("DeepSeek tool_use SSE Body received:\n{}", sse_body);
+
+    assert!(sse_body.contains("event: message_start"), "Missing message_start");
+    assert!(sse_body.contains("event: content_block_start"), "Missing content_block_start");
+    assert!(sse_body.contains(r#""type":"tool_use""#), "Missing tool_use block");
+    assert!(sse_body.contains("event: content_block_delta"), "Missing content_block_delta");
+    assert!(sse_body.contains("event: content_block_stop"), "Missing content_block_stop");
+    assert!(sse_body.contains("event: message_delta"), "Missing message_delta");
+    assert!(sse_body.contains(r#""stop_reason":"tool_use""#), "Missing stop_reason: tool_use");
+    assert!(sse_body.contains("event: message_stop"), "Missing message_stop");
+    println!("Live DeepSeek tool_use real streaming test PASSED!");
+}

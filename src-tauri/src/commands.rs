@@ -680,53 +680,117 @@ pub async fn get_subscription_account_quota(
         }
     }
 
-    let quota_res = if account.account_type == "chatgpt" {
-        oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await
+    let (buckets, reset_credits) = if account.account_type == "chatgpt" {
+        match oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await {
+            Ok((b, rc)) => (b, Some(rc)),
+            Err(e) => return Ok(oauth::AccountQuota {
+                account_id,
+                updated_at: now_sec,
+                buckets: Vec::new(),
+                reset_credits: None,
+                error: Some(e),
+            }),
+        }
     } else {
         let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
-        oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await
+        match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
+            Ok(b) => (b, None),
+            Err(e) => return Ok(oauth::AccountQuota {
+                account_id,
+                updated_at: now_sec,
+                buckets: Vec::new(),
+                reset_credits: None,
+                error: Some(e),
+            }),
+        }
     };
 
-    match quota_res {
-        Ok(buckets) => {
-            let mut any_exhausted = false;
-            let mut max_reset_sec = 0i64;
+    let mut any_exhausted = false;
+    let mut max_reset_sec = 0i64;
 
-            for b in &buckets {
-                if b.is_exhausted {
-                    any_exhausted = true;
-                    if let Some(ref rt) = b.reset_time {
-                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rt) {
-                            let reset_sec = dt.timestamp();
-                            if reset_sec > max_reset_sec {
-                                max_reset_sec = reset_sec;
-                            }
-                        }
+    for b in &buckets {
+        if b.is_exhausted {
+            any_exhausted = true;
+            if let Some(ref rt) = b.reset_time {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rt) {
+                    let reset_sec = dt.timestamp();
+                    if reset_sec > max_reset_sec {
+                        max_reset_sec = reset_sec;
                     }
                 }
             }
-
-            if any_exhausted && max_reset_sec > now_sec {
-                let _ = state.db.set_account_cooldown(&account.id, max_reset_sec);
-            } else if !any_exhausted && account.cooldown_until > 0 && account.cooldown_until <= now_sec {
-                // 已过冷却时间或额度已恢复，解除冷却标记
-                let _ = state.db.set_account_cooldown(&account.id, 0);
-            }
-
-            Ok(oauth::AccountQuota {
-                account_id,
-                updated_at: now_sec,
-                buckets,
-                error: None,
-            })
         }
-        Err(e) => Ok(oauth::AccountQuota {
-            account_id,
-            updated_at: now_sec,
-            buckets: Vec::new(),
-            error: Some(e),
-        }),
     }
+
+    if any_exhausted && max_reset_sec > now_sec {
+        let _ = state.db.set_account_cooldown(&account.id, max_reset_sec);
+    } else if !any_exhausted && account.cooldown_until > 0 && account.cooldown_until <= now_sec {
+        // 已过冷却时间或额度已恢复，解除冷却标记
+        let _ = state.db.set_account_cooldown(&account.id, 0);
+    }
+
+    Ok(oauth::AccountQuota {
+        account_id,
+        updated_at: now_sec,
+        buckets,
+        reset_credits,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn consume_subscription_reset_credit(
+    state: State<'_, AppState>,
+    provider_id: String,
+    account_id: String,
+) -> Result<oauth::AccountQuota, String> {
+    let accounts = state
+        .db
+        .get_subscription_accounts(&provider_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut account = accounts
+        .into_iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "未找到指定订阅账号".to_string())?;
+
+    let now_sec = chrono::Utc::now().timestamp();
+    // 检查 Token 是否需要续期
+    if account.expires_at > 0 && account.expires_at - now_sec < 300 {
+        if let Some(ref rt) = account.refresh_token {
+            if account.account_type == "chatgpt" {
+                if let Ok((new_token, new_expires_at)) =
+                    oauth::refresh_chatgpt_token(&state.http_client, rt).await
+                {
+                    let _ = state.db.update_account_tokens(
+                        &account.id,
+                        &new_token,
+                        Some(rt.as_str()),
+                        new_expires_at,
+                    );
+                    account.access_token = new_token;
+                    account.expires_at = new_expires_at;
+                }
+            }
+        }
+    }
+
+    oauth::consume_chatgpt_reset_credit(&state.http_client, &account.access_token).await?;
+
+    // 重置本地冷却时间
+    let _ = state.db.set_account_cooldown(&account.id, 0);
+
+    // 重新拉取最新额度并返回
+    let (buckets, reset_credits) =
+        oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await?;
+
+    Ok(oauth::AccountQuota {
+        account_id,
+        updated_at: chrono::Utc::now().timestamp(),
+        buckets,
+        reset_credits: Some(reset_credits),
+        error: None,
+    })
 }
 
 #[tauri::command]

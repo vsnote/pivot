@@ -200,10 +200,15 @@ pub struct OpenAIChatChunkChoice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIChatChunk {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub object: String,
+    #[serde(default)]
     pub created: u64,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub choices: Vec<OpenAIChatChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<OpenAIUsage>,

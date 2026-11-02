@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   HelpCircle,
   Zap,
+  Sparkles,
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
@@ -58,7 +59,7 @@ const protocols: Record<Protocol, string> = {
   gemini: 'Google Gemini',
   openrouter: 'OpenRouter',
   ollama: 'Ollama',
-  chatgpt: 'ChatGPT 订阅',
+  chatgpt: 'ChatGPT',
 };
 
 export function ProviderEditor() {
@@ -148,15 +149,50 @@ export function ProviderEditor() {
     if (isNaN(target)) return null;
     const diffMs = target - Date.now();
     if (diffMs <= 0) return '即将重置';
-    const diffMins = Math.round(diffMs / 60000);
-    if (diffMins < 60) return `${diffMins}分钟后重置`;
-    const diffHours = Math.round(diffMins / 60);
-    if (diffHours < 24) {
-      const d = new Date(target);
-      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')} 重置`;
+    const totalMinutes = Math.floor(diffMs / 60000);
+    if (totalMinutes < 60) return `${totalMinutes}分钟后重置`;
+    const totalHours = Math.floor(totalMinutes / 60);
+    if (totalHours < 24) {
+      const remMins = totalMinutes % 60;
+      if (totalHours < 6 && remMins > 0) {
+        return `${totalHours}小时${remMins}分钟后重置`;
+      }
+      return `${totalHours}小时后重置`;
     }
-    const days = Math.ceil(diffHours / 24);
-    return `${days}天后重置`;
+    const days = Math.floor(totalHours / 24);
+    const remHours = totalHours % 24;
+    return `${days}天${remHours}小时后重置`;
+  };
+
+  const formatCreditExpiry = (isoStr: string) => {
+    if (!isoStr) return '未知';
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) return isoStr;
+    const year = d.getFullYear();
+    const month = (d.getMonth() + 1).toString().padStart(2, '0');
+    const day = d.getDate().toString().padStart(2, '0');
+    const diffDays = Math.ceil((d.getTime() - Date.now()) / (1000 * 86400));
+    const diffDesc = diffDays > 0 ? ` (${diffDays}天后到期)` : ' (即将到期)';
+    return `${year}-${month}-${day}${diffDesc}`;
+  };
+
+  const [consumingCreditAccountId, setConsumingCreditAccountId] = useState<string | null>(null);
+
+  const handleConsumeCredit = async (accountId: string) => {
+    if (!draft.id) return;
+    try {
+      setConsumingCreditAccountId(accountId);
+      const updated = await invoke<AccountQuota>('consume_subscription_reset_credit', {
+        providerId: draft.id,
+        accountId,
+      });
+      setAccountQuotas((prev) => ({ ...prev, [accountId]: updated }));
+      setNotice('已使用 1 张重置卡，配额已恢复！');
+    } catch (e: any) {
+      setOauthError(typeof e === 'string' ? e : e?.message || '使用重置卡失败');
+    } finally {
+      setConsumingCreditAccountId(null);
+    }
   };
 
   const fetchAccountQuota = async (accountId: string) => {
@@ -186,7 +222,7 @@ export function ProviderEditor() {
       setSubAccounts(list);
       // 若已绑定账号且候选池较少，后台静默补充拉取一次上游模型扩充 pool（保持已选模型不变）
       if (list.length > 0 && pool.length <= draft.models.length) {
-        syncSubscriptionModels(draft.baseUrl, false);
+        syncSubscriptionModels(draft.baseUrl);
       }
     } catch (e) {
       console.error('加载订阅账号失败', e);
@@ -203,7 +239,7 @@ export function ProviderEditor() {
 
   const [syncingModels, setSyncingModels] = useState(false);
 
-  const syncSubscriptionModels = async (baseUrl?: string, forceReplaceSelected = false): Promise<string[]> => {
+  const syncSubscriptionModels = async (baseUrl?: string): Promise<string[]> => {
     const defaultUrl = isChatGPT ? 'https://chatgpt.com/backend-api' : 'https://daily-cloudcode-pa.googleapis.com';
     const url = (baseUrl || draft.baseUrl || defaultUrl).trim();
     try {
@@ -216,18 +252,10 @@ export function ProviderEditor() {
       if (models && models.length > 0) {
         const unique = uniqueValues(models);
         setPool((prev) => uniqueValues([...prev, ...unique]));
+        setFetched(unique);
 
-        // 仅在初始未配置任何已选模型，或用户主动强制覆盖时，才全选模型；
-        // 否则一律保留用户当前已经勾选的模型集合，避免多账号登录或同步时冲掉用户自选
-        if (forceReplaceSelected || draft.models.length === 0) {
-          replaceModels(unique);
-          if (!draft.defaultModel || !unique.includes(draft.defaultModel)) {
-            update({ defaultModel: unique[0] });
-          }
-          setNotice(`已成功同步并接入账号的 ${unique.length} 个可用模型`);
-        } else {
-          setNotice(`已同步上游 ${unique.length} 个可用模型（保留当前已选）`);
-        }
+        // 获取模型之后，默认不选中：保留已选模型不变，新增模型放入候选池供用户挑选
+        setNotice(`已获取上游 ${unique.length} 个可用模型，请按需勾选`);
         return unique;
       }
     } catch (e: any) {
@@ -236,16 +264,17 @@ export function ProviderEditor() {
       setSyncingModels(false);
     }
 
-    // 容灾兜底：若上游接口暂不可用，载入官方推荐基线模型
+    // 容灾兜底：若上游接口暂不可用，载入官方推荐基线模型到池中，同样默认不选中
     const fallbackList = preset?.defaultModels ?? (isChatGPT ? [
-      'gpt-5',
-      'gpt-5-codex',
-      'gpt-5-pro',
-      'gpt-5.1',
-      'gpt-5.1-codex',
-      'gpt-5.1-codex-max',
-      'gpt-5.2',
-      'gpt-5.2-codex',
+      'gpt-6.1-sol',
+      'gpt-6-astra',
+      'gpt-6.1-terra',
+      'gpt-6-sol',
+      'gpt-reserve',
+      'gpt-6-luna',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
     ] : [
       'claude-sonnet-4-6',
       'claude-opus-4-6-thinking',
@@ -256,31 +285,31 @@ export function ProviderEditor() {
       'gpt-oss-120b-medium',
     ]);
     setPool((prev) => uniqueValues([...prev, ...fallbackList]));
-    if (forceReplaceSelected || draft.models.length === 0) {
-      replaceModels(fallbackList);
-      if (!draft.defaultModel || !fallbackList.includes(draft.defaultModel)) {
-        update({ defaultModel: fallbackList[0] });
-      }
-    }
-    setNotice(`上游模型接口受限，已载入支持的 ${fallbackList.length} 个推荐模型`);
+    setNotice(`上游模型接口受限，已载入 ${fallbackList.length} 个推荐模型到候选池`);
     return fallbackList;
   };
 
   const postAccountConnect = async (successNotice: string) => {
     await loadSubscriptionAccounts();
 
-    // 如果当前已有自主选择的模型集合，同步时保留；仅在从未选过模型时全量启用
-    const shouldSelectAll = draft.models.length === 0;
-    const syncedModels = await syncSubscriptionModels(draft.baseUrl, shouldSelectAll);
+    // 连接/导入账号后，同步上游模型到候选池（默认不全选）
+    const syncedModels = await syncSubscriptionModels(draft.baseUrl);
 
-    const finalModels = draft.models.length > 0 ? draft.models : syncedModels;
-    const finalDefault = draft.defaultModel && finalModels.includes(draft.defaultModel)
+    // 若当前已有选择的模型，保持不变；若此前完全未选过任何模型，默认仅勾选推荐首选模型（如 gpt-6-astra）
+    let nextModels = draft.models.filter((m) => syncedModels.includes(m));
+    if (nextModels.length === 0 && syncedModels.length > 0) {
+      const primary = syncedModels.find((m) => m === 'gpt-6-astra') || syncedModels[0];
+      nextModels = [primary];
+    }
+    const finalDefault = draft.defaultModel && nextModels.includes(draft.defaultModel)
       ? draft.defaultModel
-      : finalModels[0] || null;
+      : nextModels[0] || null;
+
+    replaceModels(nextModels);
 
     const providerToSave = prepareProvider({
       ...draft,
-      models: finalModels,
+      models: nextModels,
       defaultModel: finalDefault,
       enabled: true,
     });
@@ -560,8 +589,9 @@ export function ProviderEditor() {
         apiKey: uniqueValues(draft.apiKeys)[0] ?? '',
       });
       if (requestId.current !== current) return;
-      setFetched(uniqueValues(models));
-      setNotice('');
+      const unique = uniqueValues(models);
+      setFetched(unique);
+      setNotice(`已获取上游 ${unique.length} 个可用模型，请按需勾选`);
     } catch (error) {
       if (requestId.current === current) setFetchError(String(error));
     } finally {
@@ -1249,43 +1279,93 @@ export function ProviderEditor() {
                                         <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
                                         <span>正在拉取最新配额…</span>
                                       </div>
-                                    ) : quota && quota.buckets.length > 0 ? (
-                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                        {quota.buckets.map((b) => {
-                                          const pct = Math.round(b.remainingFraction * 100);
-                                          const resetDesc = formatResetTime(b.resetTime);
-                                          const isLow = b.remainingFraction <= 0.2;
-                                          const isOut = b.isExhausted;
+                                    ) : quota && (quota.buckets.length > 0 || (quota.resetCredits && quota.resetCredits.length > 0)) ? (
+                                      <div className="space-y-2">
+                                        {quota.buckets.length > 0 && (
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            {quota.buckets.map((b) => {
+                                              const pct = Math.round(b.remainingFraction * 100);
+                                              const resetDesc = formatResetTime(b.resetTime);
+                                              const isLow = b.remainingFraction <= 0.2;
+                                              const isOut = b.isExhausted;
 
-                                          return (
-                                            <div key={b.id} className="space-y-1">
-                                              <div className="flex items-center justify-between text-[10px]">
-                                                <span className="text-zinc-500 dark:text-zinc-400 font-medium truncate">{b.label}</span>
-                                                <span
-                                                  className={clsx(
-                                                    "font-mono shrink-0",
-                                                    isOut
-                                                      ? "text-rose-500 dark:text-rose-400 font-semibold"
-                                                      : isLow
-                                                      ? "text-amber-500 font-medium"
-                                                      : "text-zinc-600 dark:text-zinc-300"
-                                                  )}
-                                                >
-                                                  {isOut ? `已耗尽${resetDesc ? ` · ${resetDesc}` : ''}` : `${pct}%${resetDesc ? ` · ${resetDesc}` : ''}`}
-                                                </span>
-                                              </div>
-                                              <div className="w-full h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800/80 overflow-hidden">
-                                                <div
-                                                  className={clsx(
-                                                    "h-full rounded-full transition-all duration-300",
-                                                    isOut ? "bg-rose-500" : isLow ? "bg-amber-500" : "bg-emerald-500"
-                                                  )}
-                                                  style={{ width: `${Math.max(pct, isOut ? 0 : 3)}%` }}
-                                                />
+                                              return (
+                                                <div key={b.id} className="space-y-1">
+                                                  <div className="flex items-center justify-between text-[10px]">
+                                                    <span className="text-zinc-500 dark:text-zinc-400 font-medium truncate">{b.label}</span>
+                                                    <span
+                                                      className={clsx(
+                                                        "font-mono shrink-0",
+                                                        isOut
+                                                          ? "text-rose-500 dark:text-rose-400 font-semibold"
+                                                          : isLow
+                                                          ? "text-amber-500 font-medium"
+                                                          : "text-zinc-600 dark:text-zinc-300"
+                                                      )}
+                                                    >
+                                                      {isOut ? `已耗尽${resetDesc ? ` · ${resetDesc}` : ''}` : `${pct}%${resetDesc ? ` · ${resetDesc}` : ''}`}
+                                                    </span>
+                                                  </div>
+                                                  <div className="w-full h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800/80 overflow-hidden">
+                                                    <div
+                                                      className={clsx(
+                                                        "h-full rounded-full transition-all duration-300",
+                                                        isOut ? "bg-rose-500" : isLow ? "bg-amber-500" : "bg-emerald-500"
+                                                      )}
+                                                      style={{ width: `${Math.max(pct, isOut ? 0 : 3)}%` }}
+                                                    />
+                                                  </div>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
+
+                                        {/* 限流重置卡 */}
+                                        {quota.resetCredits && quota.resetCredits.length > 0 && (
+                                          <div className="mt-2.5 pt-2 border-t border-border/50 space-y-1.5">
+                                            <div className="flex items-center justify-between">
+                                              <div className="flex items-center gap-1.5 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+                                                <Sparkles className="w-3 h-3 text-amber-500" />
+                                                <span>限流重置卡</span>
+                                                <Badge variant="secondary" className="text-[9px] px-1 py-0 h-4 font-mono">
+                                                  {quota.resetCredits.length} 张可用
+                                                </Badge>
                                               </div>
                                             </div>
-                                          );
-                                        })}
+                                            <div className="space-y-1">
+                                              {quota.resetCredits.map((credit, idx) => (
+                                                <div
+                                                  key={credit.id || idx}
+                                                  className="p-1.5 px-2 rounded-md bg-zinc-500/[0.03] border border-border/60 flex items-center justify-between gap-3 text-xs"
+                                                >
+                                                  <div className="min-w-0">
+                                                    <span className="text-[10px] text-muted-foreground">
+                                                      到期时间：{formatCreditExpiry(credit.expiresAt)}
+                                                    </span>
+                                                  </div>
+                                                  <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    className="h-5 px-1.5 text-[10px] shrink-0 text-primary hover:text-primary hover:bg-primary/10 border-primary/30"
+                                                    disabled={consumingCreditAccountId === acc.id}
+                                                    onClick={() => handleConsumeCredit(acc.id)}
+                                                  >
+                                                    {consumingCreditAccountId === acc.id ? (
+                                                      <>
+                                                        <LoaderCircle className="w-2.5 h-2.5 animate-spin mr-1" />
+                                                        <span>使用中…</span>
+                                                      </>
+                                                    ) : (
+                                                      <span>使用重置卡</span>
+                                                    )}
+                                                  </Button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
                                     ) : (
                                       <div className="py-2 text-center text-[10px] text-muted-foreground">
@@ -1457,7 +1537,7 @@ export function ProviderEditor() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => syncSubscriptionModels(draft.baseUrl, false)}
+                        onClick={() => syncSubscriptionModels(draft.baseUrl)}
                         disabled={syncingModels}
                         className="h-7 text-xs"
                       >

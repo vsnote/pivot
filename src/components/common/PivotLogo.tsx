@@ -34,14 +34,25 @@ export const PivotLogo: React.FC<PivotLogoProps> = ({
         : '';
 
   // 1. 系统级应用图标模式: 标准 macOS 824/1024 比例圆角底板与投影
+  // 浅色模式为白底黑图案，深色模式为黑底白图案
   if (variant === 'icon') {
     return (
-      <img
-        src="/app-icon.png"
-        alt={alt}
-        className={`object-contain select-none shrink-0 pointer-events-none ${filterClass} ${className}`}
-        draggable={false}
-      />
+      <div className={`relative inline-flex items-center justify-center select-none shrink-0 pointer-events-none ${className}`}>
+        {/* 浅色模式: 白底，图案是黑色 */}
+        <img
+          src="/app-icon-light.png"
+          alt={alt}
+          className={`w-full h-full object-contain dark:hidden ${filterClass}`}
+          draggable={false}
+        />
+        {/* 深色模式: 黑底，图案白色 */}
+        <img
+          src="/app-icon-dark.png"
+          alt={alt}
+          className={`w-full h-full object-contain hidden dark:block ${filterClass}`}
+          draggable={false}
+        />
+      </div>
     );
   }
 

@@ -270,6 +270,11 @@ pub fn parse_gemini_chunk_to_anthropic_events(
 
 /// Finish an Anthropic SSE response produced from Gemini streaming output.
 pub fn finish_gemini_stream(state: &mut SseState, stop_reason: &str) -> Vec<String> {
+    finish_openai_stream(state, stop_reason)
+}
+
+/// Finish an Anthropic SSE response produced from OpenAI streaming output.
+pub fn finish_openai_stream(state: &mut SseState, stop_reason: &str) -> Vec<String> {
     let mut events = Vec::new();
     if !state.message_started || state.stream_finished {
         return events;
@@ -307,42 +312,7 @@ pub fn parse_openai_chunk_to_anthropic_events(
 
     let payload = trimmed.trim_start_matches("data:").trim();
     if payload == "[DONE]" {
-        if state.in_thinking_block {
-            events.push(format!(
-                "event: content_block_stop\ndata: {}\n\n",
-                json!({ "type": "content_block_stop", "index": state.current_block_index })
-            ));
-            state.in_thinking_block = false;
-            state.current_block_index += 1;
-        }
-        if state.in_text_block {
-            events.push(format!(
-                "event: content_block_stop\ndata: {}\n\n",
-                json!({ "type": "content_block_stop", "index": state.current_block_index })
-            ));
-            state.in_text_block = false;
-            state.current_block_index += 1;
-        }
-        if state.in_tool_block {
-            events.push(format!(
-                "event: content_block_stop\ndata: {}\n\n",
-                json!({ "type": "content_block_stop", "index": state.current_block_index })
-            ));
-            state.in_tool_block = false;
-            state.current_block_index += 1;
-        }
-
-        events.push(format!(
-            "event: message_delta\ndata: {}\n\n",
-            json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
-                "usage": { "output_tokens": state.total_output_tokens }
-            })
-        ));
-        events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
-        state.stream_finished = true;
-        return events;
+        return finish_openai_stream(state, "end_turn");
     }
 
     let chunk: OpenAIChatChunk = match serde_json::from_str(payload) {
@@ -374,13 +344,8 @@ pub fn parse_openai_chunk_to_anthropic_events(
         if let Some(ref reasoning) = choice.delta.reasoning_content {
             if !reasoning.is_empty() {
                 if !state.in_thinking_block {
-                    if state.in_text_block {
-                        events.push(format!(
-                            "event: content_block_stop\ndata: {}\n\n",
-                            json!({ "type": "content_block_stop", "index": state.current_block_index })
-                        ));
-                        state.in_text_block = false;
-                        state.current_block_index += 1;
+                    if state.in_text_block || state.in_tool_block {
+                        close_active_anthropic_blocks(&mut events, state);
                     }
                     state.in_thinking_block = true;
                     events.push(format!(
@@ -408,14 +373,9 @@ pub fn parse_openai_chunk_to_anthropic_events(
         // Handle normal Text Content
         if let Some(ref text) = choice.delta.content {
             if !text.is_empty() {
-                // If we were in thinking block, close it
-                if state.in_thinking_block {
-                    events.push(format!(
-                        "event: content_block_stop\ndata: {}\n\n",
-                        json!({ "type": "content_block_stop", "index": state.current_block_index })
-                    ));
-                    state.in_thinking_block = false;
-                    state.current_block_index += 1;
+                // If we were in thinking or tool block, close it
+                if state.in_thinking_block || state.in_tool_block {
+                    close_active_anthropic_blocks(&mut events, state);
                 }
 
                 if !state.in_text_block {
@@ -446,22 +406,8 @@ pub fn parse_openai_chunk_to_anthropic_events(
         if let Some(ref tool_chunks) = choice.delta.tool_calls {
             for tc in tool_chunks {
                 if let Some(ref id) = tc.id {
-                    // Start of a tool call
-                    if state.in_text_block {
-                        events.push(format!(
-                            "event: content_block_stop\ndata: {}\n\n",
-                            json!({ "type": "content_block_stop", "index": state.current_block_index })
-                        ));
-                        state.in_text_block = false;
-                        state.current_block_index += 1;
-                    }
-                    if state.in_tool_block {
-                        events.push(format!(
-                            "event: content_block_stop\ndata: {}\n\n",
-                            json!({ "type": "content_block_stop", "index": state.current_block_index })
-                        ));
-                        state.current_block_index += 1;
-                    }
+                    // Close any active block (thinking, text, or previous tool block)
+                    close_active_anthropic_blocks(&mut events, state);
 
                     let name = tc
                         .function
@@ -508,30 +454,7 @@ pub fn parse_openai_chunk_to_anthropic_events(
 
         // Check finish_reason
         if let Some(ref finish_reason) = choice.finish_reason {
-            if state.in_text_block {
-                events.push(format!(
-                    "event: content_block_stop\ndata: {}\n\n",
-                    json!({ "type": "content_block_stop", "index": state.current_block_index })
-                ));
-                state.in_text_block = false;
-                state.current_block_index += 1;
-            }
-            if state.in_thinking_block {
-                events.push(format!(
-                    "event: content_block_stop\ndata: {}\n\n",
-                    json!({ "type": "content_block_stop", "index": state.current_block_index })
-                ));
-                state.in_thinking_block = false;
-                state.current_block_index += 1;
-            }
-            if state.in_tool_block {
-                events.push(format!(
-                    "event: content_block_stop\ndata: {}\n\n",
-                    json!({ "type": "content_block_stop", "index": state.current_block_index })
-                ));
-                state.in_tool_block = false;
-                state.current_block_index += 1;
-            }
+            close_active_anthropic_blocks(&mut events, state);
 
             let stop_reason = match finish_reason.as_str() {
                 "stop" => "end_turn",
@@ -859,5 +782,77 @@ mod tests {
         let c5 = parse_anthropic_event_to_openai_chunks(stop, "req-oai", "gpt-4o");
         assert_eq!(c5.len(), 1);
         assert!(c5[0].contains("[DONE]"));
+    }
+
+    #[test]
+    fn test_openai_deepseek_reasoning_to_tool_calls_stream() {
+        let mut state = SseState::new();
+
+        // 1. DeepSeek R1 reasoning stream chunk
+        let chunk1 = r#"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Thinking about file list..."},"finish_reason":null}]}"#;
+        let evts1 = parse_openai_chunk_to_anthropic_events(chunk1, &mut state, "req-ds", "deepseek-reasoner");
+        let out1 = evts1.concat();
+        assert!(out1.contains(r#""type":"message_start""#));
+        assert!(out1.contains(r#""type":"content_block_start""#));
+        assert!(out1.contains(r#""type":"thinking""#));
+        assert!(out1.contains(r#""thinking":"Thinking about file list...""#));
+        assert_eq!(state.current_block_index, 0);
+        assert!(state.in_thinking_block);
+
+        // 2. DeepSeek switches straight from reasoning into tool call (no content text)
+        let chunk2 = r#"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_bash_01","type":"function","function":{"name":"Bash","arguments":""}}]},"finish_reason":null}]}"#;
+        let evts2 = parse_openai_chunk_to_anthropic_events(chunk2, &mut state, "req-ds", "deepseek-reasoner");
+        let out2 = evts2.concat();
+        // Crucial: Must have closed the thinking block at index 0 first!
+        assert!(out2.contains(r#"{"index":0,"type":"content_block_stop"}"#));
+        // And started the tool_use block at index 1!
+        assert!(out2.contains(r#""type":"content_block_start""#));
+        assert!(out2.contains(r#""index":1"#));
+        assert!(out2.contains(r#""type":"tool_use""#));
+        assert!(out2.contains(r#""id":"call_bash_01""#));
+        assert!(!state.in_thinking_block);
+        assert!(state.in_tool_block);
+        assert_eq!(state.current_block_index, 1);
+
+        // 3. Tool argument delta
+        let chunk3 = r#"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]}"#;
+        let evts3 = parse_openai_chunk_to_anthropic_events(chunk3, &mut state, "req-ds", "deepseek-reasoner");
+        let out3 = evts3.concat();
+        assert!(out3.contains(r#""type":"content_block_delta""#));
+        assert!(out3.contains(r#""index":1"#));
+        assert!(out3.contains(r#""partial_json":"{\"cmd\":\"ls\"}""#));
+
+        // 4. Finish reason tool_calls
+        let chunk4 = r#"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let evts4 = parse_openai_chunk_to_anthropic_events(chunk4, &mut state, "req-ds", "deepseek-reasoner");
+        let out4 = evts4.concat();
+        // Must close the tool_use block at index 1
+        assert!(out4.contains(r#"{"index":1,"type":"content_block_stop"}"#));
+        assert!(out4.contains(r#""stop_reason":"tool_use""#));
+        assert!(out4.contains(r#"event: message_stop"#));
+        assert!(state.stream_finished);
+
+        // 5. [DONE] arrives afterward - must not emit duplicate stops
+        let evts5 = parse_openai_chunk_to_anthropic_events("data: [DONE]", &mut state, "req-ds", "deepseek-reasoner");
+        assert!(evts5.is_empty());
+    }
+
+    #[test]
+    fn test_openai_stream_eof_safeguard() {
+        let mut state = SseState::new();
+
+        // 1. Thinking block started
+        let chunk1 = r#"data: {"id":"chat-2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Long reasoning..."},"finish_reason":null}]}"#;
+        let _ = parse_openai_chunk_to_anthropic_events(chunk1, &mut state, "req-eof", "deepseek-reasoner");
+        assert!(state.in_thinking_block);
+        assert!(!state.stream_finished);
+
+        // 2. Upstream closes unexpectedly without [DONE] or finish_reason
+        let finish_events = finish_openai_stream(&mut state, "end_turn");
+        let out = finish_events.concat();
+        assert!(out.contains(r#"{"index":0,"type":"content_block_stop"}"#));
+        assert!(out.contains(r#""stop_reason":"end_turn""#));
+        assert!(out.contains(r#"event: message_stop"#));
+        assert!(state.stream_finished);
     }
 }
