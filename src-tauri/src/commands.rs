@@ -680,27 +680,14 @@ pub async fn get_subscription_account_quota(
         }
     }
 
-    if account.account_type == "chatgpt" {
-        let buckets = oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token)
-            .await
-            .unwrap_or_else(|_| vec![oauth::QuotaBucket {
-                id: "chatgpt_subscription_status".to_string(),
-                label: "ChatGPT 订阅有效".to_string(),
-                remaining_fraction: 1.0,
-                reset_time: None,
-                is_exhausted: false,
-            }]);
-        return Ok(oauth::AccountQuota {
-            account_id,
-            updated_at: chrono::Utc::now().timestamp(),
-            buckets,
-            error: None,
-        });
-    }
+    let quota_res = if account.account_type == "chatgpt" {
+        oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await
+    } else {
+        let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
+        oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await
+    };
 
-    let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
-
-    match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
+    match quota_res {
         Ok(buckets) => {
             let mut any_exhausted = false;
             let mut max_reset_sec = 0i64;

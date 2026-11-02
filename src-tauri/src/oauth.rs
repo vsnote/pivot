@@ -564,11 +564,125 @@ pub async fn fetch_chatgpt_models(
     }
 }
 
+/// 解析 ChatGPT / Codex 官方 /wham/usage 额度响应
+pub fn parse_chatgpt_usage_json(json: &serde_json::Value) -> Vec<QuotaBucket> {
+    let mut buckets = Vec::new();
+
+    let plan_label = match json["plan_type"].as_str() {
+        Some("pro") => "Pro",
+        Some("prolite") => "Pro Lite",
+        Some("plus") => "Plus",
+        Some("team") => "Team",
+        Some(other) => other,
+        None => "",
+    };
+
+    let rate_limit = &json["rate_limit"];
+    let limit_reached = rate_limit["limit_reached"].as_bool().unwrap_or(false);
+
+    let format_window_label = |win: &serde_json::Value, default_suffix: &str| -> String {
+        let secs = win["limit_window_seconds"].as_i64().unwrap_or(0);
+        let cycle_desc = if secs > 0 {
+            if secs <= 10800 {
+                "3小时配额".to_string()
+            } else if secs <= 18000 {
+                "5小时配额".to_string()
+            } else if secs <= 86400 {
+                "日周期配额".to_string()
+            } else if secs == 604800 {
+                "周周期配额".to_string()
+            } else {
+                format!("{}天周期配额", (secs + 43200) / 86400)
+            }
+        } else {
+            default_suffix.to_string()
+        };
+
+        if plan_label.is_empty() {
+            cycle_desc
+        } else {
+            format!("{} {}", plan_label, cycle_desc)
+        }
+    };
+
+    let parse_window = |win: &serde_json::Value, id: &str, default_suffix: &str| -> Option<QuotaBucket> {
+        if win.is_null() || !win.is_object() {
+            return None;
+        }
+        let used_pct = win["used_percent"].as_f64()?;
+        let remaining_fraction = ((100.0 - used_pct) / 100.0).clamp(0.0, 1.0);
+        let is_exhausted = remaining_fraction <= 0.005 || limit_reached;
+
+        let label = format_window_label(win, default_suffix);
+
+        let reset_time = if let Some(ts) = win["reset_at"].as_i64() {
+            chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.to_rfc3339())
+        } else if let Some(secs) = win["reset_after_seconds"].as_i64() {
+            Some((chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339())
+        } else {
+            None
+        };
+
+        Some(QuotaBucket {
+            id: id.to_string(),
+            label,
+            remaining_fraction,
+            reset_time,
+            is_exhausted,
+        })
+    };
+
+    if let Some(primary) = parse_window(&rate_limit["primary_window"], "chatgpt_primary_window", "主配额") {
+        buckets.push(primary);
+    }
+
+    if let Some(secondary) = parse_window(&rate_limit["secondary_window"], "chatgpt_secondary_window", "短周期配额") {
+        buckets.push(secondary);
+    }
+
+    // 重置卡支持 (rate_limit_reset_credits)
+    if let Some(credits) = json.get("rate_limit_reset_credits") {
+        let available = credits["available_count"].as_u64().unwrap_or(0);
+        if available > 0 {
+            buckets.push(QuotaBucket {
+                id: "chatgpt_reset_credits".to_string(),
+                label: format!("限流重置卡 ({} 次可用)", available),
+                remaining_fraction: 1.0,
+                reset_time: None,
+                is_exhausted: false,
+            });
+        }
+    }
+
+    buckets
+}
+
 /// 获取 ChatGPT 订阅状态与配额
 pub async fn fetch_chatgpt_quota(
     client: &reqwest::Client,
     access_token: &str,
 ) -> Result<Vec<QuotaBucket>, String> {
+    // 1. 尝试直接请求 Codex 官方额度接口 /wham/usage 获取真实可用额度
+    let usage_resp = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "codex-cli/0.154.0")
+        .header("accept", "application/json")
+        .send()
+        .await;
+
+    if let Ok(res) = usage_resp {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                let buckets = parse_chatgpt_usage_json(&json);
+                if !buckets.is_empty() {
+                    return Ok(buckets);
+                }
+            }
+        }
+    }
+
+    // 2. 兜底回退：通过账号状态检查接口读取套餐类型
     let resp = client
         .get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27")
         .header("authorization", format!("Bearer {}", access_token))
@@ -1149,5 +1263,76 @@ mod tests {
 
         assert_eq!(buckets[2].label, "GPT-OSS 额度");
         assert_eq!(buckets[2].remaining_fraction, 1.0);
+    }
+
+    #[test]
+    fn test_parse_chatgpt_usage_json_real() {
+        let json = serde_json::json!({
+            "user_id": "user-test",
+            "email": "test@example.com",
+            "plan_type": "prolite",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                    "used_percent": 97,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 261977,
+                    "reset_at": 1793866462
+                },
+                "secondary_window": null
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 3,
+                "applicable_available_count": 0
+            }
+        });
+
+        let buckets = parse_chatgpt_usage_json(&json);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].id, "chatgpt_primary_window");
+        assert_eq!(buckets[0].label, "Pro Lite 周周期配额");
+        assert!((buckets[0].remaining_fraction - 0.03).abs() < 1e-4);
+        assert_eq!(buckets[0].is_exhausted, false);
+        assert!(buckets[0].reset_time.is_some());
+
+        assert_eq!(buckets[1].id, "chatgpt_reset_credits");
+        assert_eq!(buckets[1].label, "限流重置卡 (3 次可用)");
+        assert_eq!(buckets[1].remaining_fraction, 1.0);
+    }
+
+    #[test]
+    fn test_parse_chatgpt_usage_dual_windows() {
+        let json = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 7200,
+                    "reset_at": 1793866462
+                },
+                "secondary_window": {
+                    "used_percent": 45,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 300000,
+                    "reset_at": 1794100000
+                }
+            }
+        });
+
+        let buckets = parse_chatgpt_usage_json(&json);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].id, "chatgpt_primary_window");
+        assert_eq!(buckets[0].label, "Plus 5小时配额");
+        assert_eq!(buckets[0].remaining_fraction, 0.0);
+        assert_eq!(buckets[0].is_exhausted, true);
+
+        assert_eq!(buckets[1].id, "chatgpt_secondary_window");
+        assert_eq!(buckets[1].label, "Plus 周周期配额");
+        assert!((buckets[1].remaining_fraction - 0.55).abs() < 1e-4);
+        assert_eq!(buckets[1].is_exhausted, true); // limit_reached: true
     }
 }
