@@ -6,6 +6,7 @@ import { PivotLogo } from '@/components/common/PivotLogo';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   Download,
   Upload,
@@ -14,6 +15,7 @@ import {
   RefreshCw,
   Sparkles,
   ArrowUpCircle,
+  ExternalLink,
 } from 'lucide-react';
 
 const themeOptions = [
@@ -136,6 +138,15 @@ export const SettingsView: React.FC = () => {
       await relaunch();
     } catch (err) {
       console.error('重启应用失败:', err);
+    }
+  };
+
+  // 打开 GitHub 仓库
+  const handleOpenRepo = async () => {
+    try {
+      await openUrl('https://github.com/vsnote/pivot');
+    } catch {
+      window.open('https://github.com/vsnote/pivot', '_blank');
     }
   };
 
@@ -273,7 +284,7 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
 
-      {/* 卡片 3：配置数据备份与恢复 */}
+      {/* 卡片 2：配置数据备份与恢复 */}
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
@@ -283,7 +294,7 @@ export const SettingsView: React.FC = () => {
 
         <div className="p-4 space-y-3.5">
           <div className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-            导出全部服务商、密钥与路由规则为单个 JSON 文件，换机或重装后可据此恢复。备份是明文的，含密钥，请妥善保管。
+            导出全部服务商配置、模型池与凭据数据为单个 JSON 文件，换机或重装后可据此恢复。备份文件为未加密明文，包含敏感密钥与凭据，请妥善保管。
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 pt-1">
@@ -292,7 +303,7 @@ export const SettingsView: React.FC = () => {
               variant="outline"
               size="sm"
               onClick={handleExportBackup}
-              title="导出当前所有服务商与路由规则"
+              title="导出当前所有服务商与模型配置"
             >
               <Download className="w-3.5 h-3.5" />
               <span>导出配置备份 (.json)</span>
@@ -322,22 +333,53 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
 
-      {/* 卡片：软件更新 */}
+      {/* 卡片 3：关于 Pivot 与更新 */}
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            软件更新
+            关于 Pivot
           </span>
           <span className="text-[10px] font-mono text-zinc-400">
-            {appVersion ? `当前版本 v${appVersion}` : '当前版本'}
+            {appVersion ? `v${appVersion}` : ''}
           </span>
         </div>
 
-        <div className="p-4 space-y-3">
+        <div className="p-4 space-y-3.5">
+          {/* Logo 与主定位 */}
+          <div className="flex items-start gap-3">
+            <PivotLogo variant="icon" className="w-9 h-9 rounded-lg shadow-xs shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                Pivot
+              </div>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-relaxed">
+                面向 AI Coding 终端工具的本地轻量路由网关与客户端接管中心
+              </p>
+              <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
+                  客户端一键接管
+                </span>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
+                  多协议双向互转
+                </span>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
+                  自适应智能分发
+                </span>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
+                  纯本地零遥测
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 分隔线 */}
+          <div className="border-t border-border/60" />
+
+          {/* 软件更新状态与操作行 */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5 flex-wrap">
-                <span>自动检查与升级</span>
+                <span>软件更新</span>
                 {updateState === 'available' && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
                     <Sparkles className="w-2.5 h-2.5" />
@@ -434,28 +476,22 @@ export const SettingsView: React.FC = () => {
               </button>
             </div>
           )}
-        </div>
-      </div>
 
-      {/* 卡片 4：关于信息与架构理念 */}
-      <div className="pt-3 text-center space-y-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-        <div className="flex items-center justify-center mb-1">
-          <PivotLogo variant="icon" className="w-8 h-8 rounded-lg shadow-xs" />
-        </div>
-        <div className="flex items-center justify-center gap-1.5">
-          <span className="text-xs font-bold tracking-wider text-zinc-800 dark:text-zinc-200 font-mono">
-            PIVOT
-          </span>
-          {appVersion && (
-            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200/60 dark:border-zinc-700/60">
-              v{appVersion}
+          {/* 底部存储与外链 */}
+          <div className="pt-2 border-t border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+            <span className="font-mono text-[10px]">
+              纯本地运行 · 数据存储于 ~/.pivot/pivot.db
             </span>
-          )}
+            <button
+              type="button"
+              onClick={handleOpenRepo}
+              className="inline-flex items-center gap-1 text-primary hover:underline cursor-pointer text-[11px] self-start sm:self-auto"
+            >
+              <span>GitHub 源码仓库</span>
+              <ExternalLink className="w-3 h-3" />
+            </button>
+          </div>
         </div>
-        <p>面向开发者的本地 AI 智能网关与模型中继器</p>
-        <p className="text-[10px] text-zinc-400 dark:text-zinc-600 pt-0.5">
-          纯本地运行 · 密钥与配置保存在本机 ~/.pivot/pivot.db（仅当前系统用户可读写） · 无任何云端遥测
-        </p>
       </div>
     </div>
   );
