@@ -3,7 +3,7 @@ import { applyAppTheme, useAppStore } from '@/store/useAppStore';
 import { Header } from '@/components/layout/Header';
 import { ClientsView, ProviderList } from '@/components/providers/ProviderList';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
-import { RequestLogs } from '@/components/logs/RequestLogs';
+import { UsageDashboard } from '@/components/dashboard/UsageDashboard';
 import { SettingsView } from '@/components/settings/SettingsView';
 import { X, AlertCircle } from 'lucide-react';
 import { loadModelRates } from '@/utils/pricing';
@@ -158,7 +158,7 @@ export const App: React.FC = () => {
                 : 'hidden'
             }
           >
-            <RequestLogs />
+            <UsageDashboard />
           </div>
           <div className={activeTab === 'settings' && settingsSection !== 'logs' ? 'block' : 'hidden'}>
             <SettingsView />

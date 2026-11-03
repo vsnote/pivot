@@ -6,7 +6,7 @@ import { Plus } from 'lucide-react';
 const tabs = [
   { id: 'providers', label: '服务商' },
   { id: 'clients', label: '客户端' },
-  { id: 'logs', label: '日志' },
+  { id: 'logs', label: '统计' },
   { id: 'settings', label: '设置' },
 ] as const;
 

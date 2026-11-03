@@ -181,7 +181,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         invoke<Provider[]>('get_providers').catch(() => []),
         invoke<InterceptorStatus[]>('get_interceptor_status').catch(() => []),
         invoke<Preset[]>('get_presets').catch(() => []),
-        invoke<RequestLog[]>('get_logs', { limit: 100, offset: 0 }).catch(() => []),
+        invoke<RequestLog[]>('get_logs', { limit: 500, offset: 0 }).catch(() => []),
       ]);
 
       set({
@@ -356,7 +356,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   clearLogs: async () => {
     try {
       await invoke('clear_logs');
-      set({ logs: [] });
+      set((state) => ({
+        logs: [],
+        stats: {
+          ...state.stats,
+          totalRequests: 0,
+          totalPromptTokens: 0,
+          totalCompletionTokens: 0,
+          errorCount: 0,
+        },
+      }));
     } catch (err: unknown) {
       set({ error: String(err) });
     }
