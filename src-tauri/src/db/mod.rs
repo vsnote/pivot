@@ -384,9 +384,14 @@ impl Database {
             .map(str::to_string);
 
         let tx = conn.transaction()?;
-        // The default provider is a single catch-all slot, so claiming it here
+        let is_default = if default_model.is_some() {
+            true
+        } else {
+            provider.is_default
+        };
+        // The default provider / model is a single catch-all slot, so claiming it here
         // releases it from whichever provider held it before.
-        if provider.is_default {
+        if is_default {
             tx.execute(
                 "UPDATE providers SET is_default = 0 WHERE id <> ?1",
                 params![provider.id],
@@ -433,7 +438,7 @@ impl Database {
                 now,
                 provider.preset_id,
                 default_model,
-                if provider.is_default { 1 } else { 0 },
+                if is_default { 1 } else { 0 },
                 provider.auth_type.clone(),
             ],
         )?;

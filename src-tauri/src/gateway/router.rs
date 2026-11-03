@@ -286,10 +286,14 @@ fn plan_route_inner(
         "没有可归一化匹配的模型".to_string()
     });
 
-    // 3. Unknown model name: hand it to the default provider.
-    let Some(default_provider) = active_providers.iter().find(|p| p.is_default) else {
+    // 3. Unknown model name: hand it to the default provider / model.
+    let Some(default_provider) = active_providers
+        .iter()
+        .find(|p| p.default_model.is_some())
+        .or_else(|| active_providers.iter().find(|p| p.is_default))
+    else {
         note(trace, "default", false, || {
-            "没有配置默认服务商".to_string()
+            "没有配置默认模型".to_string()
         });
         return Err(format!(
             "Model '{}' is not declared by any enabled provider and no default provider is configured; mark one provider as default in Pivot",
@@ -300,7 +304,7 @@ fn plan_route_inner(
         .unwrap_or_else(|| incoming_model.to_string());
     note(trace, "default", true, || {
         format!(
-            "未命中前几层，交给默认服务商 {} / {}",
+            "未命中前几层，交给默认模型 {} / {}",
             default_provider.name, model
         )
     });

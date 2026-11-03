@@ -912,7 +912,8 @@ impl InterceptorManager {
             let model_provider_count = count_model_providers(&providers);
             let preferred_model = providers
                 .iter()
-                .find(|p| p.is_default && p.enabled)
+                .find(|p| p.enabled && p.default_model.is_some())
+                .or_else(|| providers.iter().find(|p| p.is_default && p.enabled))
                 .and_then(|p| {
                     let prefix = p.name.to_lowercase().replace(' ', "-");
                     let m = p.default_model.as_deref().or_else(|| p.models.first().map(|s| s.as_str()))?;
@@ -1987,10 +1988,11 @@ pub fn generate_pi_models_list(
     // 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
     let model_provider_count = count_model_providers(providers);
 
-    // 默认服务商的兜底模型先记下来，等清单生成后按同一套 id 规则回填，避免 defaultModel 指向不存在的 id
+    // 默认模型的兜底目标先记下来，等清单生成后按同一套 id 规则回填，避免 defaultModel 指向不存在的 id
     let default_target = providers
         .iter()
-        .find(|p| p.is_default && p.enabled)
+        .find(|p| p.enabled && p.default_model.is_some())
+        .or_else(|| providers.iter().find(|p| p.is_default && p.enabled))
         .and_then(|p| {
             let m = p
                 .default_model

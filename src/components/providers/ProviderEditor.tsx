@@ -808,9 +808,7 @@ export function ProviderEditor() {
     replaceModels(draft.models.filter((model) => fetched.includes(model)));
   };
 
-  const otherDefault = providers.find((provider) => provider.isDefault && provider.id !== draft.id);
-
-  // 首选模型必须在已选模型内；历史数据里可能残留已移除的模型，保留为首项以便用户改回
+  // 默认模型必须在已选模型内；历史数据里可能残留已移除的模型，保留为首项以便用户改回
   const preferredOptions = useMemo(() => {
     const base = draft.models.map((model) => model.trim()).filter(Boolean);
     const current = draft.defaultModel?.trim();
@@ -1536,43 +1534,27 @@ export function ProviderEditor() {
                   )}
                 </div>
 
-                {/* 设为全局默认服务商 */}
-                <div className="flex items-start justify-between gap-4 pt-3 border-t border-border">
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                      设为全局默认服务商
-                    </div>
-                    <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 leading-relaxed">
-                      {otherDefault && !draft.isDefault
-                        ? `当前默认是 ${otherDefault.name}，打开后由本服务商接管`
-                        : '未命中任何规则、且没有任何服务商声明的模型，转发到这里'}
-                    </div>
-                  </div>
-                  <Switch
-                    checked={!!draft.isDefault}
-                    onCheckedChange={(checked) => update({ isDefault: checked })}
-                    ariaLabel="设为全局默认服务商"
-                  />
-                </div>
-
-                {/* 首选模型：客户端连接后默认使用 */}
+                {/* 默认模型：客户端启动模型及未匹配规则的兜底模型 */}
                 <div className="flex items-center justify-between gap-4 pt-3 border-t border-border">
                   <div className="min-w-0">
                     <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                      首选模型
+                      默认模型
                     </div>
                     <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 leading-relaxed">
-                      客户端模型列表的首位；默认服务商的该模型会作为启动模型
+                      客户端启动模型；未命中规则的请求将由此模型接管
                     </div>
                   </div>
                   <Select
                     value={draft.defaultModel ?? ''}
-                    onChange={(e) => update({ defaultModel: e.target.value || null })}
+                    onChange={(e) => {
+                      const next = e.target.value || null;
+                      update({ defaultModel: next, isDefault: Boolean(next) });
+                    }}
                     containerClassName="w-40 sm:w-52 shrink-0"
                     disabled={preferredOptions.length === 0}
-                    aria-label="首选模型"
+                    aria-label="默认模型"
                   >
-                    <option value="">跟随列表顺序</option>
+                    <option value="">未设置</option>
                     {preferredOptions.map((model) => (
                       <option key={model} value={model}>
                         {model}
@@ -1826,7 +1808,7 @@ export function ProviderEditor() {
                             contextWindow ? `${formatContextWindow(contextWindow)} 上下文` : '',
                             isVision ? '支持图片输入' : '',
                             isReasoning ? '支持深度推理' : '',
-                            isDefaultModel ? '首选模型' : '',
+                            isDefaultModel ? '默认模型' : '',
                           ]
                             .filter(Boolean)
                             .join(' · ');
@@ -1870,9 +1852,9 @@ export function ProviderEditor() {
                                 {isDefaultModel && (
                                   <span
                                     className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
-                                    title="当前服务商的首选启动模型"
+                                    title="全局默认启动模型"
                                   >
-                                    首选
+                                    默认
                                   </span>
                                 )}
                                 {isInvalid && (
@@ -2025,7 +2007,7 @@ export function ProviderEditor() {
           title={"删除服务商“" + (draft.name || currentEditingProvider.name) + "”？"}
           details={[
             '删除后需重新配置。已有请求日志不受影响。',
-            ...(draft.isDefault ? ['该服务商当前是默认服务商，删除后需要重新指定。'] : []),
+            ...(draft.defaultModel ? ['该服务商包含全局默认模型，删除后需要重新指定默认模型。'] : []),
           ]}
           confirmLabel="删除"
           busy={deleting}
