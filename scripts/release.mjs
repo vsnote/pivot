@@ -91,6 +91,15 @@ function main() {
 
   // 4. 刷新 Cargo.lock
   try {
+    const cargoLockPath = path.join(rootDir, 'src-tauri', 'Cargo.lock');
+    if (fs.existsSync(cargoLockPath)) {
+      let cargoLock = fs.readFileSync(cargoLockPath, 'utf8');
+      cargoLock = cargoLock.replace(
+        /(name = "pivot"\r?\nversion = ")[^"]+(")/,
+        `$1${newVersion}$2`
+      );
+      fs.writeFileSync(cargoLockPath, cargoLock);
+    }
     console.log('✔ 正在刷新 Cargo.lock...');
     run('cargo check --manifest-path src-tauri/Cargo.toml', { stdio: 'ignore' });
   } catch (e) {
