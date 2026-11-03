@@ -46,7 +46,7 @@ export const Switch: React.FC<SwitchProps> = ({
     >
       <SwitchPrimitive.Thumb
         className={cn(
-          'pointer-events-none block rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.2)] ring-0 transition-transform duration-150 data-[state=unchecked]:translate-x-0',
+          'pointer-events-none block rounded-full bg-white dark:data-[state=checked]:bg-zinc-950 shadow-[0_1px_2px_rgba(0,0,0,0.2)] ring-0 transition-transform duration-150 data-[state=unchecked]:translate-x-0',
           translate,
           thumbSize
         )}

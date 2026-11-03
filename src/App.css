@@ -35,54 +35,54 @@
 }
 
 :root {
-  /* macOS 原生浅色质感 (干净清透的 Apple System 现代质感) */
-  --background: oklch(0.985 0.002 250);
-  --foreground: oklch(0.145 0.01 250);
+  /* macOS 原生浅色质感 (干净清透的纯净冷灰与陶瓷白) */
+  --background: oklch(0.985 0.002 260);
+  --foreground: oklch(0.145 0.005 260);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0.01 250);
+  --card-foreground: oklch(0.145 0.005 260);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0.01 250);
-  /* macOS 官方默认系统强调色 (Apple System Blue #007AFF) */
-  --primary: oklch(0.58 0.22 254);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.96 0.005 250);
-  --secondary-foreground: oklch(0.205 0.01 250);
-  --muted: oklch(0.96 0.005 250);
-  --muted-foreground: oklch(0.55 0.01 250);
-  --accent: oklch(0.96 0.008 250);
-  --accent-foreground: oklch(0.205 0.01 250);
+  --popover-foreground: oklch(0.145 0.005 260);
+  /* 品牌高反差黑曜石主色 (Monochrome Obsidian Core) */
+  --primary: oklch(0.18 0.005 260);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.96 0.003 260);
+  --secondary-foreground: oklch(0.205 0.005 260);
+  --muted: oklch(0.96 0.003 260);
+  --muted-foreground: oklch(0.55 0.005 260);
+  --accent: oklch(0.95 0.004 260);
+  --accent-foreground: oklch(0.205 0.005 260);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0.92 0.006 250);
-  --input: oklch(0.92 0.006 250);
-  --ring: oklch(0.58 0.22 254);
+  --border: oklch(0.92 0.004 260);
+  --input: oklch(0.92 0.004 260);
+  --ring: oklch(0.25 0.005 260);
 
   /* Mira 高密紧凑基准圆角 (6px) */
   --radius: 0.375rem;
 }
 
 .dark {
-  /* macOS 原生深色调 (Apple Dark Mode 质感) */
-  --background: oklch(0.155 0.014 250);
+  /* macOS 原生深色调 (对齐新版桌面图标的石墨曜石微拟物质感) */
+  --background: oklch(0.145 0.005 260);
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.185 0.016 250);
+  --card: oklch(0.18 0.005 260);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.19 0.016 250);
+  --popover: oklch(0.185 0.005 260);
   --popover-foreground: oklch(0.985 0 0);
-  /* macOS 深色官方系统强调色 (Apple System Blue Dark #0A84FF) */
-  --primary: oklch(0.64 0.20 252);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.235 0.016 250);
+  /* 品牌高反差极光陶瓷白主色 (Monochrome Luminous White) */
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.14 0.005 260);
+  --secondary: oklch(0.22 0.005 260);
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.235 0.016 250);
-  --muted-foreground: oklch(0.68 0.012 250);
-  --accent: oklch(0.245 0.018 250);
+  --muted: oklch(0.22 0.005 260);
+  --muted-foreground: oklch(0.65 0.005 260);
+  --accent: oklch(0.23 0.005 260);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.42 0.15 25.723);
   --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.275 0.016 250);
-  --input: oklch(0.275 0.016 250);
-  --ring: oklch(0.64 0.20 252);
+  --border: oklch(0.26 0.005 260);
+  --input: oklch(0.26 0.005 260);
+  --ring: oklch(0.85 0 0);
 }
 
 @layer utilities {

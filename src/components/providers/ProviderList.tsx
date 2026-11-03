@@ -2,12 +2,13 @@ import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
-import { AGENT_TIERS, AGENT_TIER_KEYS, AGENT_TIER_IDS } from './agentTiers';
 import { panelClass } from '@/components/common/panelStyles';
-import { Provider, InterceptorStatus, RouteRule } from '@/types';
+import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
+import { ProviderContextMenu } from './ProviderContextMenu';
 import {
   Plus,
   LoaderCircle,
@@ -16,6 +17,7 @@ import {
   Code2,
   ChevronDown,
   GripVertical,
+  Zap,
 } from 'lucide-react';
 
 import {
@@ -55,286 +57,11 @@ function clientStatus(client: InterceptorStatus): { label: string; className: st
   return { label: '未接管', className: 'text-zinc-500 dark:text-zinc-400' };
 }
 
-function ModelChip({
-  provider,
-  model,
-  routes,
-}: {
-  provider: Provider;
-  model: string;
-  routes: RouteRule[];
-}) {
-  const activeTier = AGENT_TIER_KEYS.find((tierKey) => {
-    const tier = AGENT_TIERS[tierKey];
-    return routes.some(
-      (r) =>
-        r.id === tier.id &&
-        r.enabled &&
-        r.targetProviderId === provider.id &&
-        r.targetModel === model,
-    );
-  });
-
-  const tierInfo = activeTier ? AGENT_TIERS[activeTier] : null;
-  const TierIcon = tierInfo ? tierInfo.icon : null;
-
-  return (
-    <span
-      className="inline-flex shrink-0 items-center gap-1 px-1.5 py-px rounded-[5px] text-[11px] leading-4 font-mono select-none bg-zinc-500/[0.055] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-400"
-      title={tierInfo ? `${model} · 承担${tierInfo.label}槽位` : model}
-    >
-      {tierInfo && TierIcon && (
-        <span className="shrink-0 flex items-center" title={tierInfo.description}>
-          <TierIcon className={`w-3 h-3 ${tierInfo.iconClass} stroke-[2.2]`} />
-        </span>
-      )}
-      <span className="truncate max-w-[180px]">{model}</span>
-    </span>
-  );
-}
-
-function ProviderModelList({ provider }: { provider: Provider }) {
-  const routes = useAppStore((state) => state.routes);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [scrollMask, setScrollMask] = useState<{ canLeft: boolean; canRight: boolean }>({
-    canLeft: false,
-    canRight: false,
-  });
-  const [isOverflow, setIsOverflow] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-
-  // 鼠标拖拽平滑滚动与动量惯性
-  const isDownRef = useRef(false);
-  const startXRef = useRef(0);
-  const startScrollLeftRef = useRef(0);
-  const hasDraggedRef = useRef(false);
-  const lastXRef = useRef(0);
-  const lastTimeRef = useRef(0);
-  const velocityRef = useRef(0);
-  const rafIdRef = useRef<number | null>(null);
-
-  const isPriorityModel = (m: string) => {
-    return routes.some(
-      (r) =>
-        AGENT_TIER_IDS.includes(r.id) &&
-        r.enabled &&
-        r.targetProviderId === provider.id &&
-        r.targetModel === m,
-    );
-  };
-
-  const sortedModels = [...provider.models].sort((a, b) => {
-    const aPri = isPriorityModel(a) ? 1 : 0;
-    const bPri = isPriorityModel(b) ? 1 : 0;
-    return bPri - aPri;
-  });
-
-  const stopMomentum = () => {
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
-  };
-
-  const startMomentum = (initialVelocity: number) => {
-    stopMomentum();
-    let v = initialVelocity;
-    const step = () => {
-      const el = scrollRef.current;
-      if (!el || Math.abs(v) < 0.04) {
-        stopMomentum();
-        return;
-      }
-      el.scrollLeft -= v * 16;
-      v *= 0.92;
-      updateScrollState();
-      rafIdRef.current = requestAnimationFrame(step);
-    };
-    rafIdRef.current = requestAnimationFrame(step);
-  };
-
-  const updateScrollState = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const canLeft = el.scrollLeft > 4;
-    const canRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
-    const overflow = el.scrollWidth > el.clientWidth + 2;
-    setIsOverflow(overflow);
-    setScrollMask((prev) => {
-      if (prev.canLeft === canLeft && prev.canRight === canRight) return prev;
-      return { canLeft, canRight };
-    });
-  };
-
-  useEffect(() => {
-    updateScrollState();
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const observer = new ResizeObserver(() => {
-      updateScrollState();
-    });
-    observer.observe(el);
-
-    window.addEventListener('resize', updateScrollState);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', updateScrollState);
-      stopMomentum();
-    };
-  }, [sortedModels.length]);
-
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && el.scrollWidth > el.clientWidth) {
-      e.stopPropagation();
-      stopMomentum();
-      el.scrollLeft += e.deltaY;
-      updateScrollState();
-    }
-  };
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return; // 仅主键（左键）拖动
-    const el = scrollRef.current;
-    if (!el || el.scrollWidth <= el.clientWidth + 2) return;
-
-    stopMomentum();
-    isDownRef.current = true;
-    startXRef.current = e.clientX;
-    startScrollLeftRef.current = el.scrollLeft;
-    hasDraggedRef.current = false;
-    lastXRef.current = e.clientX;
-    lastTimeRef.current = performance.now();
-    velocityRef.current = 0;
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDownRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const dx = e.clientX - startXRef.current;
-    if (!hasDraggedRef.current && Math.abs(dx) > 4) {
-      hasDraggedRef.current = true;
-      setIsDragging(true);
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        // ignore
-      }
-    }
-
-    if (hasDraggedRef.current) {
-      el.scrollLeft = startScrollLeftRef.current - dx;
-      updateScrollState();
-
-      const now = performance.now();
-      const dt = now - lastTimeRef.current;
-      if (dt > 8) {
-        velocityRef.current = (e.clientX - lastXRef.current) / dt;
-        lastXRef.current = e.clientX;
-        lastTimeRef.current = now;
-      }
-    }
-  };
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDownRef.current) return;
-    isDownRef.current = false;
-
-    if (hasDraggedRef.current) {
-      try {
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        }
-      } catch {
-        // ignore
-      }
-
-      setIsDragging(false);
-
-      const now = performance.now();
-      if (now - lastTimeRef.current < 100 && Math.abs(velocityRef.current) > 0.15) {
-        startMomentum(velocityRef.current);
-      }
-
-      setTimeout(() => {
-        hasDraggedRef.current = false;
-      }, 50);
-    }
-  };
-
-  const handleClickCapture = (e: React.MouseEvent) => {
-    if (hasDraggedRef.current) {
-      e.stopPropagation();
-      e.preventDefault();
-      hasDraggedRef.current = false;
-    }
-  };
-
-  if (provider.models.length === 0) {
-    return (
-      <span className="text-[11px] text-muted-foreground/60">
-        未配置模型
-      </span>
-    );
-  }
-
-  let maskStyle: React.CSSProperties = {};
-  if (scrollMask.canLeft && scrollMask.canRight) {
-    maskStyle = {
-      maskImage: 'linear-gradient(to right, transparent 0%, black 20px, black calc(100% - 24px), transparent 100%)',
-      WebkitMaskImage: 'linear-gradient(to right, transparent 0%, black 20px, black calc(100% - 24px), transparent 100%)',
-    };
-  } else if (scrollMask.canRight) {
-    maskStyle = {
-      maskImage: 'linear-gradient(to right, black calc(100% - 24px), transparent 100%)',
-      WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 24px), transparent 100%)',
-    };
-  } else if (scrollMask.canLeft) {
-    maskStyle = {
-      maskImage: 'linear-gradient(to right, transparent 0%, black 20px)',
-      WebkitMaskImage: 'linear-gradient(to right, transparent 0%, black 20px)',
-    };
-  }
-
-  return (
-    <div className="relative min-w-0 flex-1">
-      <div
-        ref={scrollRef}
-        data-no-row-drag=""
-        onScroll={updateScrollState}
-        onWheel={handleWheel}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        onClickCapture={handleClickCapture}
-        style={maskStyle}
-        className={`flex flex-nowrap items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 ${
-          isDragging
-            ? 'select-none cursor-grabbing [&_*]:cursor-grabbing [&_*]:select-none'
-            : isOverflow
-              ? 'cursor-grab'
-              : ''
-        }`}
-      >
-        {sortedModels.map((m) => (
-          <ModelChip key={m} provider={provider} model={m} routes={routes} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
 interface PressState {
   id: string;
   row: HTMLDivElement;
   startX: number;
   startY: number;
-  inScroll: boolean;
   grabOffset: number;
   rowLeft: number;
   rowWidth: number;
@@ -352,6 +79,7 @@ interface ProviderCardProps {
   isDragged: boolean;
   onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
   onRowClick: () => void;
+  onContextMenu: (event: React.MouseEvent) => void;
   shouldSuppressClick: () => boolean;
 }
 
@@ -360,15 +88,20 @@ function ProviderCard({
   isDragged,
   onPointerDown,
   onRowClick,
+  onContextMenu,
   shouldSuppressClick,
 }: ProviderCardProps) {
-  const { openProviderEditor, toggleProvider } = useAppStore(
+  const { openProviderEditor, toggleProvider, testProviderLatency } = useAppStore(
     useShallow((state) => ({
       openProviderEditor: state.openProviderEditor,
       toggleProvider: state.toggleProvider,
+      testProviderLatency: state.testProviderLatency,
     })),
   );
+
   const [toggling, setToggling] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const handleToggle = async () => {
     if (toggling) return;
@@ -380,13 +113,38 @@ function ProviderCard({
     }
   };
 
+  const handleTestLatency = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (testing || !provider.enabled) return;
+    setTesting(true);
+    try {
+      await testProviderLatency(provider.id);
+    } catch {
+      // testProviderLatency sets latencyMs: -1 on failure
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleCopyBaseUrl = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!provider.baseUrl) return;
+    navigator.clipboard.writeText(provider.baseUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const displayEndpoint = provider.baseUrl
+    ? provider.baseUrl.replace(/^https?:\/\//, '').replace(/\/v1\/?$/, '').replace(/\/+$/, '')
+    : '';
+
   return (
     <div
       role="button"
       tabIndex={0}
       onClick={onRowClick}
+      onContextMenu={onContextMenu}
       onClickCapture={(event) => {
-        // 拖动结束后浏览器仍会补发 click，这里拦掉复制/开关等附带动作
         if (!shouldSuppressClick()) return;
         event.stopPropagation();
         event.preventDefault();
@@ -398,7 +156,7 @@ function ProviderCard({
         }
       }}
       onPointerDown={onPointerDown}
-      className={`group relative flex items-center justify-between gap-3 px-4 py-2 transition-colors cursor-pointer select-none ${
+      className={`group relative flex items-center justify-between gap-3 px-4 py-2.5 transition-colors cursor-pointer select-none ${
         provider.enabled
           ? 'hover:bg-accent/50'
           : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
@@ -410,6 +168,7 @@ function ProviderCard({
         className="pointer-events-none absolute left-0.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-70 dark:text-zinc-500"
       />
 
+      {/* 左侧：Logo + 服务商名称 + 标签 + 简化端点 */}
       <div className="flex items-center gap-2.5 min-w-0 flex-1">
         <ProviderAvatar
           name={provider.name}
@@ -420,39 +179,109 @@ function ProviderCard({
         />
 
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <h3 className="min-w-0 shrink text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
+          <h3 className="shrink-0 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
             {provider.name}
           </h3>
-          {provider.isDefault && (
+
+          {/* 订阅池标记 */}
+          {(provider.authType === 'subscription_pool' ||
+            provider.presetId === 'antigravity' ||
+            provider.presetId === 'chatgpt_subscription' ||
+            provider.protocol === 'chatgpt') && (
             <span
-              title={
-                provider.enabled
-                  ? `未在任何服务商声明的模型会转发到 ${provider.defaultModel || provider.models[0] || '它的默认模型'}`
-                  : '默认服务商已停用，未声明的模型将无法路由'
-              }
-              className={`shrink-0 text-[10px] leading-none ${
-                provider.enabled
-                  ? 'text-zinc-400 dark:text-zinc-500'
-                  : 'text-amber-600 dark:text-amber-400'
-              }`}
-            >
-              默认
-            </span>
-          )}
-          {(provider.authType === 'subscription_pool' || provider.presetId === 'antigravity') && (
-            <span
-              title="官方账号订阅（多账号轮询）"
-              className="shrink-0 text-[10px] px-1.5 py-0.5 rounded font-normal bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800 leading-none"
+              title="官方账号订阅池（多账号轮询与配额调度）"
+              className="shrink-0 text-[10px] px-1.5 py-0.2 rounded font-medium bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800 leading-none"
             >
               订阅
             </span>
           )}
 
-          <ProviderModelList provider={provider} />
+          {/* 紧凑端点信息 */}
+          {displayEndpoint && (
+            <span
+              className="hidden sm:inline-block font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[240px]"
+              title={provider.baseUrl}
+            >
+              {displayEndpoint}
+            </span>
+          )}
         </div>
       </div>
 
-      <div className="shrink-0 flex items-center" onClick={(e) => e.stopPropagation()}>
+      {/* 右侧：Hover 快捷操作栏 + 延迟药丸（与测速一体） + Switch 开关 */}
+      <div className="shrink-0 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+        {/* Hover 时平滑浮现的快捷操作：复制 Base URL */}
+        {provider.baseUrl && (
+          <button
+            type="button"
+            onClick={handleCopyBaseUrl}
+            title={copied ? '已复制 Base URL' : '复制 Base URL'}
+            className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
+          >
+            {copied ? (
+              <Check className="w-3.5 h-3.5 text-emerald-500" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
+          </button>
+        )}
+
+        {/* 延迟测试药丸（测速按钮与结果合一，紧贴 Switch 左侧） */}
+        {testing ? (
+          <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-zinc-400 dark:text-zinc-500 bg-muted/50 select-none">
+            <LoaderCircle className="w-3 h-3 animate-spin text-zinc-400" />
+            <span>测速中</span>
+          </div>
+        ) : provider.latencyMs && provider.latencyMs > 0 ? (
+          <button
+            type="button"
+            onClick={handleTestLatency}
+            disabled={!provider.enabled}
+            title={provider.enabled ? `端点响应 ${provider.latencyMs}ms · 点击重新测速` : '服务商已停用'}
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-40 select-none ${
+              provider.latencyMs < 300
+                ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/[0.08] hover:bg-emerald-500/[0.15]'
+                : provider.latencyMs < 1000
+                  ? 'text-amber-600 dark:text-amber-400 bg-amber-500/[0.08] hover:bg-amber-500/[0.15]'
+                  : 'text-orange-600 dark:text-orange-400 bg-orange-500/[0.08] hover:bg-orange-500/[0.15]'
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                provider.latencyMs < 300
+                  ? 'bg-emerald-500'
+                  : provider.latencyMs < 1000
+                    ? 'bg-amber-500'
+                    : 'bg-orange-500'
+              }`}
+            />
+            <span>{provider.latencyMs}ms</span>
+          </button>
+        ) : provider.latencyMs === -1 ? (
+          <button
+            type="button"
+            onClick={handleTestLatency}
+            disabled={!provider.enabled}
+            title={provider.enabled ? '端点连接失败 · 点击重新测速' : '服务商已停用'}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-rose-600 dark:text-rose-400 bg-rose-500/[0.08] hover:bg-rose-500/[0.15] transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-40 select-none"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+            <span>无法连接</span>
+          </button>
+        ) : (
+          /* 未测速时：仅在 group-hover 时展示轻量的 ⚡ 测速按钮，常态下完全不占位！ */
+          <button
+            type="button"
+            onClick={handleTestLatency}
+            disabled={!provider.enabled}
+            title={provider.enabled ? '测试端点延迟' : '服务商已停用'}
+            className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 disabled:opacity-30 disabled:pointer-events-none transition-all cursor-pointer"
+          >
+            <Zap className="w-3.5 h-3.5" />
+          </button>
+        )}
+
+        {/* 启用/停用开关 */}
         <Switch
           checked={provider.enabled}
           disabled={toggling}
@@ -737,13 +566,21 @@ export function ClientsView() {
 }
 
 export function ProviderList() {
-  const { providers, initialLoaded, isLoading, openProviderEditor, reorderProviders } = useAppStore(
+  const {
+    providers,
+    initialLoaded,
+    isLoading,
+    openProviderEditor,
+    reorderProviders,
+    deleteProvider,
+  } = useAppStore(
     useShallow((state) => ({
       providers: state.providers,
       initialLoaded: state.initialLoaded,
       isLoading: state.isLoading,
       openProviderEditor: state.openProviderEditor,
       reorderProviders: state.reorderProviders,
+      deleteProvider: state.deleteProvider,
     })),
   );
 
@@ -755,13 +592,18 @@ export function ProviderList() {
   const providersRef = useRef(providers);
   providersRef.current = providers;
 
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    provider: Provider;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Provider | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   const handleRowPointerDown = (event: React.PointerEvent<HTMLDivElement>, provider: Provider) => {
     if (event.button !== 0) return;
-    // 开关等表单控件保持原生语义；模型条里的标签允许以纵向拖动启动整行拖动
     const target = event.target as HTMLElement;
-    const inScroll = Boolean(target.closest('[data-no-row-drag]'));
-    if (target.closest('[role="switch"], input, select, a')) return;
-    if (!inScroll && target.closest('button')) return;
+    if (target.closest('[role="switch"], input, select, a, button')) return;
 
     const listRect = listRef.current?.getBoundingClientRect();
     if (!listRect) return;
@@ -771,7 +613,6 @@ export function ProviderList() {
       row: event.currentTarget,
       startX: event.clientX,
       startY: event.clientY,
-      inScroll,
       grabOffset: event.clientY - rowRect.top,
       rowLeft: rowRect.left,
       rowWidth: rowRect.width,
@@ -800,14 +641,7 @@ export function ProviderList() {
         const dx = event.clientX - press.startX;
         const dy = event.clientY - press.startY;
 
-        if (press.inScroll) {
-          // 模型条上的手势：横向交给它自己滚动，纵向才接管为整行拖动
-          if (Math.abs(dx) > 4 && Math.abs(dx) > Math.abs(dy)) {
-            pressRef.current = null;
-            return;
-          }
-          if (Math.abs(dy) <= 6 || Math.abs(dy) < Math.abs(dx)) return;
-        } else if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
           return;
         }
 
@@ -901,9 +735,6 @@ export function ProviderList() {
     : providers;
   const draggedProvider = drag ? providerById.get(drag.id) : undefined;
 
-  const hasDefault = providers.some((p) => p.isDefault && p.enabled);
-  const anyEnabled = providers.some((p) => p.enabled);
-
   return (
     <div className="animate-in fade-in duration-150">
       <section className={panelClass} aria-label="服务商">
@@ -929,6 +760,14 @@ export function ProviderList() {
                 isDragged={drag?.id === provider.id}
                 onPointerDown={(event) => handleRowPointerDown(event, provider)}
                 onRowClick={() => handleRowClick(provider)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    provider,
+                  });
+                }}
                 shouldSuppressClick={shouldSuppressClick}
               />
             ))}
@@ -936,10 +775,46 @@ export function ProviderList() {
         )}
       </section>
 
-      {anyEnabled && !hasDefault && (
-        <p className="px-1 pt-2 text-[11px] text-amber-600 dark:text-amber-400">
-          没有启用的默认服务商：所有服务商都未声明的模型将无法路由。
-        </p>
+      {/* 右键上下文菜单 */}
+      {contextMenu && (
+        <ProviderContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          provider={contextMenu.provider}
+          onClose={() => setContextMenu(null)}
+          onEdit={() => {
+            openProviderEditor(contextMenu.provider);
+          }}
+          onDelete={() => {
+            setDeleteTarget(contextMenu.provider);
+          }}
+        />
+      )}
+
+      {/* 删除服务商确认弹窗 */}
+      {deleteTarget && (
+        <ConfirmDialog
+          open={deleteTarget !== null}
+          title={`确定删除服务商「${deleteTarget.name}」吗？`}
+          details={[
+            '删除后该服务商的 API Key、自定义模型以及路由分流规则将一并移除。',
+            '该操作不可恢复。',
+          ]}
+          confirmLabel="确认删除"
+          variant="danger"
+          busy={isDeleting}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            if (!deleteTarget) return;
+            setIsDeleting(true);
+            try {
+              await deleteProvider(deleteTarget.id);
+              setDeleteTarget(null);
+            } finally {
+              setIsDeleting(false);
+            }
+          }}
+        />
       )}
 
       {drag &&
@@ -959,6 +834,7 @@ export function ProviderList() {
               isDragged={false}
               onPointerDown={() => {}}
               onRowClick={() => {}}
+              onContextMenu={() => {}}
               shouldSuppressClick={() => false}
             />
           </div>,

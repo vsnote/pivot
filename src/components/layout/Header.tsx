@@ -45,14 +45,14 @@ export const Header: React.FC = () => {
   return (
     <header
       data-tauri-drag-region
-      className="relative h-12 w-full px-4 select-none shrink-0 z-40 bg-background/80 border-b border-border backdrop-blur-md flex items-center justify-between"
+      className="relative h-12 w-full px-4 select-none shrink-0 z-40 bg-background/80 border-b border-border backdrop-blur-md flex items-center justify-end"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
-      {/* 左侧：macOS 原生红绿灯避让留白区 (保持与右侧对称) */}
-      <div className="w-16 shrink-0 pointer-events-none" />
-
-      {/* 中间：居中导航 */}
-      <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+      {/* 居中导航 */}
+      <div
+        className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
         <Tabs value={current} onValueChange={selectTab}>
           <TabsList variant="ghost" aria-label="主要页面导航">
             {tabs.map((tab) => (
@@ -64,9 +64,9 @@ export const Header: React.FC = () => {
         </Tabs>
       </div>
 
-      {/* 右侧：对称功能操作区 */}
+      {/* 右侧功能操作区 */}
       <div
-        className="w-16 shrink-0 flex items-center justify-end"
+        className="flex items-center justify-end"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         {current === 'providers' && !isProviderEditorOpen && (
