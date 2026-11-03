@@ -797,13 +797,15 @@ export function ProviderList() {
         <ProviderContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
-          provider={contextMenu.provider}
+          provider={providers.find((p) => p.id === contextMenu.provider.id) ?? contextMenu.provider}
           onClose={() => setContextMenu(null)}
           onEdit={() => {
-            openProviderEditor(contextMenu.provider);
+            const active = providers.find((p) => p.id === contextMenu.provider.id) ?? contextMenu.provider;
+            openProviderEditor(active);
           }}
           onDelete={() => {
-            setDeleteTarget(contextMenu.provider);
+            const active = providers.find((p) => p.id === contextMenu.provider.id) ?? contextMenu.provider;
+            setDeleteTarget(active);
           }}
         />
       )}

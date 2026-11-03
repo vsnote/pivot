@@ -71,17 +71,20 @@ function formatFullResetTime(resetTimeStr?: string | null): string {
 export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
   x,
   y,
-  provider,
+  provider: initialProvider,
   onClose,
   onEdit,
   onDelete,
 }) => {
-  const { saveProvider, testProviderLatency } = useAppStore(
+  const { saveProvider, testProviderLatency, currentProvider } = useAppStore(
     useShallow((state) => ({
       saveProvider: state.saveProvider,
       testProviderLatency: state.testProviderLatency,
+      currentProvider: state.providers.find((p) => p.id === initialProvider.id),
     })),
   );
+
+  const provider = currentProvider ?? initialProvider;
 
   const menuRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState({ x, y });
@@ -190,12 +193,21 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
     }
   }, [provider.id, isSubscription]);
 
-  // 切换服务商默认承接模型
+  // 切换服务商默认承接模型（全局唯一默认模型）
   const handleToggleDefaultModel = async (model: string) => {
-    await saveProvider({
-      ...provider,
-      defaultModel: provider.defaultModel === model ? null : model,
-    });
+    const isCurrentlyDefault = provider.defaultModel === model;
+    if (isCurrentlyDefault) {
+      await saveProvider({
+        ...provider,
+        defaultModel: null,
+      });
+    } else {
+      await saveProvider({
+        ...provider,
+        defaultModel: model,
+        isDefault: true,
+      });
+    }
   };
 
   // 复制 Base URL
@@ -456,7 +468,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                         <button
                           type="button"
                           onClick={() => handleToggleDefaultModel(model)}
-                          title="点击取消服务商默认模型"
+                          title="点击取消默认模型"
                           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-zinc-500/10 dark:bg-white/10 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-500/20 transition-colors cursor-pointer"
                         >
                           <Check className="w-2.5 h-2.5 text-emerald-500" />

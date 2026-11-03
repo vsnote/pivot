@@ -195,6 +195,21 @@ test('保存默认服务商后本地列表只有一个默认标记', async () =>
   assert.deepEqual(defaults, ['provider-b']);
 });
 
+test('保存默认模型后本地列表只有一个默认模型标记', async () => {
+  const first = { id: 'provider-a', name: 'A', priority: 2, defaultModel: 'model-a', isDefault: true };
+  const second = { id: 'provider-b', name: 'B', priority: 1, defaultModel: null };
+  const store = await createStore({ native: false, invoke: async (command) => {
+    if (command === 'get_providers') return [first, second];
+  } });
+  await store.getState().fetchInitialData();
+  await store.getState().saveProvider({ ...second, defaultModel: 'model-b', isDefault: true });
+  const providers = store.getState().providers;
+  assert.equal(providers.find((p) => p.id === 'provider-a').defaultModel, null);
+  assert.equal(providers.find((p) => p.id === 'provider-a').isDefault, false);
+  assert.equal(providers.find((p) => p.id === 'provider-b').defaultModel, 'model-b');
+  assert.equal(providers.find((p) => p.id === 'provider-b').isDefault, true);
+});
+
 test('切换为跟随系统时向原生窗口传递 null，切换深浅色时传递对应主题名', async () => {
   const themeCalls = [];
   const store = await createStore({

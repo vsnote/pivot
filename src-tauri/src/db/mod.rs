@@ -392,6 +392,12 @@ impl Database {
                 params![provider.id],
             )?;
         }
+        if default_model.is_some() {
+            tx.execute(
+                "UPDATE providers SET default_model = NULL WHERE id <> ?1",
+                params![provider.id],
+            )?;
+        }
         tx.execute(
             "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default, auth_type)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
@@ -960,6 +966,17 @@ mod provider_tests {
         second.is_default = false;
         db.save_provider(&second).unwrap();
         assert!(db.get_providers().unwrap().iter().all(|p| !p.is_default));
+
+        // Setting a default model on a provider clears it from other providers
+        let mut third = provider_fixture("third", "Third", None);
+        third.default_model = Some("claude-3-7-sonnet".into());
+        db.save_provider(&third).unwrap();
+        let providers_after_third = db.get_providers().unwrap();
+        let first_reloaded = providers_after_third.iter().find(|p| p.id == "first").unwrap();
+        assert_eq!(first_reloaded.default_model, None);
+        let third_reloaded = providers_after_third.iter().find(|p| p.id == "third").unwrap();
+        assert_eq!(third_reloaded.default_model.as_deref(), Some("claude-3-7-sonnet"));
+
         drop(db);
         let _ = std::fs::remove_file(path);
     }

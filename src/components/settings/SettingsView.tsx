@@ -5,6 +5,7 @@ import { Button } from '@/components/common/Button';
 import { PivotLogo } from '@/components/common/PivotLogo';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { getVersion } from '@tauri-apps/api/app';
 import {
   Download,
   Upload,
@@ -21,6 +22,25 @@ const themeOptions = [
   { id: 'system', label: '跟随系统' },
 ] as const;
 
+const formatUpdateError = (err: unknown): string => {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+
+  if (lower.includes('could not fetch a valid release json') || lower.includes('404')) {
+    return '获取更新信息失败（未找到有效发布版本或网络无法访问）';
+  }
+  if (lower.includes('timed out') || lower.includes('timeout') || lower.includes('connect')) {
+    return '连接 GitHub 更新服务器超时，请检查网络';
+  }
+  if (lower.includes('signature')) {
+    return '升级包签名校验失败，安全终止';
+  }
+  if (lower.includes('failed to send request') || lower.includes('network')) {
+    return '网络请求失败，请检查网络连接或代理';
+  }
+  return msg || '检查更新失败，请稍后重试';
+};
+
 export const SettingsView: React.FC = () => {
   const {
     theme,
@@ -36,6 +56,17 @@ export const SettingsView: React.FC = () => {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 应用版本信息
+  const [appVersion, setAppVersion] = useState<string>('');
+
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => {
+        setAppVersion('0.2.2');
+      });
+  }, []);
 
   // 自动更新状态管理
   const [updateState, setUpdateState] = useState<
@@ -63,8 +94,7 @@ export const SettingsView: React.FC = () => {
     } catch (err: unknown) {
       if (isManual) {
         setUpdateState('error');
-        const msg = err instanceof Error ? err.message : String(err);
-        setUpdateError(msg.includes('404') ? '未检测到新发布版本' : msg);
+        setUpdateError(formatUpdateError(err));
       } else {
         setUpdateState('idle');
       }
@@ -96,7 +126,7 @@ export const SettingsView: React.FC = () => {
       setUpdateState('ready');
     } catch (err: unknown) {
       setUpdateState('error');
-      setUpdateError(err instanceof Error ? err.message : String(err));
+      setUpdateError(formatUpdateError(err));
     }
   };
 
@@ -298,7 +328,9 @@ export const SettingsView: React.FC = () => {
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
             软件更新
           </span>
-          <span className="text-[10px] font-mono text-zinc-400">当前版本 v0.1.0</span>
+          <span className="text-[10px] font-mono text-zinc-400">
+            {appVersion ? `当前版本 v${appVersion}` : '当前版本'}
+          </span>
         </div>
 
         <div className="p-4 space-y-3">
@@ -414,9 +446,11 @@ export const SettingsView: React.FC = () => {
           <span className="text-xs font-bold tracking-wider text-zinc-800 dark:text-zinc-200 font-mono">
             PIVOT
           </span>
-          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200/60 dark:border-zinc-700/60">
-            v0.1.0-alpha
-          </span>
+          {appVersion && (
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200/60 dark:border-zinc-700/60">
+              v{appVersion}
+            </span>
+          )}
         </div>
         <p>面向开发者的本地 AI 智能网关与模型中继器</p>
         <p className="text-[10px] text-zinc-400 dark:text-zinc-600 pt-0.5">

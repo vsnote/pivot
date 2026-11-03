@@ -1741,7 +1741,6 @@ export function ProviderEditor() {
                   {/* 常用系列快捷过滤：当池子包含典型系列时提供一键聚焦 */}
                   {availableFamilies.length > 0 && (
                     <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border/40 bg-zinc-500/[0.02] dark:bg-white/[0.02] overflow-x-auto text-[11px]">
-                      <span className="text-zinc-400 dark:text-zinc-500 text-[10px] shrink-0">系列过滤:</span>
                       {availableFamilies.map((fam) => {
                         const active = modelSearch.toLowerCase() === fam.key;
                         return (
@@ -1762,8 +1761,8 @@ export function ProviderEditor() {
                     </div>
                   )}
 
-                  {/* 模型列表：自适应流式药丸，强化已选与未选对比度 */}
-                  <div className="max-h-52 overflow-y-auto p-2.5">
+                  {/* 模型列表：单列通栏列表，适配紧凑视口 */}
+                  <div className="max-h-52 overflow-y-auto p-1.5">
                     {filteredModels.length === 0 ? (
                       <div className="py-7 text-center text-xs text-zinc-400 space-y-1.5">
                         {pool.length === 0 ? (
@@ -1801,7 +1800,7 @@ export function ProviderEditor() {
                         )}
                       </div>
                     ) : (
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="space-y-0.5">
                         {filteredModels.map((model) => {
                           const isSelected = draft.models.includes(model);
                           const isInvalid = invalidModels.includes(model);
@@ -1839,52 +1838,52 @@ export function ProviderEditor() {
                               onClick={() => toggleModel(model)}
                               aria-pressed={isSelected}
                               title={capabilityHint || undefined}
-                              className={`group relative inline-flex items-center gap-1.5 py-1 px-2.5 rounded-md text-xs font-mono transition-all cursor-pointer select-none border text-left ${
+                              className={`group w-full flex items-center justify-between py-1.5 px-2 rounded-md text-xs font-mono transition-colors cursor-pointer select-none text-left ${
                                 isSelected
-                                  ? 'bg-zinc-100 hover:bg-zinc-200/90 text-zinc-900 border-zinc-300/90 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-100 dark:border-zinc-700 shadow-2xs font-medium'
-                                  : 'bg-background/60 hover:bg-background text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
+                                  ? 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-900 dark:text-zinc-100 font-medium'
+                                  : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-200'
                               }`}
                             >
-                              {/* 状态指示框：已选为实体高反差勾选框（hover 提示取消），未选为空框（hover 提示添加） */}
-                              <span
-                                className={`w-3.5 h-3.5 rounded-[3.5px] flex items-center justify-center shrink-0 transition-colors ${
-                                  isSelected
-                                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 group-hover:bg-zinc-700 dark:group-hover:bg-zinc-300'
-                                    : 'border border-zinc-300 dark:border-zinc-700 bg-white/70 dark:bg-zinc-900/70 group-hover:border-zinc-400 dark:group-hover:border-zinc-500'
-                                }`}
-                              >
-                                {isSelected ? (
-                                  <>
-                                    <Check className="w-2.5 h-2.5 stroke-[3] group-hover:hidden" />
-                                    <X className="w-2.5 h-2.5 stroke-[3] hidden group-hover:block" />
-                                  </>
-                                ) : (
-                                  <Plus className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                              {/* 左侧：状态指示框与模型名称 */}
+                              <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
+                                <span
+                                  className={`w-3.5 h-3.5 rounded-[3.5px] flex items-center justify-center shrink-0 transition-colors ${
+                                    isSelected
+                                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 group-hover:bg-zinc-700 dark:group-hover:bg-zinc-300'
+                                      : 'border border-zinc-300 dark:border-zinc-700 bg-white/70 dark:bg-zinc-900/70 group-hover:border-zinc-400 dark:group-hover:border-zinc-500'
+                                  }`}
+                                >
+                                  {isSelected ? (
+                                    <>
+                                      <Check className="w-2.5 h-2.5 stroke-[3] group-hover:hidden" />
+                                      <X className="w-2.5 h-2.5 stroke-[3] hidden group-hover:block" />
+                                    </>
+                                  ) : (
+                                    <Plus className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                  )}
+                                </span>
+                                <span className="truncate">{model}</span>
+                              </div>
+
+                              {/* 右侧：标记与提示 */}
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {isDefaultModel && (
+                                  <span
+                                    className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
+                                    title="当前服务商的首选启动模型"
+                                  >
+                                    首选
+                                  </span>
                                 )}
-                              </span>
-
-                              {/* 模型名称 */}
-                              <span className="truncate max-w-[280px]">{model}</span>
-
-                              {/* 首选模型标记 */}
-                              {isDefaultModel && (
-                                <span
-                                  className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
-                                  title="当前服务商的首选启动模型"
-                                >
-                                  首选
-                                </span>
-                              )}
-
-                              {/* 上游缺失警示 */}
-                              {isInvalid && (
-                                <span
-                                  title="该模型未在上游接口返回的列表中"
-                                  className="shrink-0 text-amber-500 flex items-center"
-                                >
-                                  <AlertTriangle className="w-3 h-3" />
-                                </span>
-                              )}
+                                {isInvalid && (
+                                  <span
+                                    title="该模型未在上游接口返回的列表中"
+                                    className="shrink-0 text-amber-500 flex items-center"
+                                  >
+                                    <AlertTriangle className="w-3 h-3" />
+                                  </span>
+                                )}
+                              </div>
                             </button>
                           );
                         })}
@@ -1904,7 +1903,7 @@ export function ProviderEditor() {
                           addManualModel();
                         }
                       }}
-                      placeholder="手动补充模型 ID，如 claude-3-7-sonnet（回车添加）"
+                      placeholder="输入模型 ID（回车添加）"
                       className="font-mono h-7 text-xs bg-background/80"
                     />
                     <Button
@@ -1929,35 +1928,36 @@ export function ProviderEditor() {
                 </div>
               )}
 
-              {/* 表单自然底部操作区：纯正 shadcn/ui 按钮层级 */}
-              <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between gap-3 pt-4 border-t border-border">
+              {/* 表单自然底部操作区：单行自适应操作栏 */}
+              <div className="flex items-center justify-between gap-2 pt-4 border-t border-border">
                 <div>
                   {currentEditingProvider && (
                     <Button
                       type="button"
                       variant="destructive-ghost"
-                      size="default"
+                      size="sm"
                       disabled={saving || deleting}
                       onClick={() => setConfirmingDelete(true)}
+                      className="px-2 text-xs"
                     >
-                      删除此服务商
+                      删除服务商
                     </Button>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-end gap-2.5">
-                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                <div className="flex items-center justify-end gap-2 shrink-0">
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[140px]">
                     {fetching || syncingModels
                       ? '正在同步上游模型…'
                       : isSubscriptionPool && subAccounts.length > 0
                         ? (
                           <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-                            <span>已自动保存并启用</span>
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block shrink-0" />
+                            <span className="truncate">已自动保存并启用</span>
                           </span>
                         )
                         : !isSubscriptionPool && draft.models.length === 0
-                          ? '请先选择或添加至少一个模型'
+                          ? '请先选择模型'
                           : ''}
                   </span>
 
@@ -1966,7 +1966,7 @@ export function ProviderEditor() {
                       <Button
                         type="button"
                         variant="default"
-                        size="default"
+                        size="sm"
                         disabled={saving || syncingModels}
                         onClick={handleFinishSubscription}
                       >
@@ -1981,7 +1981,7 @@ export function ProviderEditor() {
                       <Button
                         type="button"
                         variant="outline"
-                        size="default"
+                        size="sm"
                         onClick={handleClose}
                       >
                         返回
@@ -1992,7 +1992,7 @@ export function ProviderEditor() {
                       <Button
                         type="button"
                         variant="outline"
-                        size="default"
+                        size="sm"
                         onClick={handleClose}
                       >
                         取消
@@ -2000,7 +2000,7 @@ export function ProviderEditor() {
                       <Button
                         type="submit"
                         variant="default"
-                        size="default"
+                        size="sm"
                         disabled={saving || deleting || fetching || draft.models.length === 0}
                       >
                         {saving ? (
@@ -2008,7 +2008,7 @@ export function ProviderEditor() {
                         ) : (
                           <Check className="w-3.5 h-3.5" />
                         )}
-                        <span>{saving ? '保存中…' : currentEditingProvider ? '保存修改' : '保存服务商'}</span>
+                        <span>{saving ? '保存中…' : '保存'}</span>
                       </Button>
                     </>
                   )}
