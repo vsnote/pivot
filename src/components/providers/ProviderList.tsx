@@ -163,132 +163,140 @@ function ProviderCard({
       }}
       onPointerDown={onPointerDown}
       className={`group relative flex items-center justify-between gap-3 px-4 py-2.5 transition-colors cursor-pointer select-none ${
-        provider.enabled
-          ? 'hover:bg-accent/50'
-          : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
-      } ${isDragged ? 'opacity-25' : ''}`}
+        isDragged
+          ? 'bg-zinc-100/70 dark:bg-zinc-800/40'
+          : provider.enabled
+            ? 'hover:bg-accent/50'
+            : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
+      }`}
       aria-label={`编辑服务商 ${provider.name}`}
     >
-      <GripVertical
-        aria-hidden
-        className="pointer-events-none absolute left-0.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-70 dark:text-zinc-500"
-      />
+      {isDragged ? (
+        <div className="h-6 w-full" aria-hidden />
+      ) : (
+        <>
+          <GripVertical
+            aria-hidden
+            className="pointer-events-none absolute left-0.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-70 dark:text-zinc-500"
+          />
 
-      {/* 左侧：Logo + 服务商名称 + 标签 + 简化端点 */}
-      <div className="flex items-center gap-2.5 min-w-0 flex-1">
-        <ProviderAvatar
-          name={provider.name}
-          protocol={provider.protocol}
-          iconKey={provider.presetId || undefined}
-          sizeClass="w-6 h-6"
-          dense
-        />
-
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <h3 className="shrink-0 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
-            {provider.name}
-          </h3>
-
-          {/* 订阅池标记 */}
-          {isSubscription && (
-            <span
-              title="官方账号订阅池（多账号轮询与配额调度）"
-              className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none"
-            >
-              订阅
-            </span>
-          )}
-
-          {/* 紧凑端点信息（非订阅服务商展示，空间宽裕时完整展示，空间受限时自适应截断） */}
-          {!isSubscription && displayEndpoint && (
-            <span
-              className="min-w-0 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
-              title={provider.baseUrl}
-            >
-              {displayEndpoint}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* 右侧：Hover 快捷操作栏 + 延迟药丸（与测速一体） + Switch 开关 */}
-      <div className="shrink-0 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-        {/* Hover 时平滑浮现的快捷操作：复制 Base URL（仅非订阅服务商） */}
-        {!isSubscription && provider.baseUrl && (
-          <button
-            type="button"
-            onClick={handleCopyBaseUrl}
-            title={copied ? '已复制 Base URL' : '复制 Base URL'}
-            className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
-          >
-            {copied ? (
-              <Check className="w-3.5 h-3.5 text-emerald-500" />
-            ) : (
-              <Copy className="w-3.5 h-3.5" />
-            )}
-          </button>
-        )}
-
-        {/* 延迟测试药丸（仅在服务商启用时展示，停用时彻底收起不占位） */}
-        {!provider.enabled ? null : testing ? (
-          <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-zinc-400 dark:text-zinc-500 bg-muted/50 select-none">
-            <LoaderCircle className="w-3 h-3 animate-spin text-zinc-400" />
-            <span>测速中</span>
-          </div>
-        ) : provider.latencyMs && provider.latencyMs > 0 ? (
-          <button
-            type="button"
-            onClick={handleTestLatency}
-            title={`端点响应 ${provider.latencyMs}ms · 点击重新测速`}
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer select-none ${
-              provider.latencyMs < 300
-                ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/[0.08] hover:bg-emerald-500/[0.15]'
-                : provider.latencyMs < 1000
-                  ? 'text-amber-600 dark:text-amber-400 bg-amber-500/[0.08] hover:bg-amber-500/[0.15]'
-                  : 'text-orange-600 dark:text-orange-400 bg-orange-500/[0.08] hover:bg-orange-500/[0.15]'
-            }`}
-          >
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                provider.latencyMs < 300
-                  ? 'bg-emerald-500'
-                  : provider.latencyMs < 1000
-                    ? 'bg-amber-500'
-                    : 'bg-orange-500'
-              }`}
+          {/* 左侧：Logo + 服务商名称 + 标签 + 简化端点 */}
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            <ProviderAvatar
+              name={provider.name}
+              protocol={provider.protocol}
+              iconKey={provider.presetId || undefined}
+              sizeClass="w-6 h-6"
+              dense
             />
-            <span>{provider.latencyMs}ms</span>
-          </button>
-        ) : provider.latencyMs === -1 ? (
-          <button
-            type="button"
-            onClick={handleTestLatency}
-            title="端点连接失败 · 点击重新测速"
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-rose-600 dark:text-rose-400 bg-rose-500/[0.08] hover:bg-rose-500/[0.15] transition-colors cursor-pointer select-none"
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-            <span>无法连接</span>
-          </button>
-        ) : (
-          /* 未测速时：仅在 group-hover 时展示轻量的 ⚡ 测速按钮，常态下完全不占位！ */
-          <button
-            type="button"
-            onClick={handleTestLatency}
-            title="测试端点延迟"
-            className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
-          >
-            <Zap className="w-3.5 h-3.5" />
-          </button>
-        )}
 
-        {/* 启用/停用开关 */}
-        <Switch
-          checked={provider.enabled}
-          disabled={toggling}
-          onCheckedChange={handleToggle}
-          ariaLabel={provider.enabled ? `停止 ${provider.name} 参与路由` : `让 ${provider.name} 参与路由`}
-        />
-      </div>
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <h3 className="shrink-0 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100 truncate group-hover:text-zinc-950 dark:group-hover:text-white transition-colors">
+                {provider.name}
+              </h3>
+
+              {/* 订阅池标记 */}
+              {isSubscription && (
+                <span
+                  title="官方账号订阅池（多账号轮询与配额调度）"
+                  className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none"
+                >
+                  订阅
+                </span>
+              )}
+
+              {/* 紧凑端点信息（非订阅服务商展示，空间宽裕时完整展示，空间受限时自适应截断） */}
+              {!isSubscription && displayEndpoint && (
+                <span
+                  className="min-w-0 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
+                  title={provider.baseUrl}
+                >
+                  {displayEndpoint}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* 右侧：Hover 快捷操作栏 + 延迟药丸（与测速一体） + Switch 开关 */}
+          <div className="shrink-0 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+            {/* Hover 时平滑浮现的快捷操作：复制 Base URL（仅非订阅服务商） */}
+            {!isSubscription && provider.baseUrl && (
+              <button
+                type="button"
+                onClick={handleCopyBaseUrl}
+                title={copied ? '已复制 Base URL' : '复制 Base URL'}
+                className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
+              >
+                {copied ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-500" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+              </button>
+            )}
+
+            {/* 延迟测试药丸（仅在服务商启用时展示，停用时彻底收起不占位） */}
+            {!provider.enabled ? null : testing ? (
+              <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-zinc-400 dark:text-zinc-500 bg-muted/50 select-none">
+                <LoaderCircle className="w-3 h-3 animate-spin text-zinc-400" />
+                <span>测速中</span>
+              </div>
+            ) : provider.latencyMs && provider.latencyMs > 0 ? (
+              <button
+                type="button"
+                onClick={handleTestLatency}
+                title={`端点响应 ${provider.latencyMs}ms · 点击重新测速`}
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer select-none ${
+                  provider.latencyMs < 300
+                    ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/[0.08] hover:bg-emerald-500/[0.15]'
+                    : provider.latencyMs < 1000
+                      ? 'text-amber-600 dark:text-amber-400 bg-amber-500/[0.08] hover:bg-amber-500/[0.15]'
+                      : 'text-orange-600 dark:text-orange-400 bg-orange-500/[0.08] hover:bg-orange-500/[0.15]'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    provider.latencyMs < 300
+                      ? 'bg-emerald-500'
+                      : provider.latencyMs < 1000
+                        ? 'bg-amber-500'
+                        : 'bg-orange-500'
+                  }`}
+                />
+                <span>{provider.latencyMs}ms</span>
+              </button>
+            ) : provider.latencyMs === -1 ? (
+              <button
+                type="button"
+                onClick={handleTestLatency}
+                title="端点连接失败 · 点击重新测速"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-rose-600 dark:text-rose-400 bg-rose-500/[0.08] hover:bg-rose-500/[0.15] transition-colors cursor-pointer select-none"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                <span>无法连接</span>
+              </button>
+            ) : (
+              /* 未测速时：仅在 group-hover 时展示轻量的 ⚡ 测速按钮，常态下完全不占位！ */
+              <button
+                type="button"
+                onClick={handleTestLatency}
+                title="测试端点延迟"
+                className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
+              >
+                <Zap className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {/* 启用/停用开关 */}
+            <Switch
+              checked={provider.enabled}
+              disabled={toggling}
+              onCheckedChange={handleToggle}
+              ariaLabel={provider.enabled ? `停止 ${provider.name} 参与路由` : `让 ${provider.name} 参与路由`}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -752,6 +760,20 @@ export function ProviderList() {
     : providers;
   const draggedProvider = drag ? providerById.get(drag.id) : undefined;
 
+  const dragIndex = drag ? drag.previewIds.indexOf(drag.id) : -1;
+  const dragTotal = drag ? drag.previewIds.length : 0;
+  const isFirstSlot = dragIndex === 0;
+  const isLastSlot = dragIndex === dragTotal - 1;
+  const isOnlySlot = dragTotal <= 1;
+
+  const dragRoundedClass = isOnlySlot
+    ? 'rounded-lg'
+    : isFirstSlot
+      ? 'rounded-t-lg rounded-b-none'
+      : isLastSlot
+        ? 'rounded-b-lg rounded-t-none'
+        : 'rounded-none';
+
   return (
     <div className="animate-in fade-in duration-150">
       <section className={panelClass} aria-label="服务商">
@@ -841,7 +863,7 @@ export function ProviderList() {
         createPortal(
           <div
             aria-hidden
-            className="pointer-events-none fixed z-50 overflow-hidden rounded-lg border border-border bg-card shadow-xl"
+            className={`pointer-events-none fixed z-50 overflow-hidden border border-border bg-card shadow-xl transition-[border-radius] duration-150 ease-out ${dragRoundedClass}`}
             style={{
               left: drag.rowLeft,
               width: drag.rowWidth,
