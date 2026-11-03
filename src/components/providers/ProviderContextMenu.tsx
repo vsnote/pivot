@@ -503,8 +503,8 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             )}
           </button>
 
-          {/* 复制 Base URL */}
-          {provider.baseUrl && (
+          {/* 复制 Base URL（仅非订阅服务商） */}
+          {!isSubscription && provider.baseUrl && (
             <button
               type="button"
               onClick={handleCopyBaseUrl}

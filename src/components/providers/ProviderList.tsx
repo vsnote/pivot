@@ -103,6 +103,12 @@ function ProviderCard({
   const [testing, setTesting] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  const isSubscription =
+    provider.authType === 'subscription_pool' ||
+    provider.presetId === 'antigravity' ||
+    provider.presetId === 'chatgpt_subscription' ||
+    provider.protocol === 'chatgpt';
+
   const handleToggle = async () => {
     if (toggling) return;
     setToggling(true);
@@ -184,10 +190,7 @@ function ProviderCard({
           </h3>
 
           {/* 订阅池标记 */}
-          {(provider.authType === 'subscription_pool' ||
-            provider.presetId === 'antigravity' ||
-            provider.presetId === 'chatgpt_subscription' ||
-            provider.protocol === 'chatgpt') && (
+          {isSubscription && (
             <span
               title="官方账号订阅池（多账号轮询与配额调度）"
               className="shrink-0 text-[10px] px-1.5 py-0.2 rounded font-medium bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800 leading-none"
@@ -196,10 +199,10 @@ function ProviderCard({
             </span>
           )}
 
-          {/* 紧凑端点信息 */}
-          {displayEndpoint && (
+          {/* 紧凑端点信息（非订阅服务商展示，空间宽裕时完整展示，空间受限时自适应截断） */}
+          {!isSubscription && displayEndpoint && (
             <span
-              className="hidden sm:inline-block font-mono text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[240px]"
+              className="min-w-0 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
               title={provider.baseUrl}
             >
               {displayEndpoint}
@@ -210,8 +213,8 @@ function ProviderCard({
 
       {/* 右侧：Hover 快捷操作栏 + 延迟药丸（与测速一体） + Switch 开关 */}
       <div className="shrink-0 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-        {/* Hover 时平滑浮现的快捷操作：复制 Base URL */}
-        {provider.baseUrl && (
+        {/* Hover 时平滑浮现的快捷操作：复制 Base URL（仅非订阅服务商） */}
+        {!isSubscription && provider.baseUrl && (
           <button
             type="button"
             onClick={handleCopyBaseUrl}
