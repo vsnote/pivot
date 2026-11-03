@@ -1,6 +1,6 @@
 use crate::db::presets::{self, Preset};
 use crate::gateway::router as gateway_router;
-use crate::db::{Provider, RequestLog, RouteRule, SubscriptionAccount};
+use crate::db::{Provider, RequestLog, SubscriptionAccount};
 use crate::interceptor::{InterceptorInfo, InterceptorManager};
 use crate::oauth;
 use crate::state::AppState;
@@ -182,13 +182,12 @@ pub async fn reorder_providers(
     state.db.get_providers().map_err(|e| e.to_string())
 }
 
-/// Deletes a provider and returns the routing rules that survive it, because a
-/// provider can be the target or a fallback of a rule the caller is showing.
+/// Deletes a provider by id.
 #[tauri::command]
 pub async fn delete_provider(
     state: State<'_, AppState>,
     id: String,
-) -> Result<Vec<RouteRule>, String> {
+) -> Result<(), String> {
     state
         .db
         .delete_provider(&id)
@@ -197,7 +196,7 @@ pub async fn delete_provider(
     let _ = mgr.sync_codex_catalog_if_intercepted();
     let _ = mgr.sync_claude_settings_if_intercepted();
     let _ = mgr.sync_pi_models_if_intercepted();
-    state.db.get_routes().map_err(|e| e.to_string())
+    Ok(())
 }
 
 async fn measure_http_latency(
@@ -276,20 +275,6 @@ pub async fn test_endpoint_latency(
         api_key.as_deref(),
     )
     .await
-}
-
-#[tauri::command]
-pub async fn get_routes(state: State<'_, AppState>) -> Result<Vec<RouteRule>, String> {
-    state.db.get_routes().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn save_routes(state: State<'_, AppState>, routes: Vec<RouteRule>) -> Result<(), String> {
-    state.db.save_routes(&routes).map_err(|e| e.to_string())?;
-    let mgr = InterceptorManager::new(state.db.clone(), state.port);
-    let _ = mgr.sync_claude_settings_if_intercepted();
-    let _ = mgr.sync_pi_models_if_intercepted();
-    Ok(())
 }
 
 #[tauri::command]
@@ -406,8 +391,7 @@ pub async fn explain_route(
     model: String,
 ) -> Result<gateway_router::RouteExplanation, String> {
     let providers = state.db.get_providers().map_err(|e| e.to_string())?;
-    let routes = state.db.get_routes().map_err(|e| e.to_string())?;
-    Ok(gateway_router::explain_route(&model, &providers, &routes))
+    Ok(gateway_router::explain_route(&model, &providers))
 }
 
 #[tauri::command]

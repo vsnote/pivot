@@ -26,9 +26,7 @@ export const SettingsView: React.FC = () => {
     theme,
     setTheme,
     providers,
-    routes,
     saveProvider,
-    saveRoutes,
   } = useAppStore();
 
   const [isImporting, setIsImporting] = useState(false);
@@ -126,7 +124,6 @@ export const SettingsView: React.FC = () => {
         version: 1,
         exportedAt: new Date().toISOString(),
         providers,
-        routes,
       };
       const jsonStr = JSON.stringify(data, null, 2);
       const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -142,7 +139,7 @@ export const SettingsView: React.FC = () => {
 
       setBackupNotice({
         type: 'success',
-        message: `已成功导出 ${providers.length} 个服务商与 ${routes.length} 条路由规则`,
+        message: `已成功导出 ${providers.length} 个服务商配置`,
       });
       setTimeout(() => setBackupNotice(null), 3500);
     } catch (err: unknown) {
@@ -172,13 +169,9 @@ export const SettingsView: React.FC = () => {
         }
       }
 
-      if (Array.isArray(data.routes) && data.routes.length > 0) {
-        await saveRoutes(data.routes);
-      }
-
       setBackupNotice({
         type: 'success',
-        message: `已恢复 ${importedCount} 个服务商与 ${data.routes?.length || 0} 条路由规则`,
+        message: `已恢复 ${importedCount} 个服务商配置`,
       });
       setTimeout(() => setBackupNotice(null), 4000);
     } catch (err: unknown) {

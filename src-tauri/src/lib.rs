@@ -139,8 +139,6 @@ pub fn run() {
             delete_provider,
             test_provider_latency,
             test_endpoint_latency,
-            get_routes,
-            save_routes,
             get_logs,
             clear_logs,
             get_interceptor_status,

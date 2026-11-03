@@ -11,7 +11,6 @@ import {
   Provider,
   RequestLog,
   RouteExplanation,
-  RouteRule,
 } from '@/types';
 
 interface AppStore {
@@ -26,7 +25,6 @@ interface AppStore {
 
   stats: GatewayStats;
   providers: Provider[];
-  routes: RouteRule[];
   interceptors: InterceptorStatus[];
   presets: Preset[];
   logs: RequestLog[];
@@ -51,7 +49,6 @@ interface AppStore {
   deleteProvider: (id: string) => Promise<void>;
   testProviderLatency: (id: string) => Promise<number>;
   toggleProvider: (id: string, enabled: boolean) => Promise<void>;
-  saveRoutes: (routes: RouteRule[]) => Promise<void>;
   explainRoute: (model: string) => Promise<RouteExplanation>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
   importThirdPartyProvider: (id: string) => Promise<void>;
@@ -59,13 +56,12 @@ interface AppStore {
   initEventListeners: () => Promise<() => void>;
 }
 
-const SETTINGS_SECTIONS: SettingsSection[] = ['clients', 'routes', 'gateway', 'logs', 'about'];
+const SETTINGS_SECTIONS: SettingsSection[] = ['clients', 'gateway', 'logs', 'about'];
 
 // 连续拖拽时只认最后一次请求，避免先发后到的响应覆盖新顺序
 let reorderSeq = 0;
 const LEGACY_TABS: Partial<Record<ActiveTab, SettingsSection>> = {
   dashboard: 'gateway',
-  routes: 'routes',
   interceptor: 'clients',
   logs: 'logs',
 };
@@ -104,7 +100,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setActiveTab: (tab) => {
     const section = LEGACY_TABS[tab] ?? (tab === 'logs' ? 'logs' : get().settingsSection);
     const isTopLevel =
-      tab === 'providers' || tab === 'clients' || tab === 'routes' || tab === 'logs';
+      tab === 'providers' || tab === 'clients' || tab === 'logs';
     const activeTab = isTopLevel ? tab : 'settings';
     set({ activeTab, settingsSection: section });
     if (isNativeRuntime()) {
@@ -142,7 +138,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   // 生产初始数据必须为空：演示数据曾复用 anthropic 等真实主键，
   // 加载完成前打开编辑页会导致占位密钥覆盖真实配置。
   providers: [],
-  routes: [],
   interceptors: [],
   presets: [],
   logs: [],
@@ -170,10 +165,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   fetchInitialData: async () => {
     set({ isLoading: true, error: null });
     try {
-      const [stats, providers, routes, interceptors, presets, logs] = await Promise.all([
+      const [stats, providers, interceptors, presets, logs] = await Promise.all([
         invoke<GatewayStats>('get_gateway_status').catch(() => get().stats),
         invoke<Provider[]>('get_providers').catch(() => []),
-        invoke<RouteRule[]>('get_routes').catch(() => []),
         invoke<InterceptorStatus[]>('get_interceptor_status').catch(() => []),
         invoke<Preset[]>('get_presets').catch(() => []),
         invoke<RequestLog[]>('get_logs', { limit: 100, offset: 0 }).catch(() => []),
@@ -182,7 +176,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({
         stats,
         providers,
-        routes,
         interceptors,
         presets,
         logs,
@@ -266,12 +259,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   deleteProvider: async (id: string) => {
     try {
-      // The backend reports which rules survive the deletion, so the page never
-      // shows rules that point at a provider that is already gone.
-      const routes = await invoke<RouteRule[]>('delete_provider', { id });
+      await invoke('delete_provider', { id });
       set((state) => ({
         providers: state.providers.filter((p) => p.id !== id),
-        routes,
         error: null,
       }));
     } catch (err: unknown) {
@@ -300,16 +290,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (!provider) return;
     await invoke('set_provider_enabled', { id, enabled });
     set((state) => ({ providers: state.providers.map((p) => p.id === id ? { ...p, enabled } : p) }));
-  },
-
-  saveRoutes: async (routes: RouteRule[]) => {
-    try {
-      await invoke('save_routes', { routes });
-      set({ routes });
-    } catch (err: unknown) {
-      set({ error: String(err) });
-      throw err;
-    }
   },
 
   // The gateway owns model resolution, so the routing page asks it instead of
@@ -372,7 +352,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         // 监听 macOS 原生 NSSegmentedControl 切换事件
         const unlistenTab = await listen<string>('native-tab-selected', (event) => {
           const tabId = event.payload;
-          if (tabId === 'providers' || tabId === 'clients' || tabId === 'routes') {
+          if (tabId === 'providers' || tabId === 'clients') {
             set({ activeTab: tabId });
           } else if (SETTINGS_SECTIONS.includes(tabId as SettingsSection)) {
             set({ activeTab: 'settings', settingsSection: tabId as SettingsSection });

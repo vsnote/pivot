@@ -1,4 +1,4 @@
-use crate::db::{Provider, RouteRule};
+use crate::db::Provider;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -95,9 +95,8 @@ impl RoutingEngine {
         incoming_model: &str,
         session_id: Option<&str>,
         providers: &[Provider],
-        routes: &[RouteRule],
     ) -> Result<RouteMatch, String> {
-        let plan = plan_route(incoming_model, providers, routes)?;
+        let plan = plan_route(incoming_model, providers)?;
         let provider_map: HashMap<&str, &Provider> =
             providers.iter().map(|p| (p.id.as_str(), p)).collect();
 
@@ -131,34 +130,26 @@ impl RoutingEngine {
 ///
 /// The provider configuration alone answers this, in order:
 /// 1. `provider/model` prefix — the caller named a provider explicitly
-/// 2. enabled routing rules — advanced overrides for specific patterns
-/// 3. exact model name declared by an enabled provider
+/// 2. exact model name declared by an enabled provider
+/// 3. normalized model name declared by an enabled provider
 /// 4. the provider marked as default, asked for its own `default_model`
-///
-/// A model name nobody declares is an error unless a default provider exists;
-/// silently landing on the highest priority provider is what used to hide
-/// misconfiguration.
 pub fn plan_route(
     incoming_model: &str,
     providers: &[Provider],
-    routes: &[RouteRule],
 ) -> Result<RoutePlan, String> {
-    plan_route_inner(incoming_model, providers, routes, &mut None)
+    plan_route_inner(incoming_model, providers, &mut None)
 }
 
-/// One evaluated step in the resolution pipeline. `rule_id` is set when the
-/// step belongs to a routing rule, letting the UI link it back to the editor.
+/// One evaluated step in the resolution pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteStep {
     pub layer: String,
     pub matched: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rule_id: Option<String>,
     pub detail: String,
 }
 
-/// `plan_route` plus the trace of every layer it tried, for the routing page.
+/// `plan_route` plus the trace of every layer it tried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteExplanation {
@@ -173,12 +164,11 @@ pub struct RouteExplanation {
 pub fn explain_route(
     incoming_model: &str,
     providers: &[Provider],
-    routes: &[RouteRule],
 ) -> RouteExplanation {
     let mut steps = Vec::new();
     let result = {
         let mut trace = Some(&mut steps);
-        plan_route_inner(incoming_model, providers, routes, &mut trace)
+        plan_route_inner(incoming_model, providers, &mut trace)
     };
     let (plan, error) = match result {
         Ok(plan) => (Some(plan), None),
@@ -198,14 +188,12 @@ fn note(
     trace: &mut Option<&mut Vec<RouteStep>>,
     layer: &str,
     matched: bool,
-    rule_id: Option<&str>,
     detail: impl FnOnce() -> String,
 ) {
     if let Some(steps) = trace.as_deref_mut() {
         steps.push(RouteStep {
             layer: layer.to_string(),
             matched,
-            rule_id: rule_id.map(str::to_string),
             detail: detail(),
         });
     }
@@ -214,7 +202,6 @@ fn note(
 fn plan_route_inner(
     incoming_model: &str,
     providers: &[Provider],
-    routes: &[RouteRule],
     trace: &mut Option<&mut Vec<RouteStep>>,
 ) -> Result<RoutePlan, String> {
     let mut active_providers: Vec<&Provider> = providers.iter().filter(|p| p.enabled).collect();
@@ -251,7 +238,7 @@ fn plan_route_inner(
                     .copied()
             });
         if let Some(provider) = matched {
-            note(trace, "prefix", true, None, || {
+            note(trace, "prefix", true, || {
                 format!("前缀 {} 直接命中服务商 {}", prefix, provider.name)
             });
             return Ok(RoutePlan {
@@ -259,80 +246,19 @@ fn plan_route_inner(
                 fallbacks: automatic_fallbacks(&active_providers, &provider.id, sub_model),
             });
         }
-        note(trace, "prefix", false, None, || {
+        note(trace, "prefix", false, || {
             format!("前缀 {} 不对应任何已启用的服务商", prefix)
         });
     } else {
-        note(trace, "prefix", false, None, || "模型名不含服务商前缀".to_string());
+        note(trace, "prefix", false, || "模型名不含服务商前缀".to_string());
     }
 
-    // 2. Routing rules stay available as explicit overrides.
-    let mut sorted_rules = routes.to_vec();
-    sorted_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-    for rule in &sorted_rules {
-        if !rule.enabled {
-            continue;
-        }
-        if !pattern_matches(&rule.pattern, incoming_model) {
-            note(trace, "rule", false, Some(&rule.id), || {
-                format!("模式 {} 不匹配", rule.pattern)
-            });
-            continue;
-        }
-        let Some(primary_provider) = provider_map.get(rule.target_provider_id.as_str()) else {
-            note(trace, "rule", false, Some(&rule.id), || {
-                format!("模式 {} 命中，但目标服务商已停用或不存在", rule.pattern)
-            });
-            continue;
-        };
-
-        let desired_model = rule
-            .target_model
-            .clone()
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| incoming_model.to_string());
-
-        // A rule pins the provider, but every candidate is still asked for the
-        // model name its own configuration knows, and providers that know none
-        // are dropped instead of being handed a name they would reject.
-        let mut fallbacks: Vec<PlannedCandidate> = rule
-            .fallback_provider_ids
-            .iter()
-            .filter_map(|id| provider_map.get(id.as_str()).copied())
-            .filter(|p| p.id != primary_provider.id)
-            .filter_map(|p| candidate_model(p, &desired_model).map(|model| planned(p, &model)))
-            .collect();
-
-        // 当没有手动指定回退渠道时，自动按其他声明/支持该模型的渠道优先级作为容灾回退队列
-        if fallbacks.is_empty() {
-            fallbacks = automatic_fallbacks(&active_providers, &primary_provider.id, &desired_model);
-        }
-
-        let layer = if rule.id.starts_with("tier-") {
-            "role"
-        } else {
-            "rule"
-        };
-        note(trace, layer, true, Some(&rule.id), || {
-            format!(
-                "模式 {} 命中，固定到 {} / {}",
-                rule.pattern, primary_provider.name, desired_model
-            )
-        });
-
-        return Ok(RoutePlan {
-            primary: planned(primary_provider, &desired_model),
-            fallbacks,
-        });
-    }
-
-    // 3. Exact model name declared by an enabled provider.
+    // 2. Exact model name declared by an enabled provider.
     if let Some(provider) = active_providers
         .iter()
         .find(|p| lists_model(p, incoming_model))
     {
-        note(trace, "exact", true, None, || {
+        note(trace, "exact", true, || {
             format!("{} 在服务商优先级中最先声明该模型", provider.name)
         });
         return Ok(RoutePlan {
@@ -340,14 +266,14 @@ fn plan_route_inner(
             fallbacks: automatic_fallbacks(&active_providers, &provider.id, incoming_model),
         });
     }
-    note(trace, "exact", false, None, || {
+    note(trace, "exact", false, || {
         "没有已启用的服务商精确声明该模型".to_string()
     });
 
-    // 3.5. Smart normalized match (e.g. date versions, bracketed [1M], latest suffixes)
+    // 2.5. Smart normalized match (e.g. date versions, bracketed [1M], latest suffixes)
     for provider in &active_providers {
         if let Some(matched) = find_declared_or_normalized_model(provider, incoming_model) {
-            note(trace, "normalized", true, None, || {
+            note(trace, "normalized", true, || {
                 format!("{} 通过归一化匹配到 {}", provider.name, matched)
             });
             return Ok(RoutePlan {
@@ -356,13 +282,13 @@ fn plan_route_inner(
             });
         }
     }
-    note(trace, "normalized", false, None, || {
+    note(trace, "normalized", false, || {
         "没有可归一化匹配的模型".to_string()
     });
 
-    // 4. Unknown model name: hand it to the default provider.
+    // 3. Unknown model name: hand it to the default provider.
     let Some(default_provider) = active_providers.iter().find(|p| p.is_default) else {
-        note(trace, "default", false, None, || {
+        note(trace, "default", false, || {
             "没有配置默认服务商".to_string()
         });
         return Err(format!(
@@ -372,7 +298,7 @@ fn plan_route_inner(
     };
     let model = candidate_model(default_provider, incoming_model)
         .unwrap_or_else(|| incoming_model.to_string());
-    note(trace, "default", true, None, || {
+    note(trace, "default", true, || {
         format!(
             "未命中前几层，交给默认服务商 {} / {}",
             default_provider.name, model
@@ -602,31 +528,6 @@ mod tests {
         provider
     }
 
-    fn rule(pattern: &str, target: &str, fallbacks: &[&str]) -> RouteRule {
-        RouteRule {
-            id: format!("rule-{}", pattern),
-            pattern: pattern.to_string(),
-            target_provider_id: target.to_string(),
-            target_model: None,
-            fallback_provider_ids: fallbacks.iter().map(|id| id.to_string()).collect(),
-            enabled: true,
-            priority: 100,
-            description: None,
-        }
-    }
-
-    #[test]
-    fn test_pattern_matching() {
-        assert!(pattern_matches("claude-*", "claude-3-7-sonnet-20250219"));
-        assert!(pattern_matches("gpt-*", "gpt-4o"));
-        assert!(pattern_matches("o[13]*", "o3-mini"));
-        assert!(pattern_matches("o[13]*", "o1-preview"));
-        assert!(pattern_matches("*", "any-model-name"));
-        assert!(pattern_matches("deepseek/*", "deepseek/deepseek-r1"));
-        assert!(!pattern_matches("claude-*", "gpt-4o"));
-        assert!(!pattern_matches("gpt-*", "claude-3-5-sonnet"));
-    }
-
     #[test]
     fn prefix_routing_pins_the_named_provider_and_keeps_its_model() {
         let providers = vec![
@@ -634,12 +535,10 @@ mod tests {
             with_default_model(provider("aggregator", &["gemini-3.8-flash-high"], 5), "gemini-3.8-flash-high"),
         ];
 
-        let plan = plan_route("anthropic/claude-3-7-sonnet", &providers, &[]).unwrap();
+        let plan = plan_route("anthropic/claude-3-7-sonnet", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "anthropic");
         assert_eq!(plan.primary.model, "claude-3-7-sonnet");
-        // The aggregator does not declare that model, so it is only reached
-        // through its own default model.
         assert_eq!(plan.fallbacks.len(), 1);
         assert_eq!(plan.fallbacks[0].provider_id, "aggregator");
         assert_eq!(plan.fallbacks[0].model, "gemini-3.8-flash-high");
@@ -655,7 +554,7 @@ mod tests {
             disabled,
         ];
 
-        let plan = plan_route("gemini-3.8-flash-high", &providers, &[]).unwrap();
+        let plan = plan_route("gemini-3.8-flash-high", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "antigravity");
         assert_eq!(plan.primary.model, "gemini-3.8-flash-high");
@@ -671,7 +570,7 @@ mod tests {
             with_default_model(as_default(provider("antigravity", &["gemini-3.8-flash-high"], 10)), "gemini-3.8-flash-high"),
         ];
 
-        let plan = plan_route("claude-3-5-haiku-20241022", &providers, &[]).unwrap();
+        let plan = plan_route("claude-3-5-haiku-20241022", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "antigravity");
         assert_eq!(plan.primary.model, "gemini-3.8-flash-high");
@@ -687,7 +586,7 @@ mod tests {
             provider("unrelated", &["qwen3-max"], 5),
         ];
 
-        let plan = plan_route("claude-3-7-sonnet", &providers, &[]).unwrap();
+        let plan = plan_route("claude-3-7-sonnet", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "primary");
         let chain: Vec<(&str, &str)> = plan
@@ -708,7 +607,7 @@ mod tests {
     fn bare_default_provider_passes_unknown_models_through() {
         let providers = vec![as_default(provider("catch-all", &["some-model"], 10))];
 
-        let plan = plan_route("brand-new-model", &providers, &[]).unwrap();
+        let plan = plan_route("brand-new-model", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "catch-all");
         assert_eq!(plan.primary.model, "brand-new-model");
@@ -719,7 +618,7 @@ mod tests {
     fn unknown_model_without_default_provider_is_a_clear_error() {
         let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 10)];
 
-        let error = plan_route("claude-3-7-sonnet", &providers, &[]).unwrap_err();
+        let error = plan_route("claude-3-7-sonnet", &providers).unwrap_err();
 
         assert!(error.contains("claude-3-7-sonnet"), "{}", error);
         assert!(error.contains("default provider"), "{}", error);
@@ -731,42 +630,7 @@ mod tests {
         disabled.enabled = false;
         let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 5), disabled];
 
-        assert!(plan_route("claude-3-7-sonnet", &providers, &[]).is_err());
-    }
-
-    #[test]
-    fn routing_rules_still_override_automatic_resolution() {
-        let providers = vec![
-            provider("deepseek", &["deepseek-v4-pro"], 20),
-            with_default_model(as_default(provider("antigravity", &["gemini-3.8-flash-high"], 10)), "gemini-3.8-flash-high"),
-        ];
-        let mut override_rule = rule("deepseek-v4-pro", "deepseek", &["antigravity"]);
-        override_rule.target_model = Some("deepseek-v4-pro".to_string());
-
-        let plan = plan_route("deepseek-v4-pro", &providers, &[override_rule]).unwrap();
-
-        assert_eq!(plan.primary.provider_id, "deepseek");
-        assert_eq!(plan.primary.model, "deepseek-v4-pro");
-        assert_eq!(plan.fallbacks.len(), 1);
-        assert_eq!(plan.fallbacks[0].provider_id, "antigravity");
-        assert_eq!(plan.fallbacks[0].model, "gemini-3.8-flash-high");
-    }
-
-    #[test]
-    fn rule_fallbacks_that_cannot_serve_the_target_model_are_skipped() {
-        let providers = vec![
-            provider("anthropic", &["claude-3-7-sonnet"], 20),
-            provider("openrouter", &["anthropic/claude-3.7-sonnet"], 10),
-        ];
-        let mut mapping = rule("claude-*", "anthropic", &["openrouter"]);
-        mapping.target_model = Some("gpt-4o".to_string());
-
-        let plan = plan_route("claude-3-7-sonnet", &providers, &[mapping]).unwrap();
-
-        assert_eq!(plan.primary.model, "gpt-4o");
-        // Neither provider declares the rule's rewritten model, but openrouter
-        // has no default model either, so it is not handed a name it would 400 on.
-        assert!(plan.fallbacks.is_empty());
+        assert!(plan_route("claude-3-7-sonnet", &providers).is_err());
     }
 
     #[test]
@@ -778,7 +642,7 @@ mod tests {
         ];
 
         let matched = engine
-            .resolve_route("claude-3-7-sonnet", Some("session-1"), &providers, &[])
+            .resolve_route("claude-3-7-sonnet", Some("session-1"), &providers)
             .unwrap();
 
         assert_eq!(matched.primary.provider.id, "anthropic");
@@ -786,7 +650,6 @@ mod tests {
         assert_eq!(matched.primary.api_key.as_deref(), Some("sk-anthropic"));
         assert_eq!(matched.fallbacks.len(), 1);
         assert_eq!(matched.fallbacks[0].provider.id, "antigravity");
-        // Cross-provider fallbacks carry their own model name now.
         assert_eq!(matched.fallbacks[0].target_model, "gemini-3.8-flash-high");
 
         let key1 = engine.select_api_key(&providers[0], Some("user_session_abc")).unwrap();
@@ -798,7 +661,7 @@ mod tests {
     fn nested_prefix_models_keep_the_full_sub_model_name() {
         let providers = vec![provider("openrouter", &["anthropic/claude-3.7-sonnet"], 10)];
 
-        let plan = plan_route("openrouter/anthropic/claude-3.7-sonnet", &providers, &[]).unwrap();
+        let plan = plan_route("openrouter/anthropic/claude-3.7-sonnet", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "openrouter");
         assert_eq!(plan.primary.model, "anthropic/claude-3.7-sonnet");
@@ -810,7 +673,7 @@ mod tests {
         p.name = "DeepSeek".to_string();
         let providers = vec![p];
 
-        let plan = plan_route("deepseek/deepseek-v4-pro", &providers, &[]).unwrap();
+        let plan = plan_route("deepseek/deepseek-v4-pro", &providers).unwrap();
         assert_eq!(plan.primary.provider_id, "prov_uuid_12345");
         assert_eq!(plan.primary.model, "deepseek-v4-pro");
     }
@@ -820,7 +683,7 @@ mod tests {
         let mut disabled = provider("anthropic", &["claude-3-7-sonnet"], 10);
         disabled.enabled = false;
 
-        let error = plan_route("claude-3-7-sonnet", &[disabled], &[]).unwrap_err();
+        let error = plan_route("claude-3-7-sonnet", &[disabled]).unwrap_err();
 
         assert_eq!(error, "No active providers enabled in Pivot");
     }
@@ -833,21 +696,19 @@ mod tests {
             provider("openai", &["gpt-4o-2024-08-06"], 10),
         ];
 
-        // 1. Incoming model with date suffix matches provider with canonical base name
-        let plan1 = plan_route("claude-3-7-sonnet-20250219", &providers, &[]).unwrap();
+        let plan1 = plan_route("claude-3-7-sonnet-20250219", &providers).unwrap();
         assert_eq!(plan1.primary.provider_id, "anthropic");
         assert_eq!(plan1.primary.model, "claude-3-7-sonnet");
 
-        // 2. Incoming model with bracket modifier matches base name
-        let plan2 = plan_route("gemini-3.8-flash-high[1M]", &providers, &[]).unwrap();
+        let plan2 = plan_route("gemini-3.8-flash-high[1M]", &providers).unwrap();
         assert_eq!(plan2.primary.provider_id, "google");
         assert_eq!(plan2.primary.model, "gemini-3.8-flash-high");
 
-        // 3. Incoming base model matches provider that declared dated full name
-        let plan3 = plan_route("gpt-4o", &providers, &[]).unwrap();
+        let plan3 = plan_route("gpt-4o", &providers).unwrap();
         assert_eq!(plan3.primary.provider_id, "openai");
         assert_eq!(plan3.primary.model, "gpt-4o-2024-08-06");
     }
+
     #[test]
     fn explain_route_traces_every_layer() {
         let providers = vec![
@@ -858,43 +719,25 @@ mod tests {
             )),
         ];
 
-        // Prefix routing wins before any rule is considered.
-        let explained = explain_route("anthropic/claude-3-7-sonnet", &providers, &[]);
+        let explained = explain_route("anthropic/claude-3-7-sonnet", &providers);
         assert_eq!(explained.steps[0].layer, "prefix");
         assert!(explained.steps[0].matched);
         assert_eq!(explained.plan.unwrap().primary.model, "claude-3-7-sonnet");
 
-        // A tier rule is labelled as a role step and keeps its rule id.
-        let mut tier = rule("claude-3-7-sonnet", "catch-all", &[]);
-        tier.id = "tier-main".to_string();
-        tier.target_model = Some("gpt-6.1-sol".to_string());
-        let explained = explain_route("claude-3-7-sonnet", &providers, &[tier]);
-        let role = explained
-            .steps
-            .iter()
-            .find(|step| step.layer == "role")
-            .expect("role step");
-        assert!(role.matched);
-        assert_eq!(role.rule_id.as_deref(), Some("tier-main"));
-        assert_eq!(explained.plan.unwrap().primary.model, "gpt-6.1-sol");
-
-        // Exact declaration.
-        let explained = explain_route("claude-3-7-sonnet", &providers, &[]);
+        let explained = explain_route("claude-3-7-sonnet", &providers);
         assert!(explained
             .steps
             .iter()
             .any(|step| step.layer == "exact" && step.matched));
 
-        // Normalized matching (declared date suffix, requested base name).
         let dated = vec![provider("anthropic", &["claude-3-7-sonnet-20250219"], 20)];
-        let explained = explain_route("claude-3-7-sonnet", &dated, &[]);
+        let explained = explain_route("claude-3-7-sonnet", &dated);
         assert!(explained
             .steps
             .iter()
             .any(|step| step.layer == "normalized" && step.matched));
 
-        // Default provider for an unknown name.
-        let explained = explain_route("brand-new-model", &providers, &[]);
+        let explained = explain_route("brand-new-model", &providers);
         assert!(explained
             .steps
             .iter()
@@ -905,7 +748,7 @@ mod tests {
     #[test]
     fn explain_route_reports_failures_with_the_step_that_failed() {
         let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 10)];
-        let explained = explain_route("brand-new-model", &providers, &[]);
+        let explained = explain_route("brand-new-model", &providers);
 
         assert!(explained.plan.is_none());
         assert!(explained
@@ -917,25 +760,6 @@ mod tests {
             .steps
             .iter()
             .any(|step| step.layer == "default" && !step.matched));
-    }
-
-    #[test]
-    fn explain_route_marks_rules_with_unavailable_targets_as_skipped() {
-        let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 10)];
-        let mut orphan = rule("deepseek-*", "gone", &[]);
-        orphan.id = "custom-orphan".to_string();
-
-        let explained = explain_route("deepseek-v4-pro", &providers, &[orphan]);
-        let step = explained
-            .steps
-            .iter()
-            .find(|step| step.rule_id.as_deref() == Some("custom-orphan"))
-            .expect("rule step");
-
-        assert!(!step.matched);
-        assert!(step.detail.contains("已停用或不存在"));
-        // The skipped rule does not stop exact resolution.
-        assert_eq!(explained.plan.unwrap().primary.provider_id, "deepseek");
     }
 
 }

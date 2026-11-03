@@ -179,7 +179,6 @@ fn temp_db(label: &str) -> Database {
     let temp = TempDatabase::new(label);
     let db = Database::new(temp.path.clone()).unwrap();
     assert!(db.get_providers().unwrap().is_empty());
-    assert!(db.get_routes().unwrap().is_empty());
     db
 }
 
@@ -240,8 +239,7 @@ async fn claude_model_names_without_rules_use_the_default_provider() {
     assert!(stream_body.contains("event: message_start"), "{}", stream_body);
     assert!(stream_body.contains("gemini-3.8-flash-high"), "{}", stream_body);
 
-    // No rule exists, and every request is explained by the attempt chain.
-    assert!(db.get_routes().unwrap().is_empty());
+    // Every request is explained by the attempt chain.
     let logs = db.get_logs(10, 0).unwrap();
     assert_eq!(logs.len(), 3);
     for log in &logs {
@@ -386,13 +384,13 @@ async fn unknown_model_without_default_provider_reports_a_routing_error() {
         .contains("no default provider"));
 }
 
-/// 规则仍然生效并覆盖自动解析（高级用户的逃生舱）。
+/// 前缀路由自动命中指定服务商。
 #[tokio::test]
-async fn an_explicit_rule_still_overrides_automatic_routing() {
+async fn prefixed_model_names_route_to_specified_provider() {
     serve(17951, mock_chat_app!(mock_antigravity)).await;
     serve(17952, mock_chat_app!(mock_deepseek)).await;
 
-    let db = temp_db("rule-override");
+    let db = temp_db("prefix-route");
     db.save_provider(&as_default(
         provider("antigravity", "Antigravity (cli-proxy)", 17951, ANTIGRAVITY_MODELS, 10),
         "gemini-3.8-flash-high",
@@ -400,21 +398,10 @@ async fn an_explicit_rule_still_overrides_automatic_routing() {
     .unwrap();
     db.save_provider(&provider("deepseek", "DeepSeek", 17952, DEEPSEEK_MODELS, 5))
         .unwrap();
-    db.save_routes(&[pivot_lib::db::RouteRule {
-        id: "route_deepseek".to_string(),
-        pattern: "claude-3-7-*".to_string(),
-        target_provider_id: "deepseek".to_string(),
-        target_model: Some("deepseek-v4-pro".to_string()),
-        fallback_provider_ids: vec!["antigravity".to_string()],
-        enabled: true,
-        priority: 100,
-        description: None,
-    }])
-    .unwrap();
     start_gateway(16951, db.clone()).await;
 
     let client = reqwest::Client::new();
-    let response = post_messages(&client, 16951, "claude-3-7-sonnet-20250219", false).await;
+    let response = post_messages(&client, 16951, "deepseek/deepseek-v4-pro", false).await;
     assert_eq!(response.status(), 200);
 
     let logs = db.get_logs(1, 0).unwrap();

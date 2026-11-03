@@ -22,7 +22,7 @@ pub mod imp {
     static THEME_BUTTON: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
     static INIT: Once = Once::new();
 
-    const TAB_IDS: &[&str] = &["providers", "clients", "routes", "gateway", "logs", "about"];
+    const TAB_IDS: &[&str] = &["providers", "clients", "gateway", "logs", "about"];
     const NAVIGATION_ID: &str = "com.pivot.navigation";
     const ADD_PROVIDER_ID: &str = "com.pivot.add-provider";
     const THEME_ID: &str = "com.pivot.theme";

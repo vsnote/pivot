@@ -5,7 +5,6 @@ import { Plus } from 'lucide-react';
 
 const tabs = [
   { id: 'providers', label: '服务商' },
-  { id: 'routes', label: '路由' },
   { id: 'clients', label: '客户端' },
   { id: 'logs', label: '日志' },
   { id: 'settings', label: '设置' },
@@ -24,15 +23,13 @@ export const Header: React.FC = () => {
   } = useAppStore();
 
   const current: TabId =
-    activeTab === 'routes'
-      ? 'routes'
-      : activeTab === 'clients'
-        ? 'clients'
-        : activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')
-          ? 'logs'
-          : activeTab === 'settings'
-            ? 'settings'
-            : 'providers';
+    activeTab === 'clients'
+      ? 'clients'
+      : activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')
+        ? 'logs'
+        : activeTab === 'settings'
+          ? 'settings'
+          : 'providers';
 
   const selectTab = (id: string) => {
     if (id === 'settings') {

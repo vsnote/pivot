@@ -142,7 +142,6 @@ async fn live_acceptance_with_providers_only() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = reqwest::Client::new();
-    assert!(db.get_routes().unwrap().is_empty(), "acceptance runs without any rule");
 
     // 1 + 2: Claude Code model names, including the small background model.
     for model in ["claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"] {

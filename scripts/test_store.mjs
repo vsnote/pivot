@@ -42,12 +42,12 @@ test('旧导航入口映射到设置页，并保持原生导航同步', async ()
   assert.equal(store.getState().settingsSection, 'gateway');
   store.getState().setActiveTab('providers');
   assert.equal(store.getState().activeTab, 'providers');
-  store.getState().setSettingsSection('routes');
+  store.getState().setSettingsSection('about');
   assert.equal(store.getState().activeTab, 'settings');
   assert.deepEqual(calls, [
     ['sync_native_tab', { tab: 'gateway' }],
     ['sync_native_tab', { tab: 'providers' }],
-    ['sync_native_tab', { tab: 'routes' }],
+    ['sync_native_tab', { tab: 'about' }],
   ]);
 });
 
@@ -55,7 +55,7 @@ test('打开服务商编辑页统一切回列表，重复点击新增不覆盖�
   const provider = { id: 'provider-a', name: 'Provider A', priority: 1 };
   const store = await createStore({ invoke: async (command) => command === 'get_providers' ? [provider] : [] });
   await store.getState().fetchInitialData();
-  store.getState().setActiveTab('routes');
+  store.getState().setActiveTab('clients');
   store.getState().openProviderEditor(provider);
   assert.equal(store.getState().activeTab, 'providers');
   assert.equal(store.getState().editingProvider.id, provider.id);
@@ -98,7 +98,6 @@ test('初始数据未就绪时不能打开编辑页，真实数据到达后旧�
   const store = await createStore({ invoke: async (command, args) => {
     calls.push([command, args]);
     if (command === 'get_providers') return providersPromise;
-    if (command === 'get_routes') return [];
     if (command === 'get_interceptor_status') return [];
     if (command === 'get_presets') return [];
     if (command === 'get_logs') return [];
@@ -121,7 +120,7 @@ test('路由试算使用网关照常解析，判定过程与计划原样返回',
   const calls = [];
   const explanation = {
     incoming: 'claude-3-7-sonnet',
-    steps: [{ layer: 'role', matched: true, ruleId: 'tier-main', detail: '角色槽位命中' }],
+    steps: [{ layer: 'exact', matched: true, detail: '精确模型匹配' }],
     plan: {
       primary: { providerId: 'antigravity', model: 'gemini-3.8-flash-high' },
       fallbacks: [],
@@ -153,15 +152,13 @@ test('日志事件保留每次尝试，尝试链在前端不被裁剪', async ()
   stop();
 });
 
-test('删除服务商后列表移除它，并用后端返回的规则覆盖本地规则', async () => {
+test('删除服务商后列表移除它', async () => {
   const calls = [];
   const provider = { id: 'provider-a', name: 'Provider A', enabled: true, priority: 1 };
-  const remaining = [{ id: 'rule-b', pattern: 'gpt-*', targetProviderId: 'provider-b', fallbackProviderIds: [], enabled: true, priority: 1 }];
   const store = await createStore({ native: false, invoke: async (command, args) => {
     calls.push([command, args]);
     if (command === 'get_providers') return [provider];
-    if (command === 'get_routes') return [{ id: 'rule-a', pattern: 'claude-*', targetProviderId: provider.id, fallbackProviderIds: [], enabled: true, priority: 1 }];
-    if (command === 'delete_provider') return remaining;
+    if (command === 'delete_provider') return undefined;
     return undefined;
   } });
   await store.getState().fetchInitialData();
@@ -169,8 +166,6 @@ test('删除服务商后列表移除它，并用后端返回的规则覆盖本�
   await store.getState().deleteProvider(provider.id);
   assert.deepEqual(calls, [['delete_provider', { id: provider.id }]]);
   assert.deepEqual(store.getState().providers, []);
-  // 指向已删除服务商的规则不再留在页面上。
-  assert.deepEqual(store.getState().routes.map((route) => route.id), ['rule-b']);
   assert.equal(store.getState().error, null);
 });
 
@@ -178,7 +173,6 @@ test('删除失败会把原因写进全局错误并且不静默改列表', async
   const provider = { id: 'provider-a', name: 'Provider A', enabled: true, priority: 1 };
   const store = await createStore({ native: false, invoke: async (command) => {
     if (command === 'get_providers') return [provider];
-    if (command === 'get_routes') return [];
     if (command === 'delete_provider') throw new Error('服务商 provider-a 不存在或已被删除');
   } });
   await store.getState().fetchInitialData();
@@ -194,7 +188,6 @@ test('保存默认服务商后本地列表只有一个默认标记', async () =>
   const second = { id: 'provider-b', name: 'B', priority: 1 };
   const store = await createStore({ native: false, invoke: async (command) => {
     if (command === 'get_providers') return [first, second];
-    if (command === 'get_routes') return [];
   } });
   await store.getState().fetchInitialData();
   await store.getState().saveProvider({ ...second, isDefault: true });

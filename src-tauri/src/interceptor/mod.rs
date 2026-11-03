@@ -1,4 +1,4 @@
-use crate::db::{Database, Provider, RouteRule};
+use crate::db::{Database, Provider};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -609,8 +609,7 @@ impl InterceptorManager {
 
             // 同步生成并注入 modelPicker，使得 Claude Code 的 /model 能够原生列出所有启用的服务商模型
             if let Ok(providers) = self.db.get_providers() {
-                let routes = self.db.get_routes().unwrap_or_default();
-                let picker = generate_claude_model_picker(&providers, &routes);
+                let picker = generate_claude_model_picker(&providers);
                 settings_val["modelPicker"] = picker;
             }
 
@@ -730,8 +729,7 @@ impl InterceptorManager {
             return Ok(());
         }
         let providers = self.db.get_providers().map_err(|e| e.to_string())?;
-        let routes = self.db.get_routes().unwrap_or_default();
-        v["modelPicker"] = generate_claude_model_picker(&providers, &routes);
+        v["modelPicker"] = generate_claude_model_picker(&providers);
         if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
             env_obj.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
             env_obj.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
@@ -1291,8 +1289,7 @@ impl InterceptorManager {
         }
 
         let providers = self.db.get_providers().map_err(|e| e.to_string())?;
-        let routes = self.db.get_routes().unwrap_or_default();
-        let (pi_models, preferred_model) = generate_pi_models_list(&providers, &routes);
+        let (pi_models, preferred_model) = generate_pi_models_list(&providers);
 
         let target_endpoint = format!("{}/v1", self.gateway_url);
         v["providers"]["pivot"] = json!({
@@ -1366,8 +1363,7 @@ impl InterceptorManager {
 
             // 2. 生成 pivot provider 的 models 列表
             let providers = self.db.get_providers().unwrap_or_default();
-            let routes = self.db.get_routes().unwrap_or_default();
-            let (pi_models, preferred_model) = generate_pi_models_list(&providers, &routes);
+            let (pi_models, preferred_model) = generate_pi_models_list(&providers);
 
             models_val["providers"]["pivot"] = json!({
                 "baseUrl": target_endpoint,
@@ -1931,56 +1927,14 @@ pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
 /// Generates the modelPicker configuration for ~/.claude/settings.json
 pub fn generate_claude_model_picker(
     providers: &[Provider],
-    routes: &[RouteRule],
 ) -> Value {
     let mut options = Vec::new();
     let mut seen_models = HashSet::new();
 
-    // 1. Agent 槽位映射行 (Main / Reasoning / Fast)
-    let tier_specs = [
-        (
-            "tier-main",
-            "主力模型 · Main",
-            "claude-3-7-sonnet",
-            "主力槽位动态路由",
-        ),
-        (
-            "tier-reasoning",
-            "推理模型 · Reasoning",
-            "claude-3-opus",
-            "推理槽位动态路由",
-        ),
-        (
-            "tier-fast",
-            "快速模型 · Fast",
-            "claude-3-5-haiku",
-            "辅助槽位动态路由",
-        ),
-    ];
-
-    for (tier_id, label, default_model, base_desc) in tier_specs {
-        if let Some(rule) = routes.iter().find(|r| r.id == tier_id && r.enabled) {
-            let target_prov = providers
-                .iter()
-                .find(|p| p.id == rule.target_provider_id)
-                .map(|p| p.name.as_str())
-                .unwrap_or("未指定服务商");
-            let target_m = rule.target_model.as_deref().unwrap_or(default_model);
-            let desc = format!("{} (当前: {} via {})", base_desc, target_m, target_prov);
-            options.push(json!({
-                "model": default_model,
-                "label": label,
-                "description": desc,
-                "behavesAs": default_model,
-            }));
-            seen_models.insert(default_model.to_string());
-        }
-    }
-
-    // 2. 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
+    // 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
     let model_provider_count = count_model_providers(providers);
 
-    // 3. 所有已启用服务商的所有可用模型
+    // 所有已启用服务商的所有可用模型
     for provider in providers.iter().filter(|p| p.enabled) {
         let provider_models = provider_declared_models(provider);
         let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
@@ -2023,46 +1977,16 @@ pub fn generate_claude_model_picker(
     })
 }
 
-/// Generate Pi models list and preferred model from configured providers and routes
+/// Generate Pi models list and preferred model from configured providers
 pub fn generate_pi_models_list(
     providers: &[Provider],
-    routes: &[RouteRule],
 ) -> (Vec<Value>, Option<String>) {
     let mut models = Vec::new();
     let mut seen_ids = HashSet::new();
 
-    // 1. Tier 槽位模型
-    let tier_specs = [
-        ("tier-main", "主力模型 (Main)", "claude-3-7-sonnet"),
-        ("tier-reasoning", "推理模型 (Reasoning)", "claude-3-opus"),
-        ("tier-fast", "快速模型 (Fast)", "claude-3-5-haiku"),
-    ];
-
-    for (tier_id, label, default_model) in tier_specs {
-        if let Some(rule) = routes.iter().find(|r| r.id == tier_id && r.enabled) {
-            let target_m = rule.target_model.as_deref().unwrap_or(default_model);
-            let id = default_model.to_string();
-            if !seen_ids.contains(&id) {
-                seen_ids.insert(id.clone());
-                let (levels, default_lvl) = resolve_model_reasoning_spec(target_m);
-                let is_reasoning = !levels.is_empty() && default_lvl != "none";
-                let (ctx, _) = resolve_model_context_window(target_m);
-                models.push(json!({
-                    "id": id,
-                    "name": format!("{} · Pivot 动态路由", label),
-                    "reasoning": is_reasoning,
-                    "input": resolve_model_input_modalities(target_m),
-                    "contextWindow": ctx,
-                    "maxTokens": 16384,
-                }));
-            }
-        }
-    }
-
-    // 2. 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
+    // 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
     let model_provider_count = count_model_providers(providers);
 
-    // 3. 所有已启用服务商的所有可用模型
     // 默认服务商的兜底模型先记下来，等清单生成后按同一套 id 规则回填，避免 defaultModel 指向不存在的 id
     let default_target = providers
         .iter()
@@ -2581,7 +2505,7 @@ followUpQueueMode = "queue"
             updated_at: None,
         };
 
-        let (models, preferred_model) = generate_pi_models_list(&[provider1], &[]);
+        let (models, preferred_model) = generate_pi_models_list(&[provider1]);
         assert!(!models.is_empty());
         // 模型不重名时用原名，且 defaultModel 必须指向清单里真实存在的 id
         assert_eq!(preferred_model, Some("claude-3-7-sonnet".to_string()));
@@ -2934,33 +2858,17 @@ followUpQueueMode = "queue"
             updated_at: None,
         };
 
-        let route1 = RouteRule {
-            id: "tier-main".to_string(),
-            pattern: ".*(sonnet|gpt-4o).*".to_string(),
-            target_provider_id: "p2".to_string(),
-            target_model: Some("gpt-6-astra".to_string()),
-            fallback_provider_ids: vec![],
-            enabled: true,
-            priority: 500,
-            description: Some("Agent Main Tier".to_string()),
-        };
-
-        let picker = generate_claude_model_picker(&[provider1, provider2], &[route1]);
+        let picker = generate_claude_model_picker(&[provider1, provider2]);
         assert_eq!(picker["replaceBuiltInOptions"], true);
         let options = picker["options"].as_array().expect("options must be array");
 
-        // Tier slot row
-        assert_eq!(options[0]["model"], "claude-3-7-sonnet");
-        assert_eq!(options[0]["behavesAs"], "claude-3-7-sonnet");
-        assert!(options[0]["description"].as_str().unwrap().contains("gpt-6-astra via Work"));
-
         // Models
-        assert_eq!(options[1]["model"], "deepseek-v4-pro");
-        assert_eq!(options[1]["behavesAs"], "claude-3-7-sonnet");
-        assert_eq!(options[2]["model"], "deepseek-reasoner");
-        assert_eq!(options[2]["behavesAs"], "claude-3-opus");
-        assert_eq!(options[3]["model"], "gpt-6-astra");
-        assert_eq!(options[3]["behavesAs"], "claude-3-7-sonnet");
+        assert_eq!(options[0]["model"], "deepseek-v4-pro");
+        assert_eq!(options[0]["behavesAs"], "claude-3-7-sonnet");
+        assert_eq!(options[1]["model"], "deepseek-reasoner");
+        assert_eq!(options[1]["behavesAs"], "claude-3-opus");
+        assert_eq!(options[2]["model"], "gpt-6-astra");
+        assert_eq!(options[2]["behavesAs"], "claude-3-7-sonnet");
     }
 }
 

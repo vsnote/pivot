@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use pivot_lib::db::{Database, Provider, RouteRule};
+use pivot_lib::db::{Database, Provider};
 use pivot_lib::gateway::router::RoutingEngine;
 use pivot_lib::gateway::server::{create_gateway_router, GatewayState, GatewayStatsInternal};
 
@@ -184,7 +184,7 @@ async fn test_e2e_gateway_routing_and_failover() {
         // The primary is asked for "gpt-4o"; this provider only knows deepseek-chat,
         // so it is reached through its own default model instead of a 400.
         default_model: Some("deepseek-chat".to_string()),
-        is_default: false,
+        is_default: true,
         enabled: true,
         priority: 5,
         weight: 1,
@@ -196,19 +196,6 @@ async fn test_e2e_gateway_routing_and_failover() {
 
     db.save_provider(&primary_provider).unwrap();
     db.save_provider(&fallback_provider).unwrap();
-
-    let route_rule = RouteRule {
-        id: "rule_claude_to_primary".to_string(),
-        pattern: "claude-*".to_string(),
-        target_provider_id: "provider_primary".to_string(),
-        target_model: Some("gpt-4o".to_string()),
-        fallback_provider_ids: vec!["provider_fallback".to_string()],
-        enabled: true,
-        priority: 100,
-        description: Some("Test fallback chain".to_string()),
-    };
-
-    db.save_routes(&[route_rule]).unwrap();
 
     // 3. Start Pivot Gateway on port 16899
     let router = Arc::new(RoutingEngine::new());

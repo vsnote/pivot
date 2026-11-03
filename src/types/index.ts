@@ -22,17 +22,6 @@ export interface Provider {
   updatedAt?: string;
 }
 
-export interface RouteRule {
-  id: string;
-  pattern: string; // e.g. "claude-*", "gpt-*", "deepseek/*", "*"
-  targetProviderId: string;
-  targetModel?: string; // If empty, forwards original model name
-  fallbackProviderIds: string[]; // List of fallback provider IDs
-  enabled: boolean;
-  priority: number; // Higher number = checked first
-  description?: string;
-}
-
 export type ClientType = 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi' | 'openai_api' | 'anthropic_api' | 'generic';
 
 export interface LogAttempt {
@@ -175,6 +164,6 @@ export interface Preset {
   authType?: string | null;
 }
 
-export type SettingsSection = 'clients' | 'routes' | 'gateway' | 'logs' | 'about';
+export type SettingsSection = 'clients' | 'gateway' | 'logs' | 'about';
 
-export type ActiveTab = 'dashboard' | 'providers' | 'clients' | 'routes' | 'interceptor' | 'logs' | 'settings';
+export type ActiveTab = 'dashboard' | 'providers' | 'clients' | 'interceptor' | 'logs' | 'settings';

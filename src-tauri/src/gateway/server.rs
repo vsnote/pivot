@@ -331,13 +331,12 @@ async fn handle_messages(
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
-    let routes = state.db.get_routes().unwrap_or_default();
 
     let is_stream = req.stream.unwrap_or(false);
     let route_match =
         match state
             .router
-            .resolve_route(&req.model, session_id.as_deref(), &providers, &routes)
+            .resolve_route(&req.model, session_id.as_deref(), &providers)
         {
             Ok(rm) => rm,
             Err(err) => {
@@ -1125,13 +1124,12 @@ async fn handle_chat_completions(
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
-    let routes = state.db.get_routes().unwrap_or_default();
 
     let is_stream = req.stream.unwrap_or(false);
     let route_match =
         match state
             .router
-            .resolve_route(&req.model, session_id.as_deref(), &providers, &routes)
+            .resolve_route(&req.model, session_id.as_deref(), &providers)
         {
             Ok(rm) => rm,
             Err(err) => {
@@ -1335,7 +1333,6 @@ async fn handle_responses(
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
-    let routes = state.db.get_routes().unwrap_or_default();
 
     let is_compaction = responses::is_compaction_request(&body);
     let custom_tools = responses::extract_custom_tool_names(&body);
@@ -1344,7 +1341,7 @@ async fn handle_responses(
 
     let route_match = match state
         .router
-        .resolve_route(&req.model, session_id.as_deref(), &providers, &routes)
+        .resolve_route(&req.model, session_id.as_deref(), &providers)
     {
         Ok(rm) => rm,
         Err(err) => {
@@ -2291,13 +2288,11 @@ async fn handle_gemini_generate_content(
     let client_type = detect_client_type(&headers, "gemini_cli");
     let session_id = extract_session_id(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
-    let routes = state.db.get_routes().unwrap_or_default();
 
     let route_match = match state.router.resolve_route(
         model,
         session_id.as_deref(),
         &providers,
-        &routes,
     ) {
         Ok(rm) => rm,
         Err(err) => {

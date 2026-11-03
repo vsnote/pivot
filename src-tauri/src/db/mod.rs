@@ -53,19 +53,6 @@ pub struct SubscriptionAccount {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RouteRule {
-    pub id: String,
-    pub pattern: String,
-    pub target_provider_id: String,
-    pub target_model: Option<String>,
-    pub fallback_provider_ids: Vec<String>,
-    pub enabled: bool,
-    pub priority: i32,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RequestLog {
     pub id: String,
     pub timestamp: String,
@@ -197,17 +184,6 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS routes (
-                id TEXT PRIMARY KEY,
-                pattern TEXT NOT NULL,
-                target_provider_id TEXT NOT NULL,
-                target_model TEXT,
-                fallback_provider_ids TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                priority INTEGER NOT NULL DEFAULT 0,
-                description TEXT
-            );
-
             CREATE TABLE IF NOT EXISTS request_logs (
                 id TEXT PRIMARY KEY,
                 timestamp TEXT NOT NULL,
@@ -336,48 +312,12 @@ impl Database {
                 ],
             )?;
             if changed > 0 {
-                Self::drop_routes_referencing(&tx, &preset.id)?;
                 removed.push(preset.id);
             }
         }
 
         tx.commit()?;
         Ok(removed)
-    }
-
-    /// Keeps the rules table honest when a provider disappears: rules targeting it
-    /// can never fire again, and rules listing it as a fallback drop that entry.
-    fn drop_routes_referencing(tx: &rusqlite::Transaction, id: &str) -> Result<(), rusqlite::Error> {
-        tx.execute(
-            "DELETE FROM routes WHERE target_provider_id = ?1",
-            params![id],
-        )?;
-
-        let affected: Vec<(String, String)> = {
-            let mut stmt = tx.prepare("SELECT id, fallback_provider_ids FROM routes")?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (route_id, fallbacks_json) in affected {
-            let mut fallbacks: Vec<String> =
-                serde_json::from_str(&fallbacks_json).unwrap_or_default();
-            if !fallbacks.iter().any(|fallback| fallback == id) {
-                continue;
-            }
-            fallbacks.retain(|fallback| fallback != id);
-            tx.execute(
-                "UPDATE routes SET fallback_provider_ids = ?1 WHERE id = ?2",
-                params![
-                    serde_json::to_string(&fallbacks).unwrap_or_else(|_| "[]".to_string()),
-                    route_id
-                ],
-            )?;
-        }
-        Ok(())
     }
 
     pub fn get_providers(&self) -> Result<Vec<Provider>, rusqlite::Error> {
@@ -512,18 +452,13 @@ impl Database {
         Ok(())
     }
 
-    /// Deletes a provider and everything that pointed at it.
+    /// Deletes a provider by id.
     pub fn delete_provider(&self, id: &str) -> Result<(), rusqlite::Error> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-
-        let removed = tx.execute("DELETE FROM providers WHERE id = ?1", params![id])?;
+        let conn = self.conn.lock().unwrap();
+        let removed = conn.execute("DELETE FROM providers WHERE id = ?1", params![id])?;
         if removed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Self::drop_routes_referencing(&tx, id)?;
-
-        tx.commit()?;
         Ok(())
     }
 
@@ -537,65 +472,6 @@ impl Database {
             "UPDATE providers SET latency_ms = ?1 WHERE id = ?2",
             params![latency_ms, id],
         )?;
-        Ok(())
-    }
-
-    pub fn get_routes(&self) -> Result<Vec<RouteRule>, rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, pattern, target_provider_id, target_model, fallback_provider_ids, enabled, priority, description
-             FROM routes ORDER BY priority DESC",
-        )?;
-
-        let rows = stmt.query_map([], |row| {
-            let fallbacks_str: String = row.get(4)?;
-            let fallback_provider_ids: Vec<String> =
-                serde_json::from_str(&fallbacks_str).unwrap_or_default();
-            let enabled_int: i32 = row.get(5)?;
-
-            Ok(RouteRule {
-                id: row.get(0)?,
-                pattern: row.get(1)?,
-                target_provider_id: row.get(2)?,
-                target_model: row.get(3)?,
-                fallback_provider_ids,
-                enabled: enabled_int == 1,
-                priority: row.get(6)?,
-                description: row.get(7)?,
-            })
-        })?;
-
-        let mut routes = Vec::new();
-        for r in rows {
-            routes.push(r?);
-        }
-        Ok(routes)
-    }
-
-    pub fn save_routes(&self, routes: &[RouteRule]) -> Result<(), rusqlite::Error> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM routes", [])?;
-
-        for route in routes {
-            let fallbacks_json = serde_json::to_string(&route.fallback_provider_ids)
-                .unwrap_or_else(|_| "[]".to_string());
-            tx.execute(
-                "INSERT INTO routes (id, pattern, target_provider_id, target_model, fallback_provider_ids, enabled, priority, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    route.id,
-                    route.pattern,
-                    route.target_provider_id,
-                    route.target_model,
-                    fallbacks_json,
-                    if route.enabled { 1 } else { 0 },
-                    route.priority,
-                    route.description,
-                ],
-            )?;
-        }
-        tx.commit()?;
         Ok(())
     }
 
@@ -882,7 +758,6 @@ mod provider_tests {
         let path = temp_db_path("empty");
         let db = Database::new(path.clone()).unwrap();
         assert!(db.get_providers().unwrap().is_empty());
-        assert!(db.get_routes().unwrap().is_empty());
         drop(db);
         let _ = std::fs::remove_file(path);
     }
@@ -981,42 +856,8 @@ mod provider_tests {
         // Client-supplied keys keep a keyless provider useful, so an enabled one stays.
         insert("prov_enabled", "OpenAI", "[]", &seeded_models, 1, &openai.base_url);
 
-        // Rules that point at the leftover entries, exactly like the seeded rules.
-        db.save_routes(&[
-            RouteRule {
-                id: "rule_to_openai".into(),
-                pattern: "gpt*".into(),
-                target_provider_id: "openai".into(),
-                target_model: None,
-                fallback_provider_ids: vec!["prov_with_key".into()],
-                enabled: true,
-                priority: 90,
-                description: None,
-            },
-            RouteRule {
-                id: "rule_with_fallback".into(),
-                pattern: "o[13]*".into(),
-                target_provider_id: "prov_enabled".into(),
-                target_model: None,
-                fallback_provider_ids: vec!["openai".into(), "prov_with_key".into()],
-                enabled: true,
-                priority: 80,
-                description: None,
-            },
-        ])
-        .unwrap();
-
         let removed = db.remove_untouched_seeded_providers().unwrap();
         assert_eq!(removed, vec!["openai".to_string()]);
-
-        let routes = db.get_routes().unwrap();
-        assert_eq!(routes.len(), 1, "a rule targeting a removed provider cannot fire");
-        assert_eq!(routes[0].id, "rule_with_fallback");
-        assert_eq!(
-            routes[0].fallback_provider_ids,
-            vec!["prov_with_key".to_string()],
-            "the removed provider must not stay in a fallback list"
-        );
 
         let remaining: Vec<String> = db.get_providers().unwrap().into_iter().map(|p| p.id).collect();
         assert_eq!(remaining.len(), 4);
@@ -1049,44 +890,14 @@ mod provider_tests {
     }
 
     #[test]
-    fn deleting_a_provider_drops_the_rules_that_referenced_it() {
+    fn deleting_a_provider_removes_it() {
         let path = temp_db_path("delete");
         let db = Database::new(path.clone()).unwrap();
         db.save_provider(&provider_fixture("p1", "Primary", None)).unwrap();
         db.save_provider(&provider_fixture("p2", "Secondary", None)).unwrap();
-        db.save_routes(&[
-            RouteRule {
-                id: "rule_to_p1".into(),
-                pattern: "claude-*".into(),
-                target_provider_id: "p1".into(),
-                target_model: None,
-                fallback_provider_ids: vec!["p2".into()],
-                enabled: true,
-                priority: 100,
-                description: None,
-            },
-            RouteRule {
-                id: "rule_to_p2".into(),
-                pattern: "gpt-*".into(),
-                target_provider_id: "p2".into(),
-                target_model: None,
-                fallback_provider_ids: vec!["p1".into()],
-                enabled: true,
-                priority: 90,
-                description: None,
-            },
-        ])
-        .unwrap();
 
         db.delete_provider("p1").unwrap();
 
-        let routes = db.get_routes().unwrap();
-        assert_eq!(routes.len(), 1, "rules targeting the removed provider cannot fire");
-        assert_eq!(routes[0].id, "rule_to_p2");
-        assert!(
-            routes[0].fallback_provider_ids.is_empty(),
-            "the removed provider must not stay in a fallback list"
-        );
         assert_eq!(db.get_providers().unwrap().len(), 1);
         // Deleting a provider that is already gone is reported instead of ignored.
         assert!(db.delete_provider("p1").is_err());
