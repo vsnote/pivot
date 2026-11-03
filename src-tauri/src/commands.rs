@@ -257,7 +257,6 @@ pub async fn test_provider_latency(state: State<'_, AppState>, id: String) -> Re
     )
     .await?;
 
-    let _ = state.db.update_provider_latency(&id, measured_latency);
     Ok(measured_latency)
 }
 

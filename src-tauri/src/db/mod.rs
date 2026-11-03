@@ -274,6 +274,12 @@ impl Database {
             [],
         );
 
+        // 清理因历史删除服务商未级联清理而遗留的孤立订阅账号
+        let _ = conn.execute(
+            "DELETE FROM subscription_accounts WHERE provider_id NOT IN (SELECT id FROM providers);",
+            [],
+        );
+
         Ok(())
     }
 
@@ -346,7 +352,7 @@ impl Database {
                 priority: row.get(7)?,
                 weight: row.get(8)?,
                 timeout_secs: row.get(9)?,
-                latency_ms: row.get(10)?,
+                latency_ms: None,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
                 preset_id: row.get(13)?,
@@ -459,6 +465,10 @@ impl Database {
         if removed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        let _ = conn.execute(
+            "DELETE FROM subscription_accounts WHERE provider_id = ?1",
+            params![id],
+        );
         Ok(())
     }
 
@@ -895,10 +905,26 @@ mod provider_tests {
         let db = Database::new(path.clone()).unwrap();
         db.save_provider(&provider_fixture("p1", "Primary", None)).unwrap();
         db.save_provider(&provider_fixture("p2", "Secondary", None)).unwrap();
+        db.save_subscription_account(&SubscriptionAccount {
+            id: "sub_1".to_string(),
+            provider_id: "p1".to_string(),
+            account_type: "antigravity".to_string(),
+            email: Some("test@example.com".to_string()),
+            access_token: "token".to_string(),
+            refresh_token: None,
+            expires_at: 9999999999,
+            cooldown_until: 0,
+            enabled: true,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }).unwrap();
+
+        assert_eq!(db.get_subscription_accounts("p1").unwrap().len(), 1);
 
         db.delete_provider("p1").unwrap();
 
         assert_eq!(db.get_providers().unwrap().len(), 1);
+        assert!(db.get_subscription_accounts("p1").unwrap().is_empty());
         // Deleting a provider that is already gone is reported instead of ignored.
         assert!(db.delete_provider("p1").is_err());
         drop(db);

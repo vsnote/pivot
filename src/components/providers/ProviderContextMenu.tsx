@@ -263,7 +263,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             <div className="font-semibold text-foreground truncate text-[12px] flex items-center gap-1.5">
               <span>{provider.name}</span>
               {isSubscription && (
-                <span className="text-[10px] px-1.5 py-0.2 rounded font-medium bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-500 border border-zinc-200/80 dark:border-zinc-800 leading-none">
+                <span className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none">
                   订阅
                 </span>
               )}

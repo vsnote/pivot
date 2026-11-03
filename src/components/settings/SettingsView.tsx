@@ -223,7 +223,7 @@ export const SettingsView: React.FC = () => {
           </span>
         </div>
 
-        <div className="p-4 flex items-center justify-between gap-4">
+        <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">界面外观</div>
             <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
@@ -231,10 +231,10 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
 
-          <Tabs value={theme} onValueChange={(val) => setTheme(val as 'light' | 'dark' | 'system')}>
+          <Tabs value={theme} onValueChange={(val) => setTheme(val as 'light' | 'dark' | 'system')} className="shrink-0 self-start sm:self-auto">
             <TabsList aria-label="主题偏好切换">
               {themeOptions.map((opt) => (
-                <TabsTrigger key={opt.id} value={opt.id} className="w-[76px]">
+                <TabsTrigger key={opt.id} value={opt.id} className="px-3">
                   {opt.label}
                 </TabsTrigger>
               ))}
@@ -302,9 +302,9 @@ export const SettingsView: React.FC = () => {
         </div>
 
         <div className="p-4 space-y-3">
-          <div className="flex items-center justify-between gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+              <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5 flex-wrap">
                 <span>自动检查与升级</span>
                 {updateState === 'available' && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
@@ -324,7 +324,7 @@ export const SettingsView: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0 self-start sm:self-auto">
               {updateState === 'ready' ? (
                 <Button
                   type="button"

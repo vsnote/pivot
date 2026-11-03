@@ -71,8 +71,21 @@ export function ProviderEditor() {
   const [autoDefault] = useState(
     () => !editingProvider && !providers.some((provider) => provider.isDefault && provider.enabled),
   );
-  const [initial] = useState(() => createProviderDraft(editingProvider, presets, autoDefault));
+  const [currentEditingProvider, setCurrentEditingProvider] = useState<Provider | null>(editingProvider);
+  const [initial, setInitial] = useState(() => createProviderDraft(editingProvider, presets, autoDefault));
   const [draft, setDraft] = useState(initial);
+
+  const findExistingProviderForPreset = (preset?: Preset) => {
+    if (!preset) return undefined;
+    const isSub = preset.authType === 'subscription_pool' || preset.category === '官方订阅';
+    if (!isSub) return undefined;
+    return providers.find(
+      (prov) =>
+        prov.presetId === preset.id ||
+        (prov.authType === 'subscription_pool' &&
+          (prov.presetId === preset.id || prov.id === preset.id || prov.name.toLowerCase() === preset.name.toLowerCase())),
+    );
+  };
   const currentPreset = presets.find((p) => p.id === initial.presetId);
   // 模型池：上游返回 ∪ 预设推荐 ∪ 本地已知候选池。
   // 保持模型在池中的固有位置，不因模型被选中而置顶跳位
@@ -314,6 +327,8 @@ export function ProviderEditor() {
       enabled: true,
     });
     await saveProvider(providerToSave);
+    setCurrentEditingProvider(providerToSave);
+    setInitial(providerToSave);
     setNotice(successNotice);
   };
 
@@ -365,6 +380,18 @@ export function ProviderEditor() {
   };
 
   const handleFinishSubscription = async () => {
+    if (isSubscriptionPool && draft.presetId) {
+      const duplicate = providers.find(
+        (prov) =>
+          prov.id !== draft.id &&
+          (prov.presetId === draft.presetId ||
+            (prov.authType === 'subscription_pool' && prov.presetId === draft.presetId)),
+      );
+      if (duplicate) {
+        setErrors({ save: `已存在同类型的官方订阅服务商（${duplicate.name}），无需重复创建。` });
+        return;
+      }
+    }
     try {
       setSaving(true);
       await saveProvider(prepareProvider(draft));
@@ -407,7 +434,7 @@ export function ProviderEditor() {
   const hasUserChanges = hasActualUserChanges(
     draft,
     initial,
-    editingProvider,
+    currentEditingProvider,
     preset,
     manualModel,
   );
@@ -432,7 +459,7 @@ export function ProviderEditor() {
       return;
     }
     // 2. 若是新增服务商且已进入配置页：返回应该是重选预设
-    if (!editingProvider) {
+    if (!currentEditingProvider) {
       if (!hasUserChanges) {
         setChoosing(true);
         return;
@@ -519,6 +546,35 @@ export function ProviderEditor() {
       setConfirmation({ kind: 'preset', preset: next });
       return;
     }
+
+    const existingSub = next ? findExistingProviderForPreset(next) : undefined;
+    if (existingSub) {
+      setConfirmation(null);
+      invalidateModels();
+      const baseline = (next?.defaultModels && next.defaultModels.length > 0)
+        ? next.defaultModels
+        : [];
+      let cached: string[] = [];
+      try {
+        const raw = localStorage.getItem(`pivot_provider_pool_${existingSub.id}`);
+        if (raw) cached = JSON.parse(raw);
+      } catch {}
+      setPool(uniqueValues([...baseline, ...cached, ...(existingSub.models || [])]));
+      setCurrentEditingProvider(existingSub);
+      const nextDraft = createProviderDraft(existingSub, presets);
+      setInitial(nextDraft);
+      setDraft(nextDraft);
+      setShowKeys(false);
+      setShowAuthHelp(false);
+      setManualModel('');
+      setModelSearch('');
+      setErrors({});
+      setNotice('');
+      setChoosing(false);
+      contentRef.current?.scrollTo(0, 0);
+      return;
+    }
+
     setConfirmation(null);
     invalidateModels();
     setPool([]);
@@ -645,6 +701,19 @@ export function ProviderEditor() {
         drawerRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(),
       );
       return;
+    }
+
+    if (isSubscriptionPool && draft.presetId) {
+      const duplicate = providers.find(
+        (prov) =>
+          prov.id !== draft.id &&
+          (prov.presetId === draft.presetId ||
+            (prov.authType === 'subscription_pool' && prov.presetId === draft.presetId)),
+      );
+      if (duplicate) {
+        setErrors({ save: `已存在同类型的官方订阅服务商（${duplicate.name}），无需重复创建。` });
+        return;
+      }
     }
 
     setSaving(true);
@@ -786,10 +855,10 @@ export function ProviderEditor() {
               <span>服务商</span>
             </button>
             <span className="text-zinc-300 dark:text-zinc-700 select-none">/</span>
-            <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[260px]">
+            <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[160px] sm:max-w-[260px]">
               {choosing
                 ? '选择预设'
-                : draft.name.trim() || (editingProvider ? '未命名服务商' : '新增服务商')}
+                : draft.name.trim() || (currentEditingProvider ? '未命名服务商' : '新增服务商')}
             </span>
           </nav>
         )}
@@ -799,8 +868,8 @@ export function ProviderEditor() {
       <div
         ref={drawerRef}
         role="region"
-        aria-label={editingProvider ? '编辑服务商' : '添加服务商'}
-        className="p-5 rounded-lg border border-border bg-card text-card-foreground shadow-2xs space-y-4"
+        aria-label={currentEditingProvider ? '编辑服务商' : '添加服务商'}
+        className="p-4 rounded-lg border border-border bg-card text-card-foreground shadow-2xs space-y-4"
       >
         {/* 表单内容 */}
         <div ref={contentRef} className="space-y-6">
@@ -861,6 +930,7 @@ export function ProviderEditor() {
                   {matchingPresets.map((p) => {
                     const cleanName = p.name.replace(/[\(（][^\)）]+[\)）]/g, '').trim();
                     const isSub = p.authType === 'subscription_pool' || p.category === '官方订阅';
+                    const existingSub = isSub ? findExistingProviderForPreset(p) : undefined;
                     return (
                       <button
                         key={p.id}
@@ -880,11 +950,18 @@ export function ProviderEditor() {
                             {cleanName}
                           </span>
                         </div>
-                        {isSub && (
+                        {existingSub ? (
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0.5 font-normal shrink-0 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20"
+                          >
+                            已添加
+                          </Badge>
+                        ) : isSub ? (
                           <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 font-normal shrink-0">
                             官方订阅
                           </Badge>
-                        )}
+                        ) : null}
                       </button>
                     );
                   })}
@@ -1853,9 +1930,9 @@ export function ProviderEditor() {
               )}
 
               {/* 表单自然底部操作区：纯正 shadcn/ui 按钮层级 */}
-              <div className="flex items-center justify-between pt-5 border-t border-border">
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between gap-3 pt-4 border-t border-border">
                 <div>
-                  {editingProvider && (
+                  {currentEditingProvider && (
                     <Button
                       type="button"
                       variant="destructive-ghost"
@@ -1868,7 +1945,7 @@ export function ProviderEditor() {
                   )}
                 </div>
 
-                <div className="flex items-center gap-2.5">
+                <div className="flex flex-wrap items-center justify-end gap-2.5">
                   <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
                     {fetching || syncingModels
                       ? '正在同步上游模型…'
@@ -1931,7 +2008,7 @@ export function ProviderEditor() {
                         ) : (
                           <Check className="w-3.5 h-3.5" />
                         )}
-                        <span>{saving ? '保存中…' : editingProvider ? '保存修改' : '保存服务商'}</span>
+                        <span>{saving ? '保存中…' : currentEditingProvider ? '保存修改' : '保存服务商'}</span>
                       </Button>
                     </>
                   )}
@@ -1942,10 +2019,10 @@ export function ProviderEditor() {
         </div>
       </div>
 
-      {editingProvider && (
+      {currentEditingProvider && (
         <ConfirmDialog
           open={confirmingDelete}
-          title={"删除服务商“" + (draft.name || editingProvider.name) + "”？"}
+          title={"删除服务商“" + (draft.name || currentEditingProvider.name) + "”？"}
           details={[
             '删除后需重新配置。已有请求日志不受影响。',
             ...(draft.isDefault ? ['该服务商当前是默认服务商，删除后需要重新指定。'] : []),
@@ -1955,7 +2032,7 @@ export function ProviderEditor() {
           onConfirm={async () => {
             setDeleting(true);
             try {
-              await deleteProvider(editingProvider.id);
+              await deleteProvider(currentEditingProvider.id);
               closeProviderEditor();
             } catch {
               setDeleting(false);

@@ -15,9 +15,9 @@
       {
         "label": "main",
         "title": "Pivot",
-        "width": 680,
+        "width": 415,
         "height": 620,
-        "minWidth": 540,
+        "minWidth": 415,
         "minHeight": 460,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,

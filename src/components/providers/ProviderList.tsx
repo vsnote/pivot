@@ -193,7 +193,7 @@ function ProviderCard({
           {isSubscription && (
             <span
               title="官方账号订阅池（多账号轮询与配额调度）"
-              className="shrink-0 text-[10px] px-1.5 py-0.2 rounded font-medium bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-800 leading-none"
+              className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none"
             >
               订阅
             </span>
@@ -229,8 +229,8 @@ function ProviderCard({
           </button>
         )}
 
-        {/* 延迟测试药丸（测速按钮与结果合一，紧贴 Switch 左侧） */}
-        {testing ? (
+        {/* 延迟测试药丸（仅在服务商启用时展示，停用时彻底收起不占位） */}
+        {!provider.enabled ? null : testing ? (
           <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-zinc-400 dark:text-zinc-500 bg-muted/50 select-none">
             <LoaderCircle className="w-3 h-3 animate-spin text-zinc-400" />
             <span>测速中</span>
@@ -239,9 +239,8 @@ function ProviderCard({
           <button
             type="button"
             onClick={handleTestLatency}
-            disabled={!provider.enabled}
-            title={provider.enabled ? `端点响应 ${provider.latencyMs}ms · 点击重新测速` : '服务商已停用'}
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-40 select-none ${
+            title={`端点响应 ${provider.latencyMs}ms · 点击重新测速`}
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer select-none ${
               provider.latencyMs < 300
                 ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/[0.08] hover:bg-emerald-500/[0.15]'
                 : provider.latencyMs < 1000
@@ -264,9 +263,8 @@ function ProviderCard({
           <button
             type="button"
             onClick={handleTestLatency}
-            disabled={!provider.enabled}
-            title={provider.enabled ? '端点连接失败 · 点击重新测速' : '服务商已停用'}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-rose-600 dark:text-rose-400 bg-rose-500/[0.08] hover:bg-rose-500/[0.15] transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-40 select-none"
+            title="端点连接失败 · 点击重新测速"
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-rose-600 dark:text-rose-400 bg-rose-500/[0.08] hover:bg-rose-500/[0.15] transition-colors cursor-pointer select-none"
           >
             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
             <span>无法连接</span>
@@ -276,9 +274,8 @@ function ProviderCard({
           <button
             type="button"
             onClick={handleTestLatency}
-            disabled={!provider.enabled}
-            title={provider.enabled ? '测试端点延迟' : '服务商已停用'}
-            className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 disabled:opacity-30 disabled:pointer-events-none transition-all cursor-pointer"
+            title="测试端点延迟"
+            className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
           >
             <Zap className="w-3.5 h-3.5" />
           </button>
@@ -576,6 +573,8 @@ export function ProviderList() {
     openProviderEditor,
     reorderProviders,
     deleteProvider,
+    activeTab,
+    clearProviderLatencies,
   } = useAppStore(
     useShallow((state) => ({
       providers: state.providers,
@@ -584,8 +583,23 @@ export function ProviderList() {
       openProviderEditor: state.openProviderEditor,
       reorderProviders: state.reorderProviders,
       deleteProvider: state.deleteProvider,
+      activeTab: state.activeTab,
+      clearProviderLatencies: state.clearProviderLatencies,
     })),
   );
+
+  // 离开列表页（切换 Tab 或组件卸载）时清空临时测速结果，离开后需重新测速
+  useEffect(() => {
+    if (activeTab !== 'providers') {
+      clearProviderLatencies();
+    }
+  }, [activeTab, clearProviderLatencies]);
+
+  useEffect(() => {
+    return () => {
+      clearProviderLatencies();
+    };
+  }, [clearProviderLatencies]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);

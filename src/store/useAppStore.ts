@@ -48,6 +48,7 @@ interface AppStore {
   reorderProviders: (orderedIds: string[]) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   testProviderLatency: (id: string) => Promise<number>;
+  clearProviderLatencies: () => void;
   toggleProvider: (id: string, enabled: boolean) => Promise<void>;
   explainRoute: (model: string) => Promise<RouteExplanation>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
@@ -102,6 +103,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const isTopLevel =
       tab === 'providers' || tab === 'clients' || tab === 'logs';
     const activeTab = isTopLevel ? tab : 'settings';
+    if (get().activeTab !== activeTab) {
+      get().clearProviderLatencies();
+    }
     set({ activeTab, settingsSection: section });
     if (isNativeRuntime()) {
       invoke('sync_native_tab', {
@@ -111,6 +115,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   settingsSection: 'about',
   setSettingsSection: (section) => {
+    if (get().activeTab !== 'settings') {
+      get().clearProviderLatencies();
+    }
     set({ activeTab: 'settings', settingsSection: section });
     if (isNativeRuntime()) {
       invoke('sync_native_tab', { tab: section })
@@ -150,6 +157,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   isProviderEditorOpen: false,
   editingProvider: null,
   openProviderEditor: (p = null) => {
+    get().clearProviderLatencies();
     if (get().isProviderEditorOpen) {
       get().setActiveTab('providers');
       return;
@@ -160,7 +168,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     get().setActiveTab('providers');
     set({ isProviderEditorOpen: true, editingProvider: p });
   },
-  closeProviderEditor: () => set({ isProviderEditorOpen: false, editingProvider: null }),
+  closeProviderEditor: () => {
+    get().clearProviderLatencies();
+    set({ isProviderEditorOpen: false, editingProvider: null });
+  },
 
   fetchInitialData: async () => {
     set({ isLoading: true, error: null });
@@ -175,7 +186,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
       set({
         stats,
-        providers,
+        providers: providers.map((p) => ({ ...p, latencyMs: undefined })),
         interceptors,
         presets,
         logs,
@@ -283,6 +294,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }));
       throw err;
     }
+  },
+
+  clearProviderLatencies: () => {
+    set((state) => ({
+      providers: state.providers.map((p) =>
+        p.latencyMs !== undefined ? { ...p, latencyMs: undefined } : p,
+      ),
+    }));
   },
 
   toggleProvider: async (id: string, enabled: boolean) => {

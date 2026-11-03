@@ -564,9 +564,9 @@ export const RequestLogs: React.FC = () => {
             )}
           </div>
 
-          {/* 紧凑工具栏：自适应 */}
-          <div className="flex items-center gap-2 px-3 py-2 bg-card border-b border-border">
-            <div className="relative flex-1 min-w-[120px]">
+          {/* 紧凑工具栏：自适应窄屏与宽屏 */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 px-3 py-2 bg-card border-b border-border">
+            <div className="relative flex-1 min-w-0">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
               <Input
                 type="text"
@@ -577,33 +577,35 @@ export const RequestLogs: React.FC = () => {
               />
             </div>
 
-            <div className={activeLog ? 'w-24 shrink-0' : 'w-32 shrink-0'}>
-              <Select
-                value={selectedClient}
-                onChange={(e) => setSelectedClient(e.target.value)}
-                className="h-7 text-[11px] py-0"
-              >
-                <option value="all">全部客户端</option>
-                <option value="claude_code">Claude Code</option>
-                <option value="codex_cli">Codex CLI</option>
-                <option value="gemini_cli">Gemini CLI</option>
-                <option value="pi">Pi Agent</option>
-                <option value="openai_api">OpenAI API</option>
-                <option value="anthropic_api">Anthropic API</option>
-                <option value="generic">通用客户端</option>
-              </Select>
-            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <div className={activeLog ? 'w-24 shrink-0' : 'flex-1 sm:w-28 sm:flex-none'}>
+                <Select
+                  value={selectedClient}
+                  onChange={(e) => setSelectedClient(e.target.value)}
+                  className="h-7 text-[11px] py-0"
+                >
+                  <option value="all">全部客户端</option>
+                  <option value="claude_code">Claude Code</option>
+                  <option value="codex_cli">Codex CLI</option>
+                  <option value="gemini_cli">Gemini CLI</option>
+                  <option value="pi">Pi Agent</option>
+                  <option value="openai_api">OpenAI API</option>
+                  <option value="anthropic_api">Anthropic API</option>
+                  <option value="generic">通用客户端</option>
+                </Select>
+              </div>
 
-            <div className={activeLog ? 'w-24 shrink-0' : 'w-28 shrink-0'}>
-              <Select
-                value={selectedStatus}
-                onChange={(e) => setSelectedStatus(e.target.value)}
-                className="h-7 text-[11px] py-0"
-              >
-                <option value="all">全部状态</option>
-                <option value="success">成功 (2xx)</option>
-                <option value="error">错误 (4xx/5xx)</option>
-              </Select>
+              <div className={activeLog ? 'w-24 shrink-0' : 'flex-1 sm:w-24 sm:flex-none'}>
+                <Select
+                  value={selectedStatus}
+                  onChange={(e) => setSelectedStatus(e.target.value)}
+                  className="h-7 text-[11px] py-0"
+                >
+                  <option value="all">全部状态</option>
+                  <option value="success">成功 (2xx)</option>
+                  <option value="error">错误 (4xx/5xx)</option>
+                </Select>
+              </div>
             </div>
           </div>
 

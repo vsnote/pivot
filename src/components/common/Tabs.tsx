@@ -62,7 +62,7 @@ export const TabsTrigger = React.forwardRef<
         'disabled:pointer-events-none disabled:opacity-50',
         isGhost
           ? // 顶栏幽灵风格：带透明占位边框，激活时带微边框浮动
-            'h-7 rounded-md px-3 font-medium border border-transparent hover:text-foreground hover:bg-muted/60 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:border-border/80 data-[state=active]:shadow-2xs font-semibold'
+            'h-7 rounded-md px-2.5 font-medium border border-transparent hover:text-foreground hover:bg-muted/60 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:border-border/80 data-[state=active]:shadow-2xs font-semibold'
           : // 槽内分段控件风格：原生微浮雕分段卡片，浅色白底、深色深灰、带微弱外边框与投影浮起
             'h-6.5 rounded-[5px] px-3 font-medium text-zinc-600 dark:text-zinc-400 hover:text-foreground data-[state=active]:bg-white dark:data-[state=active]:bg-zinc-700 data-[state=active]:text-zinc-900 dark:data-[state=active]:text-zinc-100 data-[state=active]:border data-[state=active]:border-black/5 dark:data-[state=active]:border-white/10 data-[state=active]:shadow-xs font-semibold',
         className
