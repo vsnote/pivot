@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
@@ -489,7 +489,7 @@ function IngressCard() {
                                     </>
                                   )}
                                   {groupedModels.map((group, groupIdx) => (
-                                    <div key={group.id}>
+                                    <Fragment key={group.id}>
                                       {groupIdx > 0 && <SelectSeparator />}
                                       <SelectGroup>
                                         <SelectLabel className="font-sans font-medium text-[10px] text-muted-foreground px-2 py-1">
@@ -501,7 +501,7 @@ function IngressCard() {
                                           </SelectItem>
                                         ))}
                                       </SelectGroup>
-                                    </div>
+                                    </Fragment>
                                   ))}
                                 </SelectContent>
                               </Select>
