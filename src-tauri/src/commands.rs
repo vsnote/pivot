@@ -85,6 +85,7 @@ pub fn get_model_capabilities(model_names: Vec<String>) -> Value {
     let mut out = serde_json::Map::new();
     for name in model_names {
         let catalog_model = crate::model_catalog::lookup(&name, None);
+        let display_name = crate::model_catalog::resolve_model_display_name(&name, None);
         let lower = name.to_lowercase();
         let n = lower.split('/').last().unwrap_or(&lower);
         let (inferred_reasoning, inferred_vision, inferred_context) = infer_model_heuristics(&name, n);
@@ -117,6 +118,7 @@ pub fn get_model_capabilities(model_names: Vec<String>) -> Value {
         out.insert(
             name,
             json!({
+                "displayName": display_name,
                 "modalities": modalities,
                 "contextWindow": context_window,
                 "maxOutput": max_output,
@@ -308,6 +310,16 @@ pub async fn toggle_interceptor(
 ) -> Result<InterceptorInfo, String> {
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
     mgr.toggle_tool(&id, enable)
+}
+
+#[tauri::command]
+pub async fn set_interceptor_model(
+    state: State<'_, AppState>,
+    id: String,
+    model: Option<String>,
+) -> Result<InterceptorInfo, String> {
+    let mgr = InterceptorManager::new(state.db.clone(), state.port);
+    mgr.set_tool_model(&id, model.as_deref())
 }
 
 #[tauri::command]

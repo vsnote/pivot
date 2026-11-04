@@ -161,6 +161,13 @@ fn parse_page(protocol: &str, body: &Value) -> Result<(Vec<String>, Option<Strin
         };
         let cleaned = clean_model_id(id);
         if !cleaned.trim().is_empty() {
+            let upstream_name = item.get("name")
+                .or_else(|| item.get("displayName"))
+                .or_else(|| item.get("display_name"))
+                .and_then(|v| v.as_str());
+            if let Some(n) = upstream_name {
+                crate::model_catalog::register_dynamic_model(&cleaned, n, None);
+            }
             models.push(cleaned);
         }
     }

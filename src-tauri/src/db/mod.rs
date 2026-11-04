@@ -227,6 +227,7 @@ impl Database {
                 is_intercepted INTEGER NOT NULL DEFAULT 0,
                 backup_config TEXT,
                 original_endpoint TEXT,
+                model TEXT,
                 updated_at TEXT NOT NULL
             );",
         )?;
@@ -256,6 +257,9 @@ impl Database {
         }
         if !has_column(&conn, "request_logs", "attempts")? {
             conn.execute("ALTER TABLE request_logs ADD COLUMN attempts TEXT", [])?;
+        }
+        if !has_column(&conn, "interceptor_state", "model")? {
+            conn.execute("ALTER TABLE interceptor_state ADD COLUMN model TEXT", [])?;
         }
 
         // 修复之前因流式响应直通未捕获导致 token 全为 0 的历史成功请求
@@ -637,6 +641,31 @@ impl Database {
             let backup: Option<String> = row.get(1)?;
             let endpoint: Option<String> = row.get(2)?;
             Ok(Some((intercepted_int == 1, backup, endpoint)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save_interceptor_model(&self, client_id: &str, model: Option<&str>) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO interceptor_state (client_id, is_intercepted, model, updated_at)
+             VALUES (?1, 0, ?2, ?3)
+             ON CONFLICT(client_id) DO UPDATE SET
+                model = excluded.model,
+                updated_at = excluded.updated_at",
+            params![client_id, model, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_interceptor_model(&self, client_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT model FROM interceptor_state WHERE client_id = ?1")?;
+        let mut rows = stmt.query(params![client_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
         } else {
             Ok(None)
         }

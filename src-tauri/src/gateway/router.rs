@@ -286,6 +286,27 @@ fn plan_route_inner(
         "没有可归一化匹配的模型".to_string()
     });
 
+    // 2.8. Provider family heuristic match (e.g. deepseek-* -> deepseek provider)
+    let lower_incoming = incoming_model.to_lowercase();
+    if lower_incoming.starts_with("deepseek-") || lower_incoming.starts_with("deepseek/") {
+        if let Some(ds_provider) = active_providers.iter().find(|p| {
+            p.name.to_lowercase().contains("deepseek") || p.preset_id.as_deref() == Some("deepseek")
+        }) {
+            let target = ds_provider
+                .default_model
+                .as_deref()
+                .or_else(|| ds_provider.models.first().map(String::as_str))
+                .unwrap_or(incoming_model);
+            note(trace, "family", true, || {
+                format!("厂商家族推断：DeepSeek 模型由 {} 承接 (目标 {})", ds_provider.name, target)
+            });
+            return Ok(RoutePlan {
+                primary: planned(ds_provider, target),
+                fallbacks: automatic_fallbacks(&active_providers, &ds_provider.id, target),
+            });
+        }
+    }
+
     // 3. Unknown model name: hand it to the default provider / model.
     let Some(default_provider) = active_providers
         .iter()
@@ -383,6 +404,14 @@ pub fn normalize_model_candidates(model: &str) -> Vec<String> {
         "opus" => {
             candidates.push("claude-3-opus".to_string());
         }
+        "deepseek-chat" | "deepseek-v3" | "deepseek" => {
+            candidates.push("deepseek-flash".to_string());
+            candidates.push("deepseek-v4-pro".to_string());
+        }
+        "deepseek-reasoner" | "deepseek-r1" => {
+            candidates.push("deepseek-v4-pro".to_string());
+            candidates.push("deepseek-flash".to_string());
+        }
         _ => {}
     }
 
@@ -429,26 +458,21 @@ fn candidate_model(provider: &Provider, model: &str) -> Option<String> {
 }
 
 /// Automatic fallback queue for `model`: providers that declare the very same
-/// model name first (highest priority first), then providers that rewrite the
-/// request to their own default model, and nothing else. Passing one model name
-/// to every candidate is what made cross-provider fallbacks fail with a 400.
+/// model name (highest priority first). Cross-model rewriting is forbidden
+/// to ensure predictability and compatibility.
 fn automatic_fallbacks(
     active_providers: &[&Provider],
     excluded_id: &str,
     model: &str,
 ) -> Vec<PlannedCandidate> {
     let mut same_name = Vec::new();
-    let mut rewritten = Vec::new();
 
     for provider in active_providers.iter().filter(|p| p.id != excluded_id) {
         if let Some(matched) = find_declared_or_normalized_model(provider, model) {
             same_name.push(planned(provider, &matched));
-        } else if let Some(default_model) = declared_default_model(provider) {
-            rewritten.push(planned(provider, &default_model));
         }
     }
 
-    same_name.extend(rewritten);
     same_name
 }
 
@@ -536,7 +560,7 @@ mod tests {
     fn prefix_routing_pins_the_named_provider_and_keeps_its_model() {
         let providers = vec![
             provider("anthropic", &["claude-3-7-sonnet"], 10),
-            with_default_model(provider("aggregator", &["gemini-3.8-flash-high"], 5), "gemini-3.8-flash-high"),
+            provider("aggregator", &["claude-3-7-sonnet"], 5),
         ];
 
         let plan = plan_route("anthropic/claude-3-7-sonnet", &providers).unwrap();
@@ -545,7 +569,7 @@ mod tests {
         assert_eq!(plan.primary.model, "claude-3-7-sonnet");
         assert_eq!(plan.fallbacks.len(), 1);
         assert_eq!(plan.fallbacks[0].provider_id, "aggregator");
-        assert_eq!(plan.fallbacks[0].model, "gemini-3.8-flash-high");
+        assert_eq!(plan.fallbacks[0].model, "claude-3-7-sonnet");
     }
 
     #[test]
@@ -582,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn fallbacks_prefer_the_same_model_name_then_providers_with_their_own_default() {
+    fn fallbacks_only_route_to_providers_with_the_same_model() {
         let providers = vec![
             with_default_model(as_default(provider("primary", &["claude-3-7-sonnet"], 30)), "gemini-3.8-flash-high"),
             with_default_model(provider("renaming", &["claude-4"], 20), "deepseek-v4-pro"),
@@ -602,7 +626,6 @@ mod tests {
             chain,
             vec![
                 ("same-name", "claude-3-7-sonnet"),
-                ("renaming", "deepseek-v4-pro"),
             ]
         );
     }
@@ -642,7 +665,7 @@ mod tests {
         let engine = RoutingEngine::new();
         let providers = vec![
             provider("anthropic", &["claude-3-7-sonnet"], 20),
-            with_default_model(provider("antigravity", &["gemini-3.8-flash-high"], 10), "gemini-3.8-flash-high"),
+            provider("antigravity", &["claude-3-7-sonnet"], 10),
         ];
 
         let matched = engine
@@ -654,7 +677,7 @@ mod tests {
         assert_eq!(matched.primary.api_key.as_deref(), Some("sk-anthropic"));
         assert_eq!(matched.fallbacks.len(), 1);
         assert_eq!(matched.fallbacks[0].provider.id, "antigravity");
-        assert_eq!(matched.fallbacks[0].target_model, "gemini-3.8-flash-high");
+        assert_eq!(matched.fallbacks[0].target_model, "claude-3-7-sonnet");
 
         let key1 = engine.select_api_key(&providers[0], Some("user_session_abc")).unwrap();
         let key2 = engine.select_api_key(&providers[0], Some("user_session_abc")).unwrap();

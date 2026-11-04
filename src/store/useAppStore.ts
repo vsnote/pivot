@@ -52,6 +52,7 @@ interface AppStore {
   toggleProvider: (id: string, enabled: boolean) => Promise<void>;
   explainRoute: (model: string) => Promise<RouteExplanation>;
   toggleInterceptor: (id: string, enable: boolean) => Promise<void>;
+  setInterceptorModel: (id: string, model: string | null) => Promise<void>;
   importThirdPartyProvider: (id: string) => Promise<void>;
   clearLogs: () => Promise<void>;
   initEventListeners: () => Promise<() => void>;
@@ -325,6 +326,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
   toggleInterceptor: async (id: string, enable: boolean) => {
     try {
       const status = await invoke<InterceptorStatus>('toggle_interceptor', { id, enable });
+      set((state) => ({
+        interceptors: state.interceptors.map((i) => (i.id === id ? status : i)),
+      }));
+    } catch (err: unknown) {
+      set({ error: String(err) });
+      throw err;
+    }
+  },
+
+  setInterceptorModel: async (id: string, model: string | null) => {
+    try {
+      const status = await invoke<InterceptorStatus>('set_interceptor_model', { id, model });
       set((state) => ({
         interceptors: state.interceptors.map((i) => (i.id === id ? status : i)),
       }));

@@ -76,9 +76,8 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
   onEdit,
   onDelete,
 }) => {
-  const { saveProvider, testProviderLatency, currentProvider } = useAppStore(
+  const { testProviderLatency, currentProvider } = useAppStore(
     useShallow((state) => ({
-      saveProvider: state.saveProvider,
       testProviderLatency: state.testProviderLatency,
       currentProvider: state.providers.find((p) => p.id === initialProvider.id),
     })),
@@ -90,7 +89,27 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
   const [coords, setCoords] = useState({ x, y });
   const [modelSearch, setModelSearch] = useState('');
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedModel, setCopiedModel] = useState<string | null>(null);
   const [testingLatency, setTestingLatency] = useState(false);
+  const [capabilities, setCapabilities] = useState<Record<string, { displayName?: string }>>({});
+
+  // 加载模型显示名称
+  useEffect(() => {
+    if (provider.models.length === 0) return;
+    let cancelled = false;
+    invoke<Record<string, { displayName?: string }>>('get_model_capabilities', {
+      modelNames: provider.models,
+    })
+      .then((caps) => {
+        if (!cancelled) setCapabilities(caps);
+      })
+      .catch(() => {
+        if (!cancelled) setCapabilities({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider.models]);
 
   // 订阅账号与配额状态
   const isSubscription =
@@ -193,23 +212,6 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
     }
   }, [provider.id, isSubscription]);
 
-  // 切换服务商默认承接模型（全局唯一默认模型）
-  const handleToggleDefaultModel = async (model: string) => {
-    const isCurrentlyDefault = provider.defaultModel === model;
-    if (isCurrentlyDefault) {
-      await saveProvider({
-        ...provider,
-        defaultModel: null,
-      });
-    } else {
-      await saveProvider({
-        ...provider,
-        defaultModel: model,
-        isDefault: true,
-      });
-    }
-  };
-
   // 复制 Base URL
   const handleCopyBaseUrl = () => {
     if (!provider.baseUrl) return;
@@ -233,11 +235,26 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
     }
   };
 
+  // 复制模型 ID（用于 API 请求配置）
+  const handleCopyModel = (e: React.MouseEvent, modelId: string) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(modelId);
+    setCopiedModel(modelId);
+    setTimeout(() => {
+      setCopiedModel((prev) => (prev === modelId ? null : prev));
+    }, 1200);
+  };
+
   const filteredModels = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
     if (!q) return provider.models;
-    return provider.models.filter((m) => m.toLowerCase().includes(q));
-  }, [provider.models, modelSearch]);
+    return provider.models.filter((m) => {
+      const matchId = m.toLowerCase().includes(q);
+      const displayName = capabilities[m]?.displayName;
+      const matchName = displayName ? displayName.toLowerCase().includes(q) : false;
+      return matchId || matchName;
+    });
+  }, [provider.models, modelSearch, capabilities]);
 
   // 当前选中的订阅账号与对应配额
   const activeAccount = useMemo(() => {
@@ -447,43 +464,33 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
               </div>
             ) : (
               filteredModels.map((model) => {
-                const isDefaultModel = provider.defaultModel === model;
+                const cap = capabilities[model];
+                const modelName = cap?.displayName || model;
+                const isCopied = copiedModel === model;
 
                 return (
                   <div
                     key={model}
                     className="group flex items-center justify-between gap-1.5 px-2 py-1 rounded-md hover:bg-accent/60 transition-colors text-[11px]"
                   >
-                    {/* 模型文字：原生可划选复制 */}
-                    <span
-                      className="font-mono text-foreground/90 select-text cursor-text truncate min-w-0 flex-1"
-                      title={model}
-                    >
-                      {model}
-                    </span>
-
-                    {/* 默认模型状态与切换操作 */}
-                    <div className="shrink-0 flex items-center">
-                      {isDefaultModel ? (
-                        <button
-                          type="button"
-                          onClick={() => handleToggleDefaultModel(model)}
-                          title="点击取消默认模型"
-                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-zinc-500/10 dark:bg-white/10 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-500/20 transition-colors cursor-pointer"
-                        >
-                          <Check className="w-2.5 h-2.5 text-emerald-500" />
-                          <span>默认</span>
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleToggleDefaultModel(model)}
-                          className="opacity-0 group-hover:opacity-100 px-1.5 py-0.5 rounded text-[10px] font-sans text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
-                          title={`将 ${model} 设为默认模型`}
-                        >
-                          设为默认
-                        </button>
-                      )}
+                    {/* 左侧：模型名称及紧随其后的复制按钮 */}
+                    <div className="flex items-center gap-1 min-w-0 flex-1">
+                      <span className="text-foreground/90 select-text cursor-text truncate font-medium">
+                        {modelName}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => handleCopyModel(e, model)}
+                        className={`${
+                          isCopied ? 'opacity-100 text-emerald-500' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground'
+                        } shrink-0 p-0.5 rounded hover:bg-muted/80 transition-all cursor-pointer`}
+                      >
+                        {isCopied ? (
+                          <Check className="w-3 h-3" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                      </button>
                     </div>
                   </div>
                 );

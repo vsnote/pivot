@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
@@ -47,13 +47,29 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
 ];
 
 export const InterceptorPanel: React.FC = () => {
-  const { interceptors, toggleInterceptor, providers, stats } = useAppStore();
+  const { interceptors, toggleInterceptor, setInterceptorModel, providers, stats } = useAppStore();
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [conflictConfirmTarget, setConflictConfirmTarget] = useState<InterceptorStatus | null>(null);
 
   const displayList = interceptors.length > 0 ? interceptors : DEFAULT_INTERCEPTORS;
   const hasEnabledProviders = providers.some((p) => p.enabled);
+
+  // 聚合所有已启用服务商的可用模型
+  const availableModels = useMemo(() => {
+    const list: { model: string; providerName: string }[] = [];
+    const seen = new Set<string>();
+    for (const provider of providers) {
+      if (!provider.enabled) continue;
+      for (const m of provider.models) {
+        if (!seen.has(m)) {
+          seen.add(m);
+          list.push({ model: m, providerName: provider.name });
+        }
+      }
+    }
+    return list;
+  }, [providers]);
 
   const handleToggle = async (id: string, enable: boolean) => {
     const target = displayList.find((item) => item.id === id);
@@ -150,7 +166,7 @@ export const InterceptorPanel: React.FC = () => {
       {/* 本地 CLI 客户端一键代理 */}
       <div className="pb-0.5 pt-2">
         <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-          本地命令行客户端一键代理
+          本地命令行客户端一键代理与启动模型
         </h3>
       </div>
 
@@ -256,6 +272,27 @@ export const InterceptorPanel: React.FC = () => {
                 {/* 配置文件微路径 */}
                 <div className="text-[11px] font-mono text-zinc-400 truncate" title={tool.configPath}>
                   {tool.configPath}
+                </div>
+
+                {/* 启动模型配置 */}
+                <div className="mt-2.5 pt-2 border-t border-zinc-100 dark:border-zinc-800/80 flex items-center justify-between gap-1.5">
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0 font-medium">启动模型</span>
+                  <select
+                    value={tool.model ?? ''}
+                    disabled={availableModels.length === 0}
+                    onChange={(e) => {
+                      const next = e.target.value || null;
+                      setInterceptorModel(tool.id, next);
+                    }}
+                    className="h-6.5 w-full max-w-[130px] text-[11px] font-mono px-1.5 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400 cursor-pointer truncate"
+                  >
+                    <option value="">默认推荐</option>
+                    {availableModels.map(({ model, providerName }) => (
+                      <option key={`${providerName}:${model}`} value={model}>
+                        {model} ({providerName})
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* 外部篡改争夺小提示条 */}

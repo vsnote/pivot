@@ -528,6 +528,9 @@ fn extract_text_from_value(content: &Value) -> String {
     if let Some(s) = content.as_str() {
         return s.to_string();
     }
+    if content.is_null() {
+        return String::new();
+    }
     if let Some(arr) = content.as_array() {
         let mut parts = Vec::new();
         for item in arr {
@@ -541,7 +544,16 @@ fn extract_text_from_value(content: &Value) -> String {
         }
         return parts.join("\n");
     }
-    content.to_string()
+    if let Some(obj) = content.as_object() {
+        if let Some(text) = obj.get("text").and_then(Value::as_str) {
+            return text.to_string();
+        }
+        if let Some(c) = obj.get("content").and_then(Value::as_str) {
+            return c.to_string();
+        }
+        return String::new();
+    }
+    String::new()
 }
 
 /// Check if the incoming Responses API request is asking for context compaction
@@ -790,14 +802,25 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                         .cloned()
                         .unwrap_or(Value::Null);
 
-                    // Convert input_text to text if structured content
+                    // Convert input_text to text and input_image to image_url if structured content
                     let clean_content = if let Some(parts) = content_val.as_array() {
                         let mut new_parts = Vec::new();
                         for p in parts {
                             if let Some(obj) = p.as_object() {
                                 let mut new_obj = obj.clone();
-                                if new_obj.get("type").and_then(Value::as_str) == Some("input_text") {
-                                    new_obj.insert("type".to_string(), json!("text"));
+                                if let Some(p_type) = new_obj.get("type").and_then(Value::as_str) {
+                                    if p_type == "input_text" {
+                                        new_obj.insert("type".to_string(), json!("text"));
+                                    } else if p_type == "input_image" {
+                                        new_obj.insert("type".to_string(), json!("image_url"));
+                                        if let Some(url_str) = new_obj.get("image_url").and_then(Value::as_str) {
+                                            let mut img_obj = json!({ "url": url_str });
+                                            if let Some(detail) = new_obj.get("detail").and_then(Value::as_str) {
+                                                img_obj["detail"] = json!(detail);
+                                            }
+                                            new_obj.insert("image_url".to_string(), img_obj);
+                                        }
+                                    }
                                 }
                                 new_parts.push(Value::Object(new_obj));
                             } else {
@@ -987,6 +1010,95 @@ pub fn chat_response_to_responses_full(
     })
 }
 
+fn convert_content_to_responses_input(content_val: &Value) -> Value {
+    if let Some(s) = content_val.as_str() {
+        return json!([{ "type": "input_text", "text": s }]);
+    }
+
+    if let Some(arr) = content_val.as_array() {
+        let mut parts = Vec::new();
+        for part in arr {
+            if let Some(s) = part.as_str() {
+                parts.push(json!({ "type": "input_text", "text": s }));
+            } else if let Some(obj) = part.as_object() {
+                let p_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+                match p_type {
+                    "text" | "input_text" => {
+                        let text = obj
+                            .get("text")
+                            .or_else(|| obj.get("content"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        parts.push(json!({ "type": "input_text", "text": text }));
+                    }
+                    "image_url" => {
+                        let img_val = obj.get("image_url");
+                        let url = if let Some(img_obj) = img_val.and_then(Value::as_object) {
+                            img_obj.get("url").and_then(Value::as_str).unwrap_or("")
+                        } else if let Some(s) = img_val.and_then(Value::as_str) {
+                            s
+                        } else {
+                            ""
+                        };
+                        let detail = obj.get("detail").or_else(|| {
+                            img_val.and_then(Value::as_object).and_then(|o| o.get("detail"))
+                        });
+                        let mut item = json!({
+                            "type": "input_image",
+                            "image_url": url
+                        });
+                        if let Some(d) = detail.and_then(Value::as_str) {
+                            item["detail"] = json!(d);
+                        }
+                        parts.push(item);
+                    }
+                    "image" => {
+                        if let Some(source) = obj.get("source").and_then(Value::as_object) {
+                            let media_type = source
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .unwrap_or("image/jpeg");
+                            let data = source.get("data").and_then(Value::as_str).unwrap_or("");
+                            parts.push(json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{};base64,{}", media_type, data)
+                            }));
+                        } else {
+                            parts.push(part.clone());
+                        }
+                    }
+                    "input_image" | "input_audio" | "input_file" | "computer_screenshot" => {
+                        parts.push(part.clone());
+                    }
+                    _ => {
+                        if let Some(text) = obj
+                            .get("text")
+                            .or_else(|| obj.get("content"))
+                            .and_then(Value::as_str)
+                        {
+                            parts.push(json!({ "type": "input_text", "text": text }));
+                        } else {
+                            parts.push(part.clone());
+                        }
+                    }
+                }
+            } else {
+                parts.push(json!({ "type": "input_text", "text": part.to_string() }));
+            }
+        }
+        if parts.is_empty() {
+            return json!([{ "type": "input_text", "text": "" }]);
+        }
+        return Value::Array(parts);
+    }
+
+    if content_val.is_null() {
+        return json!([{ "type": "input_text", "text": "" }]);
+    }
+
+    json!([{ "type": "input_text", "text": content_val.to_string() }])
+}
+
 /// Convert an `OpenAIChatRequest` into a Responses API JSON body for Codex / ChatGPT subscription backend.
 pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str) -> Value {
     let mut input_items: Vec<Value> = Vec::new();
@@ -994,41 +1106,34 @@ pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str
 
     for msg in &req.messages {
         let role = msg.role.as_str();
-        if role == "system" {
+        if role == "system" || role == "developer" {
             let text = if let Some(ref c) = msg.content {
                 if let Some(s) = c.as_str() {
                     s.to_string()
                 } else {
-                    c.to_string()
+                    extract_text_from_value(c)
                 }
             } else {
                 String::new()
             };
-            if instructions.is_none() {
-                instructions = Some(text);
-            } else if let Some(ref mut inst) = instructions {
-                inst.push_str("\n\n");
-                inst.push_str(&text);
+            if !text.is_empty() {
+                if instructions.is_none() {
+                    instructions = Some(text);
+                } else if let Some(ref mut inst) = instructions {
+                    inst.push_str("\n\n");
+                    inst.push_str(&text);
+                }
             }
             continue;
         }
 
-        if role == "user" {
-            let content_val = msg.content.clone().unwrap_or(Value::Null);
-            input_items.push(json!({
-                "type": "message",
-                "role": "user",
-                "content": if let Some(s) = content_val.as_str() {
-                    json!([{ "type": "input_text", "text": s }])
-                } else if content_val.is_array() {
-                    content_val
-                } else {
-                    json!([{ "type": "input_text", "text": content_val.to_string() }])
-                }
-            }));
-        } else if role == "assistant" {
+        if role == "assistant" {
             if let Some(ref c) = msg.content {
-                let text = c.as_str().unwrap_or("");
+                let text = if let Some(s) = c.as_str() {
+                    s.to_string()
+                } else {
+                    extract_text_from_value(c)
+                };
                 if !text.is_empty() {
                     input_items.push(json!({
                         "type": "message",
@@ -1052,7 +1157,7 @@ pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str
                 if let Some(s) = c.as_str() {
                     s.to_string()
                 } else {
-                    c.to_string()
+                    extract_text_from_value(c)
                 }
             } else {
                 String::new()
@@ -1062,6 +1167,13 @@ pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str
                 "type": "function_call_output",
                 "call_id": call_id,
                 "output": output_str
+            }));
+        } else {
+            let content_val = msg.content.clone().unwrap_or(Value::Null);
+            input_items.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": convert_content_to_responses_input(&content_val)
             }));
         }
     }
@@ -1075,6 +1187,12 @@ pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str
 
     if let Some(inst) = instructions {
         body["instructions"] = json!(inst);
+    }
+
+    if let Some(ref effort) = req.reasoning_effort {
+        if !effort.is_empty() {
+            body["reasoning_effort"] = json!(effort);
+        }
     }
 
     if let Some(ref tools) = req.tools {
@@ -1604,5 +1722,86 @@ mod tests {
         assert_eq!(res3.len(), 2);
         assert!(res3[0].contains("\"prompt_tokens\":5"));
         assert_eq!(res3[1], "data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn test_convert_chat_req_to_responses_with_structured_content() {
+        let chat_req = OpenAIChatRequest {
+            model: "gpt-6.1-terra".to_string(),
+            messages: vec![
+                OpenAIMessage {
+                    role: "developer".to_string(),
+                    content: Some(json!("You are an AI coding assistant")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "user".to_string(),
+                    content: Some(json!([
+                        { "type": "text", "text": "Analyze this code" },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/screenshot.png",
+                                "detail": "high"
+                            }
+                        }
+                    ])),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "assistant".to_string(),
+                    content: Some(json!([
+                        { "type": "text", "text": "Here is the analysis" }
+                    ])),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            reasoning_effort: Some("high".to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: Some(true),
+            stream_options: None,
+        };
+
+        let responses_val = convert_chat_req_to_responses(&chat_req, "gpt-6.1-terra");
+        assert_eq!(responses_val["model"], "gpt-6.1-terra");
+        assert_eq!(responses_val["instructions"], "You are an AI coding assistant");
+        assert_eq!(responses_val["reasoning_effort"], "high");
+
+        let input_arr = responses_val["input"].as_array().unwrap();
+        assert_eq!(input_arr.len(), 2);
+
+        // Verify user content conversion: "text" -> "input_text", "image_url" -> "input_image"
+        let user_msg = &input_arr[0];
+        assert_eq!(user_msg["role"], "user");
+        let content_parts = user_msg["content"].as_array().unwrap();
+        assert_eq!(content_parts.len(), 2);
+
+        assert_eq!(content_parts[0]["type"], "input_text");
+        assert_eq!(content_parts[0]["text"], "Analyze this code");
+
+        assert_eq!(content_parts[1]["type"], "input_image");
+        assert_eq!(content_parts[1]["image_url"], "https://example.com/screenshot.png");
+        assert_eq!(content_parts[1]["detail"], "high");
+
+        // Verify assistant content conversion: array -> "output_text"
+        let assistant_msg = &input_arr[1];
+        assert_eq!(assistant_msg["role"], "assistant");
+        let assistant_parts = assistant_msg["content"].as_array().unwrap();
+        assert_eq!(assistant_parts.len(), 1);
+        assert_eq!(assistant_parts[0]["type"], "output_text");
+        assert_eq!(assistant_parts[0]["text"], "Here is the analysis");
     }
 }

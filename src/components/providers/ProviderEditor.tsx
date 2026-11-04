@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   ArrowLeft,
   Check,
+  Copy,
   Eye,
   EyeOff,
   LoaderCircle,
@@ -42,16 +43,12 @@ import {
 } from './providerDraft';
 
 interface ModelCapability {
+  displayName?: string;
   modalities: string[];
   contextWindow: number | null;
   maxOutput: number | null;
   reasoning: boolean;
 }
-
-const formatContextWindow = (tokens: number) =>
-  tokens >= 1_000_000
-    ? `${Number((tokens / 1_000_000).toFixed(1))}M`
-    : `${Math.round(tokens / 1000)}K`;
 
 const protocols: Record<Protocol, string> = {
   openai: 'OpenAI 兼容',
@@ -123,6 +120,7 @@ export function ProviderEditor() {
   const [fetchError, setFetchError] = useState('');
   const [notice, setNotice] = useState('');
   const [modelSearch, setModelSearch] = useState('');
+  const [copiedModel, setCopiedModel] = useState<string | null>(null);
   const [modelFilterTab, setModelFilterTab] = useState<'all' | 'selected' | 'unselected'>('all');
   const [manualModel, setManualModel] = useState('');
   const [saving, setSaving] = useState(false);
@@ -647,7 +645,35 @@ export function ProviderEditor() {
       if (requestId.current !== current) return;
       const unique = uniqueValues(models);
       setFetched(unique);
-      setNotice(`已获取上游 ${unique.length} 个可用模型，请按需勾选`);
+
+      // 1. 模型池严格以上游真实返回列表为准，清理并淘汰所有不存在的模型
+      setPool(unique);
+      if (draft.id) {
+        try {
+          localStorage.setItem(`pivot_provider_pool_${draft.id}`, JSON.stringify(unique));
+        } catch {}
+      }
+
+      // 2. 清理 draft.models 中不存在于真实上游列表中的模型
+      const validSelected = draft.models.filter((m) => unique.includes(m));
+      const removedCount = draft.models.length - validSelected.length;
+
+      // 保持清洗后的有效已选模型；若此前未选或全部失效，默认选中上游获取到的全部模型
+      const nextSelected = validSelected.length > 0 ? validSelected : unique;
+      const nextDefaultModel = draft.defaultModel && unique.includes(draft.defaultModel)
+        ? draft.defaultModel
+        : null;
+
+      update({
+        models: nextSelected,
+        defaultModel: nextDefaultModel,
+      });
+
+      if (removedCount > 0) {
+        setNotice(`已获取上游 ${unique.length} 个可用模型，已自动清理 ${removedCount} 个不存在的过期模型`);
+      } else {
+        setNotice(`已获取上游 ${unique.length} 个可用模型，请按需勾选`);
+      }
     } catch (error) {
       if (requestId.current === current) setFetchError(String(error));
     } finally {
@@ -669,6 +695,15 @@ export function ProviderEditor() {
         ? draft.models.filter((item) => item !== model)
         : [...draft.models, model],
     );
+  };
+
+  const handleCopyModel = (e: React.MouseEvent, modelId: string) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(modelId);
+    setCopiedModel(modelId);
+    setTimeout(() => {
+      setCopiedModel((prev) => (prev === modelId ? null : prev));
+    }, 1200);
   };
 
   const addManualModel = () => {
@@ -733,10 +768,13 @@ export function ProviderEditor() {
     return presets.filter((p) => `${p.name} ${p.id}`.toLowerCase().includes(q));
   }, [presets, presetSearch]);
 
-  // 只增不减地合并模型池：切换预设时会主动清空
+  // 同步模型池：成功获取上游后严格以上游真实列表为准，清理并淘汰任何不存在的模型
   useEffect(() => {
     setPool((prev) => {
-      const next = uniqueValues([...prev, ...(fetched ?? []), ...draft.models]);
+      if (fetched && fetched.length > 0) {
+        return fetched;
+      }
+      const next = uniqueValues([...prev, ...draft.models]);
       return next.length === prev.length ? prev : next;
     });
   }, [fetched, draft.models]);
@@ -807,13 +845,6 @@ export function ProviderEditor() {
     if (!fetched || fetched.length === 0) return;
     replaceModels(draft.models.filter((model) => fetched.includes(model)));
   };
-
-  // 默认模型必须在已选模型内；历史数据里可能残留已移除的模型，保留为首项以便用户改回
-  const preferredOptions = useMemo(() => {
-    const base = draft.models.map((model) => model.trim()).filter(Boolean);
-    const current = draft.defaultModel?.trim();
-    return current && !base.includes(current) ? [current, ...base] : base;
-  }, [draft.models, draft.defaultModel]);
 
   return (
     <div className="w-full pb-6 space-y-3 animate-in fade-in duration-150">
@@ -1533,35 +1564,6 @@ export function ProviderEditor() {
                     </div>
                   )}
                 </div>
-
-                {/* 默认模型：客户端启动模型及未匹配规则的兜底模型 */}
-                <div className="flex items-center justify-between gap-4 pt-3 border-t border-border">
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                      默认模型
-                    </div>
-                    <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 leading-relaxed">
-                      客户端启动模型；未命中规则的请求将由此模型接管
-                    </div>
-                  </div>
-                  <Select
-                    value={draft.defaultModel ?? ''}
-                    onChange={(e) => {
-                      const next = e.target.value || null;
-                      update({ defaultModel: next, isDefault: Boolean(next) });
-                    }}
-                    containerClassName="w-40 sm:w-52 shrink-0"
-                    disabled={preferredOptions.length === 0}
-                    aria-label="默认模型"
-                  >
-                    <option value="">未设置</option>
-                    {preferredOptions.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))}
-                  </Select>
-                </div>
               </div>
 
               {/* 模型选择与声明：一体化精简清单 */}
@@ -1788,63 +1790,54 @@ export function ProviderEditor() {
                           const isInvalid = invalidModels.includes(model);
                           const isDefaultModel = draft.defaultModel === model;
                           const cap = capabilities[model];
-
-                          // 推理能力判定：后端返回 或 命中显式推理/思考命名
-                          const hasExplicitReasoningName =
-                            /(-high|-thinking|-thought|-reasoner|-r1\b|o1\b|o3\b|o4\b|gemini-3|gemini-2\.5)/i.test(model);
-                          const isReasoning = cap ? cap.reasoning || hasExplicitReasoningName : hasExplicitReasoningName;
-
-                          // 视觉能力判定：后端返回 或 命中多模态命名规范
-                          const isPureAux = /imagen|dall-e|tts|whisper|embed/i.test(model);
-                          const hasExplicitVisionName =
-                            /vision|image|vl|multimodal/i.test(model) ||
-                            /gemini-|claude-3|claude-4|gpt-4o|gpt-5|gpt-6|o1\b|o3\b/i.test(model);
-                          const isVision = !isPureAux && (cap?.modalities?.includes('image') || hasExplicitVisionName);
-
-                          // 上下文窗口
-                          const contextWindow = cap?.contextWindow || (model.toLowerCase().startsWith('gemini-') ? 1_048_576 : null);
-
-                          const capabilityHint = [
-                            contextWindow ? `${formatContextWindow(contextWindow)} 上下文` : '',
-                            isVision ? '支持图片输入' : '',
-                            isReasoning ? '支持深度推理' : '',
-                            isDefaultModel ? '默认模型' : '',
-                          ]
-                            .filter(Boolean)
-                            .join(' · ');
+                          const isCopied = copiedModel === model;
 
                           return (
-                            <button
+                            <div
                               key={model}
-                              type="button"
+                              role="button"
+                              tabIndex={0}
                               onClick={() => toggleModel(model)}
+                              onKeyDown={(e) => {
+                                if (e.key === ' ' || e.key === 'Enter') {
+                                  e.preventDefault();
+                                  toggleModel(model);
+                                }
+                              }}
                               aria-pressed={isSelected}
-                              title={capabilityHint || undefined}
                               className={`group w-full flex items-center justify-between py-1.5 px-2 rounded-md text-xs font-mono transition-colors cursor-pointer select-none text-left ${
                                 isSelected
-                                  ? 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-900 dark:text-zinc-100 font-medium'
+                                  ? 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-900 dark:text-zinc-100 font-medium hover:bg-zinc-200/60 dark:hover:bg-zinc-700/60'
                                   : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-200'
                               }`}
                             >
-                              {/* 左侧：状态指示框与模型名称 */}
-                              <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
+                              {/* 左侧：状态指示框与模型名称、紧随其后的复制按钮 */}
+                              <div className="flex items-center gap-1.5 min-w-0 flex-1 mr-2">
                                 <span
                                   className={`w-3.5 h-3.5 rounded-[3.5px] flex items-center justify-center shrink-0 transition-colors ${
                                     isSelected
-                                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 group-hover:bg-zinc-700 dark:group-hover:bg-zinc-300'
+                                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 group-hover:bg-zinc-800 dark:group-hover:bg-zinc-200'
                                       : 'border border-zinc-300 dark:border-zinc-700 bg-white/70 dark:bg-zinc-900/70 group-hover:border-zinc-400 dark:group-hover:border-zinc-500'
                                   }`}
                                 >
-                                  {isSelected ? (
-                                    <>
-                                      <Check className="w-2.5 h-2.5 stroke-[3] group-hover:hidden" />
-                                      <X className="w-2.5 h-2.5 stroke-[3] hidden group-hover:block" />
-                                    </>
-                                  ) : (
-                                    <Plus className="w-2.5 h-2.5 text-zinc-400 dark:text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                  {isSelected && (
+                                    <Check className="w-2.5 h-2.5 stroke-[3]" />
                                   )}
                                 </span>
-                                <span className="truncate">{model}</span>
+                                <span className="truncate">{cap?.displayName || model}</span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleCopyModel(e, model)}
+                                  className={`${
+                                    isCopied ? 'opacity-100 text-emerald-500' : 'opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'
+                                  } shrink-0 p-0.5 rounded hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 transition-all cursor-pointer`}
+                                >
+                                  {isCopied ? (
+                                    <Check className="w-3 h-3" />
+                                  ) : (
+                                    <Copy className="w-3 h-3" />
+                                  )}
+                                </button>
                               </div>
 
                               {/* 右侧：标记与提示 */}
@@ -1852,21 +1845,19 @@ export function ProviderEditor() {
                                 {isDefaultModel && (
                                   <span
                                     className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
-                                    title="全局默认启动模型"
                                   >
                                     默认
                                   </span>
                                 )}
                                 {isInvalid && (
                                   <span
-                                    title="该模型未在上游接口返回的列表中"
                                     className="shrink-0 text-amber-500 flex items-center"
                                   >
                                     <AlertTriangle className="w-3 h-3" />
                                   </span>
                                 )}
                               </div>
-                            </button>
+                            </div>
                           );
                         })}
                       </div>

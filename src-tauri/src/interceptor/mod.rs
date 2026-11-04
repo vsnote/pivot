@@ -29,6 +29,7 @@ pub struct InterceptorInfo {
     pub third_party: Option<ThirdPartyConfig>,
     #[serde(default)]
     pub is_overwritten: bool,
+    pub model: Option<String>,
 }
 
 pub struct InterceptorManager {
@@ -554,6 +555,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("claude_code", is_overwritten),
             third_party,
             is_overwritten,
+            model: self.db.get_interceptor_model("claude_code").ok().flatten(),
         }
     }
 
@@ -611,6 +613,21 @@ impl InterceptorManager {
             if let Ok(providers) = self.db.get_providers() {
                 let picker = generate_claude_model_picker(&providers);
                 settings_val["modelPicker"] = picker;
+            }
+
+            let selected_model = self.db.get_interceptor_model("claude_code").ok().flatten();
+            if let Some(ref m) = selected_model {
+                settings_val["model"] = json!(m);
+                if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
+                    env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
+                }
+            } else {
+                if let Some(obj) = settings_val.as_object_mut() {
+                    obj.remove("model");
+                }
+                if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
+                    env_obj.remove("ANTHROPIC_MODEL");
+                }
             }
 
             if let Ok(new_settings) = serde_json::to_string_pretty(&settings_val) {
@@ -736,6 +753,20 @@ impl InterceptorManager {
             env_obj.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
             env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
         }
+        let selected_model = self.db.get_interceptor_model("claude_code").ok().flatten();
+        if let Some(ref m) = selected_model {
+            v["model"] = json!(m);
+            if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
+                env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
+            }
+        } else {
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("model");
+            }
+            if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
+                env_obj.remove("ANTHROPIC_MODEL");
+            }
+        }
         if let Ok(updated) = serde_json::to_string_pretty(&v) {
             let _ = atomic_write(&settings_path, &updated);
         }
@@ -837,6 +868,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("codex_cli", is_overwritten),
             third_party,
             is_overwritten,
+            model: self.db.get_interceptor_model("codex_cli").ok().flatten(),
         }
     }
 
@@ -861,11 +893,12 @@ impl InterceptorManager {
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
                 let target_endpoint = format!("{}/v1", self.gateway_url);
+                let preferred_model = self.db.get_interceptor_model("codex_cli").ok().flatten();
                 if let Ok(updated) = update_codex_config_toml(
                     &content,
                     &target_endpoint,
                     Some(Self::CODEX_CATALOG_FILENAME),
-                    None,
+                    preferred_model.as_deref(),
                 ) {
                     let _ = atomic_write(&config_path, &updated);
                 }
@@ -910,21 +943,24 @@ impl InterceptorManager {
             }
 
             let model_provider_count = count_model_providers(&providers);
-            let preferred_model = providers
-                .iter()
-                .find(|p| p.enabled && p.default_model.is_some())
-                .or_else(|| providers.iter().find(|p| p.is_default && p.enabled))
-                .and_then(|p| {
-                    let prefix = p.name.to_lowercase().replace(' ', "-");
-                    let m = p.default_model.as_deref().or_else(|| p.models.first().map(|s| s.as_str()))?;
-                    let is_duplicate = model_provider_count.get(m).copied().unwrap_or(0) > 1;
-                    Some(if m.to_lowercase().starts_with(&format!("{}/", prefix)) {
-                        m.to_string()
-                    } else if is_duplicate {
-                        format!("{}/{}", prefix, m)
-                    } else {
-                        m.to_string()
-                    })
+            let preferred_model = self.db.get_interceptor_model("codex_cli").ok().flatten()
+                .or_else(|| {
+                    providers
+                        .iter()
+                        .find(|p| p.enabled && p.default_model.is_some())
+                        .or_else(|| providers.iter().find(|p| p.is_default && p.enabled))
+                        .and_then(|p| {
+                            let prefix = p.name.to_lowercase().replace(' ', "-");
+                            let m = p.default_model.as_deref().or_else(|| p.models.first().map(|s| s.as_str()))?;
+                            let is_duplicate = model_provider_count.get(m).copied().unwrap_or(0) > 1;
+                            Some(if m.to_lowercase().starts_with(&format!("{}/", prefix)) {
+                                m.to_string()
+                            } else if is_duplicate {
+                                format!("{}/{}", prefix, m)
+                            } else {
+                                m.to_string()
+                            })
+                        })
                 })
                 .or_else(|| {
                     catalog["models"]
@@ -1087,6 +1123,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("gemini_cli", is_overwritten),
             third_party,
             is_overwritten,
+            model: self.db.get_interceptor_model("gemini_cli").ok().flatten(),
         }
     }
 
@@ -1109,7 +1146,8 @@ impl InterceptorManager {
             } else if let Some(p) = env_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
-            let new_env = update_gemini_env(&orig_env, &self.gateway_url);
+            let selected_model = self.db.get_interceptor_model("gemini_cli").ok().flatten();
+            let new_env = update_gemini_env_with_model(&orig_env, &self.gateway_url, selected_model.as_deref());
             let _ = atomic_write(&env_path, &new_env);
 
             // 2. 同时维护 config.json (兼容旧配置和测试用例)
@@ -1123,6 +1161,11 @@ impl InterceptorManager {
                 let _ = fs::create_dir_all(p);
             }
             parsed["baseUrl"] = json!(self.gateway_url);
+            if let Some(ref m) = selected_model {
+                parsed["model"] = json!(m);
+            } else if let Some(obj) = parsed.as_object_mut() {
+                obj.remove("model");
+            }
             if let Ok(new_content) = serde_json::to_string_pretty(&parsed) {
                 let _ = atomic_write(&config_path, &new_content);
             }
@@ -1272,6 +1315,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("pi", is_overwritten),
             third_party,
             is_overwritten,
+            model: self.db.get_interceptor_model("pi").ok().flatten(),
         }
     }
 
@@ -1309,7 +1353,9 @@ impl InterceptorManager {
             if let Ok(content) = fs::read_to_string(&settings_path) {
                 if let Ok(mut sv) = serde_json::from_str::<Value>(&content) {
                     if sv.get("defaultProvider").and_then(|p| p.as_str()) == Some("pivot") {
-                        if let Some(ref pm) = preferred_model {
+                        let selected_model = self.db.get_interceptor_model("pi").ok().flatten();
+                        let effective_model = selected_model.or(preferred_model);
+                        if let Some(ref pm) = effective_model {
                             sv["defaultModel"] = json!(pm);
                             if let Ok(serialized) = serde_json::to_string_pretty(&sv) {
                                 let _ = atomic_write(&settings_path, &serialized);
@@ -1417,7 +1463,9 @@ impl InterceptorManager {
             }
 
             settings_val["defaultProvider"] = json!("pivot");
-            if let Some(ref pm) = preferred_model {
+            let selected_model = self.db.get_interceptor_model("pi").ok().flatten();
+            let effective_model = selected_model.or(preferred_model);
+            if let Some(ref pm) = effective_model {
                 settings_val["defaultModel"] = json!(pm);
             }
             if let Ok(serialized) = serde_json::to_string_pretty(&settings_val) {
@@ -1509,6 +1557,54 @@ impl InterceptorManager {
             "pi" => self.toggle_pi(enable),
             _ => Err(format!("Unknown tool id: {}", id)),
         }
+    }
+
+    pub fn get_tool_status(&self, id: &str) -> Result<InterceptorInfo, String> {
+        match id {
+            "claude_code" => Ok(self.get_claude_code_status()),
+            "codex_cli" => Ok(self.get_codex_status()),
+            "gemini_cli" => Ok(self.get_gemini_cli_status()),
+            "pi" => Ok(self.get_pi_status()),
+            _ => Err(format!("Unknown tool id: {}", id)),
+        }
+    }
+
+    pub fn set_tool_model(&self, id: &str, model: Option<&str>) -> Result<InterceptorInfo, String> {
+        let clean_model = model.map(str::trim).filter(|s| !s.is_empty());
+        self.db
+            .save_interceptor_model(id, clean_model)
+            .map_err(|e| e.to_string())?;
+
+        // 若当前已被接管，即时重新同步该工具的配置文件
+        match id {
+            "claude_code" => {
+                let status = self.get_claude_code_status();
+                if status.is_intercepted {
+                    let _ = self.do_sync_claude_settings();
+                }
+            }
+            "codex_cli" => {
+                let status = self.get_codex_status();
+                if status.is_intercepted {
+                    let _ = self.do_sync_codex_catalog();
+                }
+            }
+            "gemini_cli" => {
+                let status = self.get_gemini_cli_status();
+                if status.is_intercepted {
+                    let _ = self.toggle_gemini_cli(true);
+                }
+            }
+            "pi" => {
+                let status = self.get_pi_status();
+                if status.is_intercepted {
+                    let _ = self.do_sync_pi_models();
+                }
+            }
+            _ => return Err(format!("Unknown tool id: {}", id)),
+        }
+
+        self.get_tool_status(id)
     }
 }
 
@@ -1942,10 +2038,17 @@ pub fn generate_claude_model_picker(
 
         for model_name in provider_models {
             let behaves_as = resolve_claude_behaves_as(&model_name);
+            let display_name = crate::model_catalog::resolve_model_display_name(&model_name, Some(&provider.name));
             let is_duplicate = model_provider_count
                 .get(&model_name)
                 .copied()
                 .unwrap_or(0) > 1;
+
+            let label_name = if display_name != model_name {
+                display_name
+            } else {
+                model_name.clone()
+            };
 
             if is_duplicate {
                 let prefixed = format!("{}/{}", provider_prefix, model_name);
@@ -1953,8 +2056,8 @@ pub fn generate_claude_model_picker(
                     seen_models.insert(prefixed.clone());
                     options.push(json!({
                         "model": prefixed,
-                        "label": format!("{} · {}", model_name, provider.name),
-                        "description": format!("via Pivot ({})", provider.name),
+                        "label": format!("{} · {}", label_name, provider.name),
+                        "description": format!("via Pivot ({}) · {}", provider.name, model_name),
                         "behavesAs": behaves_as,
                     }));
                 }
@@ -1963,8 +2066,8 @@ pub fn generate_claude_model_picker(
                     seen_models.insert(model_name.clone());
                     options.push(json!({
                         "model": model_name,
-                        "label": format!("{} · {}", model_name, provider.name),
-                        "description": format!("via Pivot ({})", provider.name),
+                        "label": format!("{} · {}", label_name, provider.name),
+                        "description": format!("via Pivot ({}) · {}", provider.name, model_name),
                         "behavesAs": behaves_as,
                     }));
                 }
@@ -2236,10 +2339,16 @@ pub fn resolve_model_reasoning_spec(model_name: &str) -> (Vec<Value>, &'static s
 }
 
 /// Update Gemini CLI official .env file with gateway base URLs
+#[allow(dead_code)]
 fn update_gemini_env(original: &str, gateway_url: &str) -> String {
+    update_gemini_env_with_model(original, gateway_url, None)
+}
+
+fn update_gemini_env_with_model(original: &str, gateway_url: &str, model: Option<&str>) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut found_google = false;
     let mut found_gemini = false;
+    let mut found_model = false;
 
     for line in original.lines() {
         let trimmed = line.trim();
@@ -2249,6 +2358,11 @@ fn update_gemini_env(original: &str, gateway_url: &str) -> String {
         } else if trimmed.starts_with("GEMINI_BASE_URL=") {
             lines.push(format!("GEMINI_BASE_URL={}", gateway_url));
             found_gemini = true;
+        } else if trimmed.starts_with("GEMINI_MODEL=") {
+            if let Some(m) = model.filter(|s| !s.trim().is_empty()) {
+                lines.push(format!("GEMINI_MODEL={}", m));
+            }
+            found_model = true;
         } else {
             lines.push(line.to_string());
         }
@@ -2259,6 +2373,11 @@ fn update_gemini_env(original: &str, gateway_url: &str) -> String {
     }
     if !found_gemini {
         lines.push(format!("GEMINI_BASE_URL={}", gateway_url));
+    }
+    if !found_model {
+        if let Some(m) = model.filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("GEMINI_MODEL={}", m));
+        }
     }
 
     lines.join("\n") + "\n"

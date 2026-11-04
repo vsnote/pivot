@@ -10,13 +10,28 @@ pub fn convert_openai_req_to_anthropic(
 
     for msg in &req.messages {
         match msg.role.as_str() {
-            "system" => {
+            "system" | "developer" => {
                 if let Some(ref c) = msg.content {
-                    if let Value::String(s) = c {
+                    let text = if let Value::String(s) = c {
+                        s.clone()
+                    } else if let Some(arr) = c.as_array() {
+                        let mut parts = Vec::new();
+                        for p in arr {
+                            if let Some(s) = p.as_str() {
+                                parts.push(s.to_string());
+                            } else if let Some(t) = p.get("text").and_then(Value::as_str) {
+                                parts.push(t.to_string());
+                            }
+                        }
+                        parts.join("\n")
+                    } else {
+                        String::new()
+                    };
+                    if !text.is_empty() {
                         if !system_text.is_empty() {
                             system_text.push('\n');
                         }
-                        system_text.push_str(s);
+                        system_text.push_str(&text);
                     }
                 }
             }

@@ -130,6 +130,77 @@ fn estimate_openai_req_prompt_tokens(req: &OpenAIChatRequest) -> u32 {
     total
 }
 
+/// Normalize OpenAIChatRequest before sending to upstream OpenAI-compatible endpoints.
+/// 1. Roles: translates "developer" -> "system", "model" -> "assistant", "human" -> "user"
+///    (e.g. DeepSeek, Ollama, Groq, Mistral, Moonshot reject "developer" with 422).
+/// 2. Content: flattens text-only array contents into single strings
+///    (e.g. DeepSeek rejects array content with "invalid type: sequence, expected a string").
+/// 3. Tokens & Stream: reconciles max_tokens/max_completion_tokens and strips orphaned stream_options/tools.
+fn normalize_openai_req_for_upstream(req: &mut OpenAIChatRequest) {
+    if req.max_tokens.is_none() && req.max_completion_tokens.is_some() {
+        req.max_tokens = req.max_completion_tokens.take();
+    } else if req.max_tokens.is_some() {
+        req.max_completion_tokens = None;
+    }
+
+    if req.stream != Some(true) {
+        req.stream_options = None;
+    }
+
+    if req.tools.as_ref().map(|t| t.is_empty()).unwrap_or(false) {
+        req.tools = None;
+    }
+    if req.tools.is_none() {
+        req.tool_choice = None;
+    }
+
+    for msg in &mut req.messages {
+        match msg.role.as_str() {
+            "developer" => msg.role = "system".to_string(),
+            "model" => msg.role = "assistant".to_string(),
+            "human" => msg.role = "user".to_string(),
+            _ => {}
+        }
+
+        if msg.reasoning_content.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
+            msg.reasoning_content = None;
+        }
+
+        if let Some(ref c) = msg.content {
+            if c.is_null() && msg.role != "assistant" {
+                msg.content = Some(Value::String(String::new()));
+            } else if let Some(arr) = c.as_array() {
+                let has_multimodal = arr.iter().any(|item| {
+                    if let Some(obj) = item.as_object() {
+                        let t = obj.get("type").and_then(Value::as_str).unwrap_or("");
+                        t == "image_url"
+                            || t == "input_image"
+                            || t == "image"
+                            || t == "input_audio"
+                            || t == "input_file"
+                    } else {
+                        false
+                    }
+                });
+
+                if !has_multimodal {
+                    let mut text_parts = Vec::new();
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            text_parts.push(s.to_string());
+                        } else if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            text_parts.push(text.to_string());
+                        } else if let Some(content) = item.get("content").and_then(Value::as_str) {
+                            text_parts.push(content.to_string());
+                        }
+                    }
+                    msg.content = Some(Value::String(text_parts.join("\n")));
+                }
+            }
+        }
+    }
+}
+
 pub fn create_gateway_router(state: GatewayState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -669,8 +740,9 @@ async fn dispatch_anthropic_request(
             // Convert to OpenAI Chat Completions
             let url = resolve_upstream_endpoint(&cand.provider.base_url, "/chat/completions");
 
-            let openai_req =
+            let mut openai_req =
                 anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
+            normalize_openai_req_for_upstream(&mut openai_req);
 
             let mut req_builder = client
                 .post(&url)
@@ -824,8 +896,9 @@ async fn dispatch_anthropic_request(
             }
         }
         "chatgpt" => {
-            let openai_req =
+            let mut openai_req =
                 anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
+            normalize_openai_req_for_upstream(&mut openai_req);
             let dispatch_res =
                 dispatch_chatgpt_request(state, &openai_req, cand, req_id, is_stream).await?;
             if is_stream {
@@ -1726,6 +1799,7 @@ async fn dispatch_openai_request(
 
             let mut req_body = req.clone();
             req_body.model = cand.target_model.clone();
+            normalize_openai_req_for_upstream(&mut req_body);
 
             let mut req_builder = client
                 .post(&url)
@@ -2759,5 +2833,100 @@ mod tests {
             summarize_error("   "),
             "Upstream returned an error without a body"
         );
+    }
+
+    #[test]
+    fn test_normalize_openai_req_for_upstream() {
+        let mut req = OpenAIChatRequest {
+            model: "deepseek-chat".to_string(),
+            messages: vec![
+                OpenAIMessage {
+                    role: "developer".to_string(),
+                    content: Some(json!([
+                        { "type": "text", "text": "System instructions part 1" },
+                        { "type": "text", "text": "System instructions part 2" }
+                    ])),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "human".to_string(),
+                    content: Some(json!([
+                        { "type": "text", "text": "Hello world" }
+                    ])),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "model".to_string(),
+                    content: Some(json!("Sure, I can help.")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "user".to_string(),
+                    content: Some(json!([
+                        { "type": "text", "text": "Look at image" },
+                        { "type": "image_url", "image_url": { "url": "https://example.com/img.png" } }
+                    ])),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: Some(4096),
+            reasoning_effort: None,
+            tools: Some(vec![]),
+            tool_choice: Some(json!("none")),
+            stream: Some(false),
+            stream_options: Some(json!({"include_usage": true})),
+        };
+
+        normalize_openai_req_for_upstream(&mut req);
+
+        // max_completion_tokens transferred to max_tokens for older providers
+        assert_eq!(req.max_tokens, Some(4096));
+        assert_eq!(req.max_completion_tokens, None);
+
+        // Empty tools and orphaned tool_choice stripped
+        assert!(req.tools.is_none());
+        assert_eq!(req.tool_choice, None);
+
+        // Non-stream stream_options stripped
+        assert_eq!(req.stream_options, None);
+
+        // 1. "developer" -> "system", text array flattened to string
+        assert_eq!(req.messages[0].role, "system");
+        assert_eq!(
+            req.messages[0].content,
+            Some(Value::String("System instructions part 1\nSystem instructions part 2".to_string()))
+        );
+
+        // 2. "human" -> "user", text array flattened to string
+        assert_eq!(req.messages[1].role, "user");
+        assert_eq!(
+            req.messages[1].content,
+            Some(Value::String("Hello world".to_string()))
+        );
+
+        // 3. "model" -> "assistant"
+        assert_eq!(req.messages[2].role, "assistant");
+        assert_eq!(
+            req.messages[2].content,
+            Some(Value::String("Sure, I can help.".to_string()))
+        );
+
+        // 4. Multimodal message preserved as array
+        assert_eq!(req.messages[3].role, "user");
+        assert!(req.messages[3].content.as_ref().unwrap().is_array());
     }
 }

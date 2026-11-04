@@ -73,6 +73,86 @@ struct CatalogFile {
 }
 
 static CATALOG: OnceLock<RwLock<Catalog>> = OnceLock::new();
+static DYNAMIC_NAMES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+fn dynamic_names() -> &'static RwLock<HashMap<String, String>> {
+    DYNAMIC_NAMES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// 动态注册服务商返回的模型友好名称（如 DeepSeek-V4.1-Flash）
+pub fn register_dynamic_model(id: &str, name: &str, _provider: Option<&str>) {
+    let clean_id = id.trim();
+    let clean_name = name.trim();
+    if clean_id.is_empty() || clean_name.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = dynamic_names().write() {
+        map.insert(clean_id.to_lowercase(), clean_name.to_string());
+    }
+}
+
+/// 解析模型的用户友好显示名称 (name)，无法匹配时回落至 model_id
+pub fn resolve_model_display_name(model_id: &str, provider_hint: Option<&str>) -> String {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_lowercase();
+    let sub = lower.split('/').last().unwrap_or(&lower);
+
+    // 1. 优先查动态获取的最新官方名字
+    if let Ok(map) = dynamic_names().read() {
+        if let Some(name) = map.get(&lower).or_else(|| map.get(sub)) {
+            return name.clone();
+        }
+    }
+
+    // 2. 查静态知名模型映射表
+    let known_name = match sub {
+        "deepseek-flash" => Some("DeepSeek-V4.1-Flash"),
+        "deepseek-v4-pro" => Some("DeepSeek-V4-Pro"),
+        "deepseek-chat" => Some("DeepSeek-V3"),
+        "deepseek-reasoner" => Some("DeepSeek-R1"),
+        "gemini-3.8-flash-high" => Some("Gemini 3.8 Flash (High)"),
+        "gemini-3.8-flash" => Some("Gemini 3.8 Flash"),
+        "gemini-3-flash" => Some("Gemini 3 Flash"),
+        "gemini-2.5-pro" => Some("Gemini 2.5 Pro"),
+        "gemini-2.5-flash" => Some("Gemini 2.5 Flash"),
+        "gemini-2.5-flash-thinking" => Some("Gemini 2.5 Flash Thinking"),
+        "claude-opus-4-6-thinking" => Some("Claude Opus 4.6 Thinking"),
+        "claude-sonnet-4-6" => Some("Claude Sonnet 4.6"),
+        "claude-3-7-sonnet" | "claude-3-7-sonnet-20250219" => Some("Claude 3.7 Sonnet"),
+        "claude-3-5-sonnet" | "claude-3-5-sonnet-20241022" => Some("Claude 3.5 Sonnet"),
+        "claude-3-5-haiku" | "claude-3-5-haiku-20241022" => Some("Claude 3.5 Haiku"),
+        "gpt-6.1-sol" => Some("GPT-6.1 Sol"),
+        "gpt-6.1-terra" => Some("GPT-6.1 Terra"),
+        "gpt-6-astra" => Some("GPT-6 Astra"),
+        "gpt-6-sol" => Some("GPT-6 Sol"),
+        "gpt-6-luna" => Some("GPT-6 Luna"),
+        "gpt-5.6-sol" => Some("GPT-5.6 Sol"),
+        "gpt-5.6-terra" => Some("GPT-5.6 Terra"),
+        "gpt-5.6-luna" => Some("GPT-5.6 Luna"),
+        "gpt-4o" => Some("GPT-4o"),
+        "gpt-4o-mini" => Some("GPT-4o mini"),
+        "o1" => Some("o1"),
+        "o3-mini" => Some("o3-mini"),
+        _ => None,
+    };
+    if let Some(n) = known_name {
+        return n.to_string();
+    }
+
+    // 3. 查本地模型目录 (models.dev 缓存)
+    if let Some(m) = lookup(trimmed, provider_hint) {
+        if let Some(n) = m.name {
+            if !n.trim().is_empty() {
+                return n.trim().to_string();
+            }
+        }
+    }
+
+    trimmed.to_string()
+}
 
 fn store() -> &'static RwLock<Catalog> {
     CATALOG.get_or_init(|| RwLock::new(Catalog::default()))

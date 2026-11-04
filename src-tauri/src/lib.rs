@@ -143,6 +143,7 @@ pub fn run() {
             clear_logs,
             get_interceptor_status,
             toggle_interceptor,
+            set_interceptor_model,
             import_third_party_provider,
             get_presets,
             explain_route,

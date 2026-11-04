@@ -113,6 +113,7 @@ export interface InterceptorStatus {
   conflict?: string;
   thirdParty?: ThirdPartyConfig;
   isOverwritten?: boolean;
+  model?: string | null;
 }
 
 export interface SubscriptionAccount {
