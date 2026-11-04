@@ -1,11 +1,13 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
+import { useTranslation } from '@/i18n';
 import { panelClass } from '@/components/common/panelStyles';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
+import { Select } from '@/components/common/Select';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import { ProviderContextMenu } from './ProviderContextMenu';
@@ -36,25 +38,11 @@ const CLIENT_LABEL: Record<InterceptorStatus['id'], string> = {
   pi: 'Pi Agent',
 };
 
-function displayPath(path: string): string {
-  const home = path.match(/^\/(?:Users|home)\/[^/]+/);
-  return home ? `~${path.slice(home[0].length)}` : path;
-}
-
 function ClientMark({ id }: { id: InterceptorStatus['id'] }) {
   if (id === 'codex_cli') return <OpenAISpiralIcon className="w-full h-full" />;
   if (id === 'gemini_cli') return <GeminiLogo className="w-full h-full" />;
   if (id === 'pi') return <PiLogo className="w-full h-full" />;
   return <ClaudeLogo className="w-full h-full" />;
-}
-
-function clientStatus(client: InterceptorStatus): { label: string; className: string } {
-  if (!client.installed) return { label: '未安装', className: 'text-zinc-400 dark:text-zinc-500' };
-  if (client.isOverwritten) {
-    return { label: '配置已被其他工具改写', className: 'text-amber-600 dark:text-amber-400' };
-  }
-  if (client.isIntercepted) return { label: '已接管', className: 'text-emerald-600 dark:text-emerald-400' };
-  return { label: '未接管', className: 'text-zinc-500 dark:text-zinc-400' };
 }
 
 interface PressState {
@@ -91,6 +79,7 @@ function ProviderCard({
   onContextMenu,
   shouldSuppressClick,
 }: ProviderCardProps) {
+  const { t } = useTranslation();
   const { openProviderEditor, toggleProvider, testProviderLatency } = useAppStore(
     useShallow((state) => ({
       openProviderEditor: state.openProviderEditor,
@@ -169,7 +158,7 @@ function ProviderCard({
             ? 'hover:bg-accent/50'
             : 'opacity-55 bg-zinc-50/20 dark:bg-zinc-900/20 hover:bg-zinc-100/40 dark:hover:bg-zinc-800/30'
       }`}
-      aria-label={`编辑服务商 ${provider.name}`}
+      aria-label={t('providers.editProviderAria', { name: provider.name })}
     >
       {isDragged ? (
         <div className="h-6 w-full" aria-hidden />
@@ -198,10 +187,10 @@ function ProviderCard({
               {/* 订阅池标记 */}
               {isSubscription && (
                 <span
-                  title="官方账号订阅池（多账号轮询与配额调度）"
+                  title={t('providers.subscriptionTitle')}
                   className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none"
                 >
-                  订阅
+                  {t('providers.subscription')}
                 </span>
               )}
 
@@ -224,7 +213,7 @@ function ProviderCard({
               <button
                 type="button"
                 onClick={handleCopyBaseUrl}
-                title={copied ? '已复制 Base URL' : '复制 Base URL'}
+                title={copied ? t('providers.copiedBaseUrl') : t('providers.copyBaseUrl')}
                 className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
               >
                 {copied ? (
@@ -239,13 +228,13 @@ function ProviderCard({
             {!provider.enabled ? null : testing ? (
               <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-zinc-400 dark:text-zinc-500 bg-muted/50 select-none">
                 <LoaderCircle className="w-3 h-3 animate-spin text-zinc-400" />
-                <span>测速中</span>
+                <span>{t('providers.testingSpeed')}</span>
               </div>
             ) : provider.latencyMs && provider.latencyMs > 0 ? (
               <button
                 type="button"
                 onClick={handleTestLatency}
-                title={`端点响应 ${provider.latencyMs}ms · 点击重新测速`}
+                title={t('providers.latencyTitle', { ms: provider.latencyMs })}
                 className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer select-none ${
                   provider.latencyMs < 300
                     ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/[0.08] hover:bg-emerald-500/[0.15]'
@@ -269,18 +258,18 @@ function ProviderCard({
               <button
                 type="button"
                 onClick={handleTestLatency}
-                title="端点连接失败 · 点击重新测速"
+                title={t('providers.connectionFailedTitle')}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-rose-600 dark:text-rose-400 bg-rose-500/[0.08] hover:bg-rose-500/[0.15] transition-colors cursor-pointer select-none"
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                <span>无法连接</span>
+                <span>{t('providers.connectionFailed')}</span>
               </button>
             ) : (
               /* 未测速时：仅在 group-hover 时展示轻量的 ⚡ 测速按钮，常态下完全不占位！ */
               <button
                 type="button"
                 onClick={handleTestLatency}
-                title="测试端点延迟"
+                title={t('providers.testLatency')}
                 className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all cursor-pointer"
               >
                 <Zap className="w-3.5 h-3.5" />
@@ -292,7 +281,7 @@ function ProviderCard({
               checked={provider.enabled}
               disabled={toggling}
               onCheckedChange={handleToggle}
-              ariaLabel={provider.enabled ? `停止 ${provider.name} 参与路由` : `让 ${provider.name} 参与路由`}
+              ariaLabel={t(provider.enabled ? 'providers.disableRoutingAria' : 'providers.enableRoutingAria', { name: provider.name })}
             />
           </div>
         </>
@@ -302,10 +291,12 @@ function ProviderCard({
 }
 
 function IngressCard() {
-  const { interceptors, toggleInterceptor, providers, stats, initialLoaded } = useAppStore(
+  const { t } = useTranslation();
+  const { interceptors, toggleInterceptor, setInterceptorModel, providers, stats, initialLoaded } = useAppStore(
     useShallow((state) => ({
       interceptors: state.interceptors,
       toggleInterceptor: state.toggleInterceptor,
+      setInterceptorModel: state.setInterceptorModel,
       providers: state.providers,
       stats: state.stats,
       initialLoaded: state.initialLoaded,
@@ -316,6 +307,26 @@ function IngressCard() {
 
   const hasEnabledProviders = providers.some((p) => p.enabled);
   const gatewayUp = stats.isRunning;
+
+  const globalDefaultModel = useMemo(() => {
+    const p = providers.find((p) => p.enabled && p.defaultModel);
+    return p?.defaultModel ?? null;
+  }, [providers]);
+
+  const availableModels = useMemo(() => {
+    const list: { model: string; providerName: string }[] = [];
+    const seen = new Set<string>();
+    for (const provider of providers) {
+      if (!provider.enabled) continue;
+      for (const m of provider.models) {
+        if (!seen.has(m)) {
+          seen.add(m);
+          list.push({ model: m, providerName: provider.name });
+        }
+      }
+    }
+    return list;
+  }, [providers]);
 
   const doToggle = async (id: InterceptorStatus['id'], enable: boolean) => {
     if (togglingId) return;
@@ -340,33 +351,35 @@ function IngressCard() {
 
   const notice = ((): { text: string; tone: 'fault' | 'warn' | 'hint' } | null => {
     if (!initialLoaded) return null;
-    if (!gatewayUp) return { text: `${stats.port} 未在监听，接管不会生效。`, tone: 'fault' };
+    if (!gatewayUp) return { text: t('clients.portNotListening', { port: stats.port }), tone: 'fault' };
     const takenOver = interceptors.some((client) => client.isIntercepted);
     if (takenOver && !hasEnabledProviders) {
-      return { text: '已接管的请求还没有可转发的上游。', tone: 'warn' };
+      return { text: t('clients.noUpstream'), tone: 'warn' };
     }
     const installed = interceptors.some((client) => client.installed);
     if (hasEnabledProviders && installed && !takenOver) {
-      return { text: '没有客户端被接管，请求仍直连官方；手动接入请展开下方指南。', tone: 'hint' };
+      return { text: t('clients.notTakenOver'), tone: 'hint' };
     }
     return null;
   })();
 
   return (
     <>
-      <section className={panelClass} aria-label="客户端列表">
+      <section className={panelClass} aria-label={t('clients.title')}>
         {interceptors.length === 0 ? (
-          <p className="px-4 py-6 text-center text-xs text-zinc-400">没有读到本机客户端。</p>
+          <p className="px-4 py-6 text-center text-xs text-zinc-400">{t('clients.empty')}</p>
         ) : (
           <div className="divide-y divide-border">
             {interceptors.map((client) => {
               const label = CLIENT_LABEL[client.id] ?? client.name;
-              const status = clientStatus(client);
               const busy = togglingId === client.id;
-              const path = client.installed && client.configPath ? displayPath(client.configPath) : '';
 
               return (
-                <div key={client.id} className="flex items-center justify-between gap-3 px-4 py-2">
+                <div
+                  key={client.id}
+                  className={`flex items-center justify-between gap-3 px-4 py-2.5 ${!client.installed ? 'opacity-60' : ''}`}
+                  title={client.configPath ?? undefined}
+                >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div className={`w-6 h-6 shrink-0 flex items-center justify-center p-1 ${ICON_SLOT}`}>
                       <ClientMark id={client.id} />
@@ -374,36 +387,61 @@ function IngressCard() {
                     <h3 className="shrink-0 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
                       {label}
                     </h3>
-                    <p className="min-w-0 text-[11px] truncate">
-                      <span className={status.className}>{status.label}</span>
-                      {path && (
-                        <span className="text-zinc-400 dark:text-zinc-500 select-text font-mono text-[10px]" title={client.configPath}>
-                          {' '}
-                          · {path}
-                        </span>
-                      )}
-                    </p>
                   </div>
 
-                  <div className="shrink-0">
-                    {busy ? (
-                      <LoaderCircle className="w-4 h-4 animate-spin text-zinc-400" />
-                    ) : client.isOverwritten ? (
-                      <button
-                        type="button"
-                        onClick={() => setConflictConfirmTarget(client)}
-                        className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/50 cursor-pointer"
-                      >
-                        解决冲突
-                      </button>
-                    ) : client.installed ? (
-                      <Switch
-                        checked={client.isIntercepted}
-                        disabled={togglingId !== null}
-                        onCheckedChange={(checked) => handleSwitch(client, checked)}
-                        ariaLabel={client.isIntercepted ? `恢复 ${label}` : `接管 ${label}`}
-                      />
-                    ) : null}
+                  <div className="shrink-0 flex items-center gap-2.5">
+                    {client.installed ? (
+                      <>
+                        <Select
+                          value={client.model ?? ''}
+                          disabled={availableModels.length === 0}
+                          onChange={(e) => {
+                            const next = e.target.value || null;
+                            void setInterceptorModel(client.id, next);
+                          }}
+                          containerClassName="w-32 sm:w-44 shrink-0"
+                          className="h-7 text-[11px] font-mono py-0.5 pl-2 pr-6"
+                          aria-label={`${label} ${t('clients.startupModel')}`}
+                        >
+                          <option value="">
+                            {globalDefaultModel
+                              ? `${t('clients.defaultModelRecommend')} (${globalDefaultModel})`
+                              : t('clients.defaultModelRecommend')}
+                          </option>
+                          {client.model && !availableModels.some((o) => o.model === client.model) && (
+                            <option value={client.model}>{client.model}</option>
+                          )}
+                          {availableModels.map(({ model, providerName }) => (
+                            <option key={`${providerName}:${model}`} value={model}>
+                              {model} ({providerName})
+                            </option>
+                          ))}
+                        </Select>
+
+                        {busy ? (
+                          <LoaderCircle className="w-4 h-4 animate-spin text-zinc-400" />
+                        ) : client.isOverwritten ? (
+                          <button
+                            type="button"
+                            onClick={() => setConflictConfirmTarget(client)}
+                            className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/50 cursor-pointer"
+                          >
+                            {t('clients.resolveConflict')}
+                          </button>
+                        ) : (
+                          <Switch
+                            checked={client.isIntercepted}
+                            disabled={togglingId !== null}
+                            onCheckedChange={(checked) => handleSwitch(client, checked)}
+                            ariaLabel={t(client.isIntercepted ? 'clients.restoreClientAria' : 'clients.interceptClientAria', { name: label })}
+                          />
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-zinc-400 dark:text-zinc-500 py-1">
+                        {t('clients.statusNotInstalled')}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -428,7 +466,7 @@ function IngressCard() {
             {notice.text}
           </span>
         ) : (
-          <span>接管后客户端请求将流经 Pivot 分发；未接管则走官方直连。</span>
+          <span>{t('clients.defaultFooter')}</span>
         )}
       </p>
 
@@ -448,15 +486,17 @@ function IngressCard() {
 }
 
 function LoadingState() {
+  const { t } = useTranslation();
   return (
     <div className="p-12 text-center">
       <LoaderCircle className="w-6 h-6 text-zinc-600 dark:text-zinc-400 animate-spin mx-auto mb-2" />
-      <p className="text-xs text-zinc-400">载入配置中…</p>
+      <p className="text-xs text-zinc-400">{t('providers.loadingConfig')}</p>
     </div>
   );
 }
 
 function UniversalClientCard() {
+  const { t } = useTranslation();
   const stats = useAppStore((state) => state.stats);
   const [copiedType, setCopiedType] = useState<'openai' | 'anthropic' | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -471,7 +511,7 @@ function UniversalClientCard() {
   };
 
   return (
-    <section className={panelClass} aria-label="通用客户端手动接入">
+    <section className={panelClass} aria-label={t('clients.universalCard.title')}>
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
@@ -483,7 +523,7 @@ function UniversalClientCard() {
         <div className="flex items-center gap-2">
           <Code2 className="w-3.5 h-3.5 text-zinc-500" />
           <span className="font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            通用客户端手动接入
+            {t('clients.universalCard.title')}
           </span>
         </div>
         <ChevronDown
@@ -494,7 +534,7 @@ function UniversalClientCard() {
       {expanded && (
       <div className="p-4 space-y-3 text-xs">
         <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-          在任意支持自定义 API 的开发工具中填入下方 Base URL，API Key 可填任意字符串（如 <code className="font-mono px-1 py-0.5 rounded bg-muted text-foreground">pivot</code>），Pivot 将根据请求的模型智能分发到对应的上游服务商。
+          {t('clients.universalCard.description')}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
@@ -503,7 +543,7 @@ function UniversalClientCard() {
             <div>
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-[12px]">
-                  OpenAI 兼容协议
+                  {t('clients.universalCard.openaiTitle')}
                 </span>
                 <span className="text-[10px] text-zinc-400 font-mono">/v1/chat/completions</span>
               </div>
@@ -523,7 +563,7 @@ function UniversalClientCard() {
               ) : (
                 <Copy className="w-3 h-3" />
               )}
-              <span>{copiedType === 'openai' ? '已复制 Base URL' : '复制 Base URL'}</span>
+              <span>{copiedType === 'openai' ? t('clients.universalCard.copiedBaseUrl') : t('clients.universalCard.copyBaseUrl')}</span>
             </Button>
           </div>
 
@@ -532,7 +572,7 @@ function UniversalClientCard() {
             <div>
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-[12px]">
-                  Anthropic 兼容协议
+                  {t('clients.universalCard.anthropicTitle')}
                 </span>
                 <span className="text-[10px] text-zinc-400 font-mono">/v1/messages</span>
               </div>
@@ -552,7 +592,7 @@ function UniversalClientCard() {
               ) : (
                 <Copy className="w-3 h-3" />
               )}
-              <span>{copiedType === 'anthropic' ? '已复制 Base URL' : '复制 Base URL'}</span>
+              <span>{copiedType === 'anthropic' ? t('clients.universalCard.copiedBaseUrl') : t('clients.universalCard.copyBaseUrl')}</span>
             </Button>
           </div>
         </div>
@@ -574,6 +614,7 @@ export function ClientsView() {
 }
 
 export function ProviderList() {
+  const { t } = useTranslation();
   const {
     providers,
     initialLoaded,
@@ -776,10 +817,10 @@ export function ProviderList() {
 
   return (
     <div className="animate-in fade-in duration-150">
-      <section className={panelClass} aria-label="服务商">
+      <section className={panelClass} aria-label={t('providers.title')}>
         {providers.length === 0 ? (
           <div className="px-4 py-10 text-center text-xs text-muted-foreground space-y-2">
-            <p>尚未配置任何服务商渠道</p>
+            <p>{t('providers.emptyTitle')}</p>
             <Button
               type="button"
               variant="outline"
@@ -787,7 +828,7 @@ export function ProviderList() {
               onClick={() => openProviderEditor(null)}
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>添加服务商</span>
+              <span>{t('providers.addProvider')}</span>
             </Button>
           </div>
         ) : (
@@ -836,12 +877,13 @@ export function ProviderList() {
       {deleteTarget && (
         <ConfirmDialog
           open={deleteTarget !== null}
-          title={`确定删除服务商「${deleteTarget.name}」吗？`}
+          title={t('providers.deleteConfirmTitle', { name: deleteTarget.name })}
           details={[
-            '删除后该服务商的 API Key、自定义模型以及路由分流规则将一并移除。',
-            '该操作不可恢复。',
+            t('providers.deleteConfirmDetail1'),
+            t('providers.deleteConfirmDetail2'),
           ]}
-          confirmLabel="确认删除"
+          confirmLabel={t('providers.confirmDelete')}
+          cancelLabel={t('common.cancel')}
           variant="danger"
           busy={isDeleting}
           onCancel={() => setDeleteTarget(null)}

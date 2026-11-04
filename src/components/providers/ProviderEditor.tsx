@@ -28,6 +28,7 @@ import {
   ProviderAvatar,
 } from '@/components/common/BrandIcons';
 import { useAppStore } from '@/store/useAppStore';
+import { useTranslation } from '@/i18n';
 import type { Preset, Protocol, Provider, SubscriptionAccount, AccountQuota } from '@/types';
 import clsx from 'clsx';
 import { Select } from '@/components/common/Select';
@@ -50,16 +51,17 @@ interface ModelCapability {
   reasoning: boolean;
 }
 
-const protocols: Record<Protocol, string> = {
-  openai: 'OpenAI 兼容',
-  anthropic: 'Anthropic',
-  gemini: 'Google Gemini',
-  openrouter: 'OpenRouter',
-  ollama: 'Ollama',
-  chatgpt: 'ChatGPT',
-};
+const PROTOCOLS: Protocol[] = [
+  'openai',
+  'anthropic',
+  'gemini',
+  'openrouter',
+  'ollama',
+  'chatgpt',
+];
 
 export function ProviderEditor() {
+  const { t, locale } = useTranslation();
   const { editingProvider, presets, providers, closeProviderEditor, saveProvider, deleteProvider, activeTab } =
     useAppStore();
   // 还没有可用的默认服务商时，新添加的第一个服务商默认承担该角色。
@@ -159,31 +161,33 @@ export function ProviderEditor() {
     const target = new Date(resetTimeStr).getTime();
     if (isNaN(target)) return null;
     const diffMs = target - Date.now();
-    if (diffMs <= 0) return '即将重置';
+    if (diffMs <= 0) return locale === 'zh-CN' ? '即将重置' : 'Resetting soon';
     const totalMinutes = Math.floor(diffMs / 60000);
-    if (totalMinutes < 60) return `${totalMinutes}分钟后重置`;
+    if (totalMinutes < 60) return locale === 'zh-CN' ? `${totalMinutes}分钟后重置` : `Resets in ${totalMinutes}m`;
     const totalHours = Math.floor(totalMinutes / 60);
     if (totalHours < 24) {
       const remMins = totalMinutes % 60;
       if (totalHours < 6 && remMins > 0) {
-        return `${totalHours}小时${remMins}分钟后重置`;
+        return locale === 'zh-CN' ? `${totalHours}小时${remMins}分钟后重置` : `Resets in ${totalHours}h ${remMins}m`;
       }
-      return `${totalHours}小时后重置`;
+      return locale === 'zh-CN' ? `${totalHours}小时后重置` : `Resets in ${totalHours}h`;
     }
     const days = Math.floor(totalHours / 24);
     const remHours = totalHours % 24;
-    return `${days}天${remHours}小时后重置`;
+    return locale === 'zh-CN' ? `${days}天${remHours}小时后重置` : `Resets in ${days}d ${remHours}h`;
   };
 
   const formatCreditExpiry = (isoStr: string) => {
-    if (!isoStr) return '未知';
+    if (!isoStr) return locale === 'zh-CN' ? '未知' : 'Unknown';
     const d = new Date(isoStr);
     if (isNaN(d.getTime())) return isoStr;
     const year = d.getFullYear();
     const month = (d.getMonth() + 1).toString().padStart(2, '0');
     const day = d.getDate().toString().padStart(2, '0');
     const diffDays = Math.ceil((d.getTime() - Date.now()) / (1000 * 86400));
-    const diffDesc = diffDays > 0 ? ` (${diffDays}天后到期)` : ' (即将到期)';
+    const diffDesc = diffDays > 0
+      ? (locale === 'zh-CN' ? ` (${diffDays}天后到期)` : ` (expires in ${diffDays}d)`)
+      : (locale === 'zh-CN' ? ' (即将到期)' : ' (expires soon)');
     return `${year}-${month}-${day}${diffDesc}`;
   };
 
@@ -198,9 +202,9 @@ export function ProviderEditor() {
         accountId,
       });
       setAccountQuotas((prev) => ({ ...prev, [accountId]: updated }));
-      setNotice('已使用 1 张重置卡，配额已恢复！');
+      setNotice(locale === 'zh-CN' ? '已使用 1 张重置卡，配额已恢复！' : 'Used 1 reset card, quota restored!');
     } catch (e: any) {
-      setOauthError(typeof e === 'string' ? e : e?.message || '使用重置卡失败');
+      setOauthError(typeof e === 'string' ? e : e?.message || (locale === 'zh-CN' ? '使用重置卡失败' : 'Failed to use reset card'));
     } finally {
       setConsumingCreditAccountId(null);
     }
@@ -266,7 +270,11 @@ export function ProviderEditor() {
         setFetched(unique);
 
         // 获取模型之后，默认不选中：保留已选模型不变，新增模型放入候选池供用户挑选
-        setNotice(`已获取上游 ${unique.length} 个可用模型，请按需勾选`);
+        setNotice(
+          locale === 'zh-CN'
+            ? `已获取上游 ${unique.length} 个可用模型，请按需勾选`
+            : `Fetched ${unique.length} models from upstream, select as needed`,
+        );
         return unique;
       }
     } catch (e: any) {
@@ -296,7 +304,11 @@ export function ProviderEditor() {
       'gpt-oss-120b-medium',
     ]);
     setPool((prev) => uniqueValues([...prev, ...fallbackList]));
-    setNotice(`上游模型接口受限，已载入 ${fallbackList.length} 个推荐模型到候选池`);
+    setNotice(
+      locale === 'zh-CN'
+        ? `上游模型接口受限，已载入 ${fallbackList.length} 个推荐模型到候选池`
+        : `Upstream model API restricted, loaded ${fallbackList.length} recommended models into candidate pool`,
+    );
     return fallbackList;
   };
 
@@ -338,9 +350,13 @@ export function ProviderEditor() {
         providerId: draft.id,
         accountType: 'antigravity',
       });
-      await postAccountConnect('账号已连接，服务商已自动就绪并启用');
+      await postAccountConnect(
+        locale === 'zh-CN' ? '账号已连接，服务商已自动就绪并启用' : 'Account connected, provider ready and enabled',
+      );
     } catch (err: any) {
-      setOauthError(typeof err === 'string' ? err : err?.message || '授权失败，请重试');
+      setOauthError(
+        typeof err === 'string' ? err : err?.message || (locale === 'zh-CN' ? '授权失败，请重试' : 'Authorization failed, please retry'),
+      );
     } finally {
       setAuthorizing(false);
     }
@@ -354,9 +370,13 @@ export function ProviderEditor() {
         providerId: draft.id,
         accountType: 'chatgpt',
       });
-      await postAccountConnect('ChatGPT 订阅账号已连接并启用');
+      await postAccountConnect(
+        locale === 'zh-CN' ? 'ChatGPT 订阅账号已连接并启用' : 'ChatGPT account connected and enabled',
+      );
     } catch (err: any) {
-      setOauthError(typeof err === 'string' ? err : err?.message || '授权失败，请重试');
+      setOauthError(
+        typeof err === 'string' ? err : err?.message || (locale === 'zh-CN' ? '授权失败，请重试' : 'Authorization failed, please retry'),
+      );
     } finally {
       setAuthorizing(false);
     }
@@ -369,9 +389,18 @@ export function ProviderEditor() {
       await invoke<SubscriptionAccount>('import_codex_subscription_account', {
         providerId: draft.id,
       });
-      await postAccountConnect('已从本地 Codex 导入凭证并启用');
+      await postAccountConnect(
+        locale === 'zh-CN' ? '已从本地 Codex 导入凭证并启用' : 'Codex credentials imported and enabled',
+      );
     } catch (err: any) {
-      setOauthError(typeof err === 'string' ? err : err?.message || '导入失败，请确保本地已登录 Codex CLI');
+      setOauthError(
+        typeof err === 'string'
+          ? err
+          : err?.message ||
+              (locale === 'zh-CN'
+                ? '导入失败，请确保本地已登录 Codex CLI'
+                : 'Import failed, please ensure local Codex CLI is logged in'),
+      );
     } finally {
       setImportingCodex(false);
     }
@@ -386,7 +415,12 @@ export function ProviderEditor() {
             (prov.authType === 'subscription_pool' && prov.presetId === draft.presetId)),
       );
       if (duplicate) {
-        setErrors({ save: `已存在同类型的官方订阅服务商（${duplicate.name}），无需重复创建。` });
+        setErrors({
+          save:
+            locale === 'zh-CN'
+              ? `已存在同类型的官方订阅服务商（${duplicate.name}），无需重复创建。`
+              : `A subscription provider of this type already exists (${duplicate.name}).`,
+        });
         return;
       }
     }
@@ -600,8 +634,12 @@ export function ProviderEditor() {
     update({ baseUrl, latencyMs: undefined, ...(clearKeys ? { apiKeys: [] } : {}) });
     setNotice(
       clearKeys
-        ? '接口主机已更改，原密钥已清除，请填写此服务商的新密钥。'
-        : '连接信息已更改，已选模型保留，建议重新获取模型进行验证。',
+        ? (locale === 'zh-CN'
+            ? '接口主机已更改，原密钥已清除，请填写此服务商的新密钥。'
+            : 'Host URL changed, previous keys cleared. Please enter new keys for this provider.')
+        : (locale === 'zh-CN'
+            ? '连接信息已更改，已选模型保留，建议重新获取模型进行验证。'
+            : 'Connection info changed, selected models kept. We recommend fetching models again to verify.'),
     );
   };
 
@@ -670,9 +708,17 @@ export function ProviderEditor() {
       });
 
       if (removedCount > 0) {
-        setNotice(`已获取上游 ${unique.length} 个可用模型，已自动清理 ${removedCount} 个不存在的过期模型`);
+        setNotice(
+          locale === 'zh-CN'
+            ? `已获取上游 ${unique.length} 个可用模型，已自动清理 ${removedCount} 个不存在的过期模型`
+            : `Fetched ${unique.length} models from upstream, automatically removed ${removedCount} invalid models`,
+        );
       } else {
-        setNotice(`已获取上游 ${unique.length} 个可用模型，请按需勾选`);
+        setNotice(
+          locale === 'zh-CN'
+            ? `已获取上游 ${unique.length} 个可用模型，请按需勾选`
+            : `Fetched ${unique.length} models from upstream, select as needed`,
+        );
       }
     } catch (error) {
       if (requestId.current === current) setFetchError(String(error));
@@ -709,7 +755,12 @@ export function ProviderEditor() {
   const addManualModel = () => {
     const model = manualModel.trim();
     if (!model || /[\s,，]/u.test(model)) {
-      setErrors({ models: '请输入一个完整的模型 ID，不要包含空格或逗号' });
+      setErrors({
+        models:
+          locale === 'zh-CN'
+            ? '请输入一个完整的模型 ID，不要包含空格或逗号'
+            : 'Please enter a complete model ID without spaces or commas',
+      });
       return;
     }
     replaceModels([...draft.models, model]);
@@ -721,14 +772,24 @@ export function ProviderEditor() {
     if (saving) return;
 
     const nextErrors: Record<string, string> = {};
-    if (!draft.name.trim()) nextErrors.name = '请输入服务商名称';
+    if (!draft.name.trim())
+      nextErrors.name = locale === 'zh-CN' ? '请输入服务商名称' : 'Please enter provider name';
     const urlError = validateBaseUrl(draft.baseUrl);
     if (urlError) nextErrors.baseUrl = urlError;
-    if (!draft.models.length) nextErrors.models = '请至少选择或手动添加一个模型';
-    if (manualModel.trim()) nextErrors.models = '请先点击添加正在输入的模型，或清空输入框';
+    if (!draft.models.length)
+      nextErrors.models =
+        locale === 'zh-CN' ? '请至少选择或手动添加一个模型' : 'Please select or add at least one model';
+    if (manualModel.trim())
+      nextErrors.models =
+        locale === 'zh-CN'
+          ? '请先点击添加正在输入的模型，或清空输入框'
+          : 'Please click Add to add current input or clear input box';
     const defaultModel = draft.defaultModel?.trim() ?? '';
     if (/[\s,，]/u.test(defaultModel))
-      nextErrors.defaultModel = '请输入一个完整的模型 ID，不要包含空格或逗号';
+      nextErrors.defaultModel =
+        locale === 'zh-CN'
+          ? '请输入一个完整的模型 ID，不要包含空格或逗号'
+          : 'Please enter a complete model ID without spaces or commas';
 
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) {
@@ -746,7 +807,12 @@ export function ProviderEditor() {
             (prov.authType === 'subscription_pool' && prov.presetId === draft.presetId)),
       );
       if (duplicate) {
-        setErrors({ save: `已存在同类型的官方订阅服务商（${duplicate.name}），无需重复创建。` });
+        setErrors({
+          save:
+            locale === 'zh-CN'
+              ? `已存在同类型的官方订阅服务商（${duplicate.name}），无需重复创建。`
+              : `A subscription provider of this type already exists (${duplicate.name}).`,
+        });
         return;
       }
     }
@@ -854,40 +920,40 @@ export function ProviderEditor() {
           <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
             <span className="text-xs font-medium text-rose-700 dark:text-rose-300">
               {confirmation.kind === 'preset'
-                ? '放弃已填内容并重选预设？'
-                : '存在未保存的修改，确认放弃？'}
+                ? (locale === 'zh-CN' ? '放弃已填内容并重选预设？' : 'Discard input and select preset?')
+                : t('providerEditor.leaveConfirmTitle')}
             </span>
             <button
               type="button"
               onClick={handleConfirmAbandon}
               className="inline-flex h-7 items-center justify-center rounded-md bg-rose-600 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-rose-700 cursor-pointer"
             >
-              确认放弃
+              {t('providerEditor.discard')}
             </button>
             <button
               type="button"
               onClick={() => setConfirmation(null)}
               className="inline-flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-white dark:text-zinc-400 dark:hover:bg-zinc-800 cursor-pointer"
             >
-              继续编辑
+              {t('providerEditor.continueEditing')}
             </button>
           </div>
         ) : (
-          <nav aria-label="页面层级" className="flex items-center gap-1.5 text-xs">
+          <nav aria-label={locale === 'zh-CN' ? '页面层级' : 'Navigation hierarchy'} className="flex items-center gap-1.5 text-xs">
             <button
               type="button"
               onClick={handleBack}
               className="-ml-2 inline-flex h-7 items-center gap-1 rounded-md px-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              title="返回服务商列表"
+              title={t('common.back')}
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>服务商</span>
+              <span>{t('header.providers')}</span>
             </button>
             <span className="text-zinc-300 dark:text-zinc-700 select-none">/</span>
             <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[160px] sm:max-w-[260px]">
               {choosing
-                ? '选择预设'
-                : draft.name.trim() || (currentEditingProvider ? '未命名服务商' : '新增服务商')}
+                ? (locale === 'zh-CN' ? '选择预设' : 'Select Preset')
+                : draft.name.trim() || (currentEditingProvider ? (locale === 'zh-CN' ? '未命名服务商' : 'Unnamed Provider') : t('providerEditor.newProvider'))}
             </span>
           </nav>
         )}
@@ -897,7 +963,7 @@ export function ProviderEditor() {
       <div
         ref={drawerRef}
         role="region"
-        aria-label={currentEditingProvider ? '编辑服务商' : '添加服务商'}
+        aria-label={currentEditingProvider ? t('providerEditor.editProvider') : t('providerEditor.newProvider')}
         className="p-4 rounded-lg border border-border bg-card text-card-foreground shadow-2xs space-y-4"
       >
         {/* 表单内容 */}
@@ -910,7 +976,7 @@ export function ProviderEditor() {
                 <Input
                   autoFocus
                   type="text"
-                  placeholder="搜索预设：Anthropic、OpenAI、DeepSeek…"
+                  placeholder={t('providerEditor.searchPresets')}
                   value={presetSearch}
                   onChange={(e) => setPresetSearch(e.target.value)}
                   className="pl-8 pr-8 h-8 text-xs bg-zinc-500/[0.05] dark:bg-white/[0.05] border-transparent shadow-none focus-visible:border-transparent focus-visible:ring-zinc-400/40 dark:focus-visible:ring-zinc-500/40"
@@ -920,7 +986,7 @@ export function ProviderEditor() {
                     type="button"
                     onClick={() => setPresetSearch('')}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
-                    title="清空"
+                    title={t('common.close')}
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -929,7 +995,7 @@ export function ProviderEditor() {
 
               {matchingPresets.length === 0 ? (
                 <div className="py-10 text-center space-y-2">
-                  <p className="text-xs text-zinc-400">没有匹配的服务商预设</p>
+                  <p className="text-xs text-zinc-400">{locale === 'zh-CN' ? '没有匹配的服务商预设' : 'No matching presets'}</p>
                   <Button
                     type="button"
                     variant="outline"
@@ -937,7 +1003,7 @@ export function ProviderEditor() {
                     onClick={() => choosePreset()}
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>创建自定义服务商</span>
+                    <span>{t('providerEditor.customProvider')}</span>
                   </Button>
                 </div>
               ) : (
@@ -952,7 +1018,7 @@ export function ProviderEditor() {
                       <Plus className="w-3.5 h-3.5" />
                     </span>
                     <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 truncate">
-                      自定义服务商
+                      {t('providerEditor.customProvider')}
                     </span>
                   </button>
 
@@ -984,11 +1050,11 @@ export function ProviderEditor() {
                             variant="secondary"
                             className="text-[10px] px-1.5 py-0.5 font-normal shrink-0 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20"
                           >
-                            已添加
+                            {locale === 'zh-CN' ? '已添加' : 'Added'}
                           </Badge>
                         ) : isSub ? (
                           <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 font-normal shrink-0">
-                            官方订阅
+                            {t('providerEditor.categories.official')}
                           </Badge>
                         ) : null}
                       </button>
@@ -1003,19 +1069,19 @@ export function ProviderEditor() {
               {/* 基础连接设置 */}
               <div className="space-y-3.5">
                 <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-                  基础连接信息
+                  {t('providerEditor.basicSettings')}
                 </h3>
 
                 {/* 服务商名称 */}
                 <div>
                   <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                    服务商名称
+                    {t('providerEditor.providerName')}
                   </label>
                   <Input
                     type="text"
                     value={draft.name}
                     onChange={(e) => update({ name: e.target.value })}
-                    placeholder="例如 Anthropic Claude、DeepSeek 官方"
+                    placeholder={t('providerEditor.providerNamePlaceholder')}
                   />
                   {errors.name && <p className="text-[11px] text-rose-500 mt-1">{errors.name}</p>}
                 </div>
@@ -1025,9 +1091,9 @@ export function ProviderEditor() {
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-500/[0.04] dark:bg-white/[0.04] border border-border text-xs text-foreground">
                     <div className="flex items-center gap-2">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-                      <span className="font-medium">官方订阅账号接入</span>
+                      <span className="font-medium">{t('providerEditor.categories.official')}</span>
                       <span className="text-[11px] text-muted-foreground hidden sm:inline">
-                        · 浏览器授权登录，支持多账号自动轮询与限流冷却
+                        {locale === 'zh-CN' ? '· 浏览器授权登录，支持多账号自动轮询与限流冷却' : '· Browser authorization, multi-account rotation & cooldown'}
                       </span>
                     </div>
                     <Badge variant="secondary" className="font-mono text-[10px]">
@@ -1038,11 +1104,11 @@ export function ProviderEditor() {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                        协议格式
+                        {t('providerEditor.protocol')}
                       </label>
                       {preset ? (
                         <div className="px-3 py-2 text-xs font-mono rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-700 dark:text-zinc-300">
-                          {protocols[draft.protocol]}
+                          {t(`providerEditor.protocols.${draft.protocol}`)}
                         </div>
                       ) : (
                         <Select
@@ -1054,13 +1120,13 @@ export function ProviderEditor() {
                               apiKeys: [],
                               models: [],
                             });
-                            setNotice('协议已更改，请重新填写密钥并选择可用模型。');
+                            setNotice(locale === 'zh-CN' ? '协议已更改，请重新填写密钥并选择可用模型。' : 'Protocol changed, please update API keys and models.');
                           }}
                           containerClassName="w-full"
                         >
-                          {Object.entries(protocols).map(([id, label]) => (
+                          {PROTOCOLS.map((id) => (
                             <option key={id} value={id}>
-                              {label}
+                              {t(`providerEditor.protocols.${id}`)}
                             </option>
                           ))}
                         </Select>
@@ -1070,14 +1136,14 @@ export function ProviderEditor() {
                     <div className="sm:col-span-2">
                       <div className="flex items-center justify-between mb-1">
                         <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                          接口基地址 (Base URL)
+                          {t('providerEditor.baseUrl')}
                         </label>
                         {draft.baseUrl.trim() && (
                           <div className="flex items-center gap-1.5 text-xs">
                             {testingConnection ? (
                               <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
                                 <LoaderCircle className="w-3 h-3 animate-spin text-zinc-500" />
-                                <span>测试中…</span>
+                                <span>{t('providerEditor.testingConnection')}</span>
                               </span>
                             ) : latencyResult ? (
                               <span
@@ -1102,7 +1168,7 @@ export function ProviderEditor() {
                                   onClick={testConnection}
                                   className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 underline ml-0.5 cursor-pointer"
                                 >
-                                  重测
+                                  {locale === 'zh-CN' ? '重测' : 'Retest'}
                                 </button>
                               </span>
                             ) : (
@@ -1112,7 +1178,7 @@ export function ProviderEditor() {
                                 className="text-[11px] text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 flex items-center gap-0.5 cursor-pointer transition-colors"
                               >
                                 <Zap className="w-3 h-3 shrink-0" />
-                                <span>测试连接</span>
+                                <span>{t('providerEditor.testConnection')}</span>
                               </button>
                             )}
                           </div>
@@ -1140,16 +1206,19 @@ export function ProviderEditor() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <label className="text-xs font-bold text-foreground tracking-wider">
-                            账号池
+                            {t('providerEditor.accountPool')}
                           </label>
                           <Badge variant="secondary" className="font-mono text-[10px]">
                             {subAccounts.length > 0
-                              ? `${subAccounts.filter((a) => a.enabled).length} / ${subAccounts.length} 可用`
-                              : '未连接'}
+                              ? t('providerEditor.accountAvailable', {
+                                  available: subAccounts.filter((a) => a.enabled).length,
+                                  total: subAccounts.length,
+                                })
+                              : t('providerEditor.notConnected')}
                           </Badge>
                           {subAccounts.length > 1 && (
                             <span className="text-[10px] text-muted-foreground hidden sm:inline select-none">
-                              · 自动轮询均衡
+                              {t('providerEditor.autoRoundRobin')}
                             </span>
                           )}
                           {loadingAccounts && <LoaderCircle className="w-3 h-3 animate-spin text-muted-foreground" />}
@@ -1167,10 +1236,10 @@ export function ProviderEditor() {
                                 {importingCodex ? (
                                   <>
                                     <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
-                                    <span>导入中…</span>
+                                    <span>{t('providerEditor.importing')}</span>
                                   </>
                                 ) : (
-                                  <span>导入本地凭据</span>
+                                  <span>{t('providerEditor.importLocalCreds')}</span>
                                 )}
                               </Button>
                               <Button
@@ -1183,12 +1252,12 @@ export function ProviderEditor() {
                                 {authorizing ? (
                                   <>
                                     <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
-                                    <span>等待浏览器授权…</span>
+                                    <span>{t('providerEditor.waitingBrowserAuth')}</span>
                                   </>
                                 ) : (
                                   <>
                                     <Plus className="w-3 h-3 mr-1" />
-                                    <span>添加账号</span>
+                                    <span>{t('providerEditor.addAccount')}</span>
                                   </>
                                 )}
                               </Button>
@@ -1204,12 +1273,12 @@ export function ProviderEditor() {
                               {authorizing ? (
                                 <>
                                   <LoaderCircle className="w-3 h-3 animate-spin mr-1" />
-                                  <span>等待浏览器授权…</span>
+                                  <span>{t('providerEditor.waitingBrowserAuth')}</span>
                                 </>
                               ) : (
                                 <>
                                   <Plus className="w-3 h-3 mr-1" />
-                                  <span>添加账号</span>
+                                  <span>{t('providerEditor.addAccount')}</span>
                                 </>
                               )}
                             </Button>
@@ -1230,12 +1299,12 @@ export function ProviderEditor() {
                             <Zap className="w-5 h-5" />
                           </div>
                           <div className="text-xs font-semibold text-foreground mb-1">
-                            尚未连接账号
+                            {t('providerEditor.noAccountsConnected')}
                           </div>
                           <div className="text-[11px] text-muted-foreground max-w-sm mx-auto mb-3.5 leading-relaxed">
                             {isChatGPT
-                              ? '可一键导入本地 ~/.codex/auth.json 凭据，或在浏览器中登录 ChatGPT 订阅账号。'
-                              : '点击下方按钮在浏览器中完成授权登录，授权后将自动接入订阅配额与模型。'}
+                              ? t('providerEditor.connectAccountChatGPTDesc')
+                              : t('providerEditor.connectAccountGoogleDesc')}
                           </div>
                           {isChatGPT ? (
                             <div className="flex items-center justify-center gap-2">
@@ -1249,10 +1318,10 @@ export function ProviderEditor() {
                                 {importingCodex ? (
                                   <>
                                     <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
-                                    <span>导入中…</span>
+                                    <span>{t('providerEditor.importing')}</span>
                                   </>
                                 ) : (
-                                  <span>从本地 Codex 导入</span>
+                                  <span>{t('providerEditor.importFromCodexBtn')}</span>
                                 )}
                               </Button>
                               <Button
@@ -1265,12 +1334,12 @@ export function ProviderEditor() {
                                 {authorizing ? (
                                   <>
                                     <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
-                                    <span>请在浏览器中完成授权…</span>
+                                    <span>{t('providerEditor.pleaseAuthorizeInBrowser')}</span>
                                   </>
                                 ) : (
                                   <>
                                     <Plus className="w-3.5 h-3.5 mr-1.5" />
-                                    <span>网页授权登录</span>
+                                    <span>{t('providerEditor.webAuthLogin')}</span>
                                   </>
                                 )}
                               </Button>
@@ -1286,12 +1355,12 @@ export function ProviderEditor() {
                               {authorizing ? (
                                 <>
                                   <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
-                                  <span>请在浏览器中完成授权…</span>
+                                  <span>{t('providerEditor.pleaseAuthorizeInBrowser')}</span>
                                 </>
                               ) : (
                                 <>
                                   <Plus className="w-3.5 h-3.5 mr-1.5" />
-                                  <span>立即连接账号</span>
+                                  <span>{t('providerEditor.connectAccountNow')}</span>
                                 </>
                               )}
                             </Button>
@@ -1315,18 +1384,20 @@ export function ProviderEditor() {
                                 <div className="flex items-center justify-between gap-3">
                                   <div className="flex items-center gap-2.5 min-w-0">
                                     <span className="text-xs font-medium text-foreground truncate">
-                                      {acc.email || `账号 ${acc.id.slice(0, 8)}`}
+                                      {acc.email || (locale === 'zh-CN' ? `账号 ${acc.id.slice(0, 8)}` : `Account ${acc.id.slice(0, 8)}`)}
                                     </span>
                                     {!acc.enabled ? (
-                                      <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">已禁用</span>
+                                      <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">
+                                        {t('providerEditor.accountDisabled')}
+                                      </span>
                                     ) : isCooldown ? (
                                       <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium shrink-0">
-                                        ● 429 冷却中 ({cooldownRemaining}m)
+                                        {t('providerEditor.cooldown', { minutes: cooldownRemaining })}
                                       </span>
                                     ) : (
                                       <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1 shrink-0">
                                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-                                        <span>正常活跃</span>
+                                        <span>{t('providerEditor.activeNormal')}</span>
                                       </span>
                                     )}
                                   </div>
@@ -1336,9 +1407,9 @@ export function ProviderEditor() {
                                       type="button"
                                       onClick={() => toggleExpandQuota(acc.id)}
                                       className="h-7 px-2 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 cursor-pointer transition-colors flex items-center gap-1"
-                                      title={isExpanded ? "收起额度详情" : "展开并查看配额额度"}
+                                      title={isExpanded ? t('providerEditor.collapseQuotaTooltip') : t('providerEditor.viewQuotaTooltip')}
                                     >
-                                      <span>{isExpanded ? '收起配额' : '查看配额'}</span>
+                                      <span>{isExpanded ? t('providerEditor.collapseQuota') : t('providerEditor.viewQuota')}</span>
                                       {isExpanded ? (
                                         <ChevronUp className="w-3 h-3 text-zinc-400" />
                                       ) : (
@@ -1349,13 +1420,13 @@ export function ProviderEditor() {
                                     <Switch
                                       checked={acc.enabled}
                                       onCheckedChange={(checked) => handleToggleAccount(acc.id, checked)}
-                                      ariaLabel="启用账号"
+                                      ariaLabel={t('providerEditor.enableAccountAria')}
                                     />
                                     <button
                                       type="button"
                                       onClick={() => handleDeleteAccount(acc.id)}
                                       className="p-1 rounded-md text-zinc-400 hover:text-rose-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
-                                      title="解绑并删除此账号"
+                                      title={t('providerEditor.deleteAccountTitle')}
                                     >
                                       <X className="w-3.5 h-3.5" />
                                     </button>
@@ -1367,7 +1438,7 @@ export function ProviderEditor() {
                                   <div className="mt-2.5 pt-2 border-t border-border/50">
                                     <div className="flex items-center justify-between mb-2">
                                       <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
-                                        {isChatGPT ? '订阅状态与配额' : '使用配额 (5小时 / 周周期)'}
+                                        {isChatGPT ? t('providerEditor.chatgptQuotaTitle') : t('providerEditor.googleQuotaTitle')}
                                       </span>
                                       <button
                                         type="button"
@@ -1376,14 +1447,14 @@ export function ProviderEditor() {
                                         className="text-[10px] text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
                                       >
                                         <RefreshCw className={clsx("w-3 h-3", isRefreshingThis && "animate-spin text-primary")} />
-                                        <span>{isRefreshingThis ? '查询中…' : '刷新'}</span>
+                                        <span>{isRefreshingThis ? t('providerEditor.refreshing') : t('providerEditor.refresh')}</span>
                                       </button>
                                     </div>
 
                                     {isRefreshingThis && !quota ? (
                                       <div className="py-2.5 flex items-center justify-center gap-2 text-[11px] text-muted-foreground">
                                         <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-                                        <span>正在拉取最新配额…</span>
+                                        <span>{t('providerEditor.fetchingQuota')}</span>
                                       </div>
                                     ) : quota && (quota.buckets.length > 0 || (quota.resetCredits && quota.resetCredits.length > 0)) ? (
                                       <div className="space-y-2">
@@ -1409,7 +1480,9 @@ export function ProviderEditor() {
                                                           : "text-zinc-600 dark:text-zinc-300"
                                                       )}
                                                     >
-                                                      {isOut ? `已耗尽${resetDesc ? ` · ${resetDesc}` : ''}` : `${pct}%${resetDesc ? ` · ${resetDesc}` : ''}`}
+                                                      {isOut
+                                                        ? `${t('providerEditor.exhausted')}${resetDesc ? ` · ${resetDesc}` : ''}`
+                                                        : `${pct}%${resetDesc ? ` · ${resetDesc}` : ''}`}
                                                     </span>
                                                   </div>
                                                   <div className="w-full h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800/80 overflow-hidden">
@@ -1433,9 +1506,9 @@ export function ProviderEditor() {
                                             <div className="flex items-center justify-between">
                                               <div className="flex items-center gap-1.5 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
                                                 <Sparkles className="w-3 h-3 text-amber-500" />
-                                                <span>限流重置卡</span>
+                                                <span>{t('providerEditor.resetCredits')}</span>
                                                 <Badge variant="secondary" className="text-[9px] px-1 py-0 h-4 font-mono">
-                                                  {quota.resetCredits.length} 张可用
+                                                  {t('providerEditor.cardsAvailable', { count: quota.resetCredits.length })}
                                                 </Badge>
                                               </div>
                                             </div>
@@ -1447,7 +1520,7 @@ export function ProviderEditor() {
                                                 >
                                                   <div className="min-w-0">
                                                     <span className="text-[10px] text-muted-foreground">
-                                                      到期时间：{formatCreditExpiry(credit.expiresAt)}
+                                                      {t('providerEditor.expiryTime')}{formatCreditExpiry(credit.expiresAt)}
                                                     </span>
                                                   </div>
                                                   <Button
@@ -1461,10 +1534,10 @@ export function ProviderEditor() {
                                                     {consumingCreditAccountId === acc.id ? (
                                                       <>
                                                         <LoaderCircle className="w-2.5 h-2.5 animate-spin mr-1" />
-                                                        <span>使用中…</span>
+                                                        <span>{t('providerEditor.usingCredit')}</span>
                                                       </>
                                                     ) : (
-                                                      <span>使用重置卡</span>
+                                                      <span>{t('providerEditor.useResetCredit')}</span>
                                                     )}
                                                   </Button>
                                                 </div>
@@ -1475,7 +1548,7 @@ export function ProviderEditor() {
                                       </div>
                                     ) : (
                                       <div className="py-2 text-center text-[10px] text-muted-foreground">
-                                        暂未获取到配额，可点击右上角「刷新」重试
+                                        {t('providerEditor.noQuotaFetched')}
                                       </div>
                                     )}
                                   </div>
@@ -1490,7 +1563,7 @@ export function ProviderEditor() {
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
                         <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                          API 密钥 (Key)
+                          {t('providerEditor.apiKeyLabel')}
                         </label>
                         <div className="flex items-center gap-2 text-[11px]">
                           <button
@@ -1499,7 +1572,7 @@ export function ProviderEditor() {
                             className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
                           >
                             <HelpCircle className="w-3 h-3" />
-                            <span>密钥说明</span>
+                            <span>{t('providerEditor.keyHelp')}</span>
                           </button>
                           <span className="text-zinc-300 dark:text-zinc-700">·</span>
                           <button
@@ -1507,14 +1580,14 @@ export function ProviderEditor() {
                             onClick={() => update({ apiKeys: [...keyInputs, ''] })}
                             className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 font-medium cursor-pointer transition-colors"
                           >
-                            + 多密钥轮询
+                            {t('providerEditor.multiKeyRotation')}
                           </button>
                         </div>
                       </div>
 
                       {showAuthHelp && (
                         <div className="mb-2 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-300 leading-relaxed border border-zinc-200/60 dark:border-zinc-700/60">
-                          密钥保存在本地 SQLite 中。留空时默认沿用客户端传入的密钥；本地模型（如 Ollama）通常无需填写。
+                          {t('providerEditor.keyHelpText')}
                         </div>
                       )}
 
@@ -1531,14 +1604,14 @@ export function ProviderEditor() {
                                   invalidateModels();
                                   update({ apiKeys: keys });
                                 }}
-                                placeholder={index ? '添加备用密钥' : 'sk-ant-... / sk-...（可留空）'}
+                                placeholder={index ? t('providerEditor.addSecondaryKey') : t('providerEditor.primaryKeyPlaceholder')}
                                 className="font-mono pr-9"
                               />
                               <button
                                 type="button"
                                 onClick={() => setShowKeys(!showKeys)}
                                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
-                                aria-label={showKeys ? '隐藏密钥' : '显示明文密钥'}
+                                aria-label={showKeys ? t('providerEditor.hideKey') : t('providerEditor.showPlainKey')}
                               >
                                 {showKeys ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                               </button>
@@ -1571,22 +1644,25 @@ export function ProviderEditor() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-                      可用模型池
+                      {t('providerEditor.availableModelPool')}
                     </h3>
                     <Badge variant="secondary" className="font-mono">
-                      已选 {draft.models.length} {pool.length > 0 ? `/ 共 ${pool.length}` : ''}
+                      {t('providerEditor.selectedCount', {
+                        selected: draft.models.length,
+                        total: pool.length > 0 ? (locale === 'zh-CN' ? `/ 共 ${pool.length}` : `/ ${pool.length}`) : '',
+                      })}
                     </Badge>
                     {invalidModels.length > 0 && (
                       <Badge variant="warning" className="gap-1">
                         <AlertTriangle className="w-3 h-3 shrink-0" />
-                        <span>{invalidModels.length} 个未在上游提供</span>
+                        <span>{t('providerEditor.modelsNotProvided', { count: invalidModels.length })}</span>
                         <button
                           type="button"
                           onClick={removeInvalidModels}
                           className="underline hover:opacity-80 cursor-pointer ml-0.5"
-                          title="从已选模型中移除未在上游提供的模型"
+                          title={t('providerEditor.removeInvalidTitle')}
                         >
-                          移除
+                          {t('providerEditor.removeInvalid')}
                         </button>
                       </Badge>
                     )}
@@ -1603,7 +1679,7 @@ export function ProviderEditor() {
                         className="h-7 text-xs"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 mr-1 ${syncingModels ? 'animate-spin' : ''}`} />
-                        <span>{syncingModels ? '同步中…' : '同步账号模型'}</span>
+                        <span>{syncingModels ? t('providerEditor.syncing') : t('providerEditor.syncAccountModels')}</span>
                       </Button>
                     ) : null
                   ) : (
@@ -1615,7 +1691,7 @@ export function ProviderEditor() {
                       disabled={fetching}
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${fetching ? 'animate-spin' : ''}`} />
-                      <span>{fetching ? '获取中…' : fetched ? '刷新上游' : '获取上游模型'}</span>
+                      <span>{fetching ? t('providerEditor.fetchingModels') : fetched ? t('providerEditor.refreshUpstream') : t('providerEditor.fetchUpstreamModels')}</span>
                     </Button>
                   )}
                 </div>
@@ -1635,7 +1711,7 @@ export function ProviderEditor() {
                       <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
                       <Input
                         type="text"
-                        placeholder="搜索或过滤模型…"
+                        placeholder={t('providerEditor.searchModelPlaceholder')}
                         value={modelSearch}
                         onChange={(e) => setModelSearch(e.target.value)}
                         className="pl-8 pr-7 h-7 font-mono text-xs bg-background/80"
@@ -1645,7 +1721,7 @@ export function ProviderEditor() {
                           type="button"
                           onClick={() => setModelSearch('')}
                           className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
-                          title="清空搜索"
+                          title={t('providerEditor.clearSearchTooltip')}
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -1665,7 +1741,7 @@ export function ProviderEditor() {
                                 : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
                             }`}
                           >
-                            全部 <span className="opacity-70 font-mono text-[10px] ml-0.5">{pool.length}</span>
+                            {t('providerEditor.filterTabs.all')} <span className="opacity-70 font-mono text-[10px] ml-0.5">{pool.length}</span>
                           </button>
                           <button
                             type="button"
@@ -1676,7 +1752,7 @@ export function ProviderEditor() {
                                 : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
                             }`}
                           >
-                            已选 <span className="opacity-70 font-mono text-[10px] ml-0.5">{draft.models.length}</span>
+                            {t('providerEditor.filterTabs.selected')} <span className="opacity-70 font-mono text-[10px] ml-0.5">{draft.models.length}</span>
                           </button>
                           <button
                             type="button"
@@ -1687,7 +1763,7 @@ export function ProviderEditor() {
                                 : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
                             }`}
                           >
-                            未选 <span className="opacity-70 font-mono text-[10px] ml-0.5">{Math.max(0, pool.length - draft.models.length)}</span>
+                            {t('providerEditor.filterTabs.unselected')} <span className="opacity-70 font-mono text-[10px] ml-0.5">{Math.max(0, pool.length - draft.models.length)}</span>
                           </button>
                         </div>
 
@@ -1697,25 +1773,25 @@ export function ProviderEditor() {
                             type="button"
                             onClick={selectAllFiltered}
                             className="px-1.5 py-0.5 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-                            title="将当前过滤视图下的未选模型全部加入"
+                            title={t('providerEditor.selectAllTooltip')}
                           >
                             {modelSearch.trim()
-                              ? '全选结果'
+                              ? t('providerEditor.selectAllResults')
                               : modelFilterTab === 'unselected'
-                              ? '全选未选'
-                              : '全选'}
+                              ? t('providerEditor.selectAllUnselected')
+                              : t('providerEditor.selectAll')}
                           </button>
                           <button
                             type="button"
                             onClick={clearAllFiltered}
                             className="px-1.5 py-0.5 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-                            title="将当前过滤视图下的已选模型取消选择"
+                            title={t('providerEditor.clearAllTooltip')}
                           >
                             {modelSearch.trim()
-                              ? '清空结果'
+                              ? t('providerEditor.clearAllResults')
                               : modelFilterTab === 'selected'
-                              ? '清空已选'
-                              : '清空'}
+                              ? t('providerEditor.clearAllSelected')
+                              : t('providerEditor.clearAll')}
                           </button>
                         </div>
                       </div>
@@ -1751,33 +1827,33 @@ export function ProviderEditor() {
                       <div className="py-7 text-center text-xs text-zinc-400 space-y-1.5">
                         {pool.length === 0 ? (
                           isSubscriptionPool ? (
-                            <p>尚未连接账号，请在上方完成账号授权登录以自动同步模型</p>
+                            <p>{t('providerEditor.noModelsConnectPrompt')}</p>
                           ) : (
-                            <p>暂无模型，点击右上角「获取上游模型」或在下方手动补充</p>
+                            <p>{t('providerEditor.noModelsEmptyPrompt')}</p>
                           )
                         ) : modelFilterTab === 'selected' ? (
                           <p>
-                            尚未勾选任何模型，
+                            {t('providerEditor.noModelsSelectedPrompt')}
                             <button
                               type="button"
                               onClick={() => setModelFilterTab('all')}
                               className="text-zinc-900 dark:text-zinc-100 underline hover:opacity-80 ml-1 cursor-pointer font-medium"
                             >
-                              去选择模型
+                              {t('providerEditor.goToSelectModels')}
                             </button>
                           </p>
                         ) : modelFilterTab === 'unselected' ? (
-                          <p>所有模型均已被选中</p>
+                          <p>{t('providerEditor.allModelsAlreadySelected')}</p>
                         ) : (
                           <div className="space-y-1">
-                            <p>未匹配到相关模型</p>
+                            <p>{t('providerEditor.noMatchingModels')}</p>
                             {modelSearch.trim() && (
                               <button
                                 type="button"
                                 onClick={() => setModelSearch('')}
                                 className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 underline cursor-pointer"
                               >
-                                清空搜索词
+                                {t('providerEditor.clearSearchKeyword')}
                               </button>
                             )}
                           </div>
@@ -1846,7 +1922,7 @@ export function ProviderEditor() {
                                   <span
                                     className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
                                   >
-                                    默认
+                                    {t('providerEditor.defaultBadge')}
                                   </span>
                                 )}
                                 {isInvalid && (
@@ -1876,7 +1952,7 @@ export function ProviderEditor() {
                           addManualModel();
                         }
                       }}
-                      placeholder="输入模型 ID（回车添加）"
+                      placeholder={t('providerEditor.manualModelPlaceholder')}
                       className="font-mono h-7 text-xs bg-background/80"
                     />
                     <Button
@@ -1886,7 +1962,7 @@ export function ProviderEditor() {
                       onClick={addManualModel}
                       disabled={!manualModel.trim()}
                     >
-                      添加
+                      {t('providerEditor.addManualModel')}
                     </Button>
                   </div>
                 </div>
@@ -1897,7 +1973,7 @@ export function ProviderEditor() {
 
               {errors.save && (
                 <div className="p-3 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300">
-                  保存失败：{errors.save}
+                  {t('providerEditor.saveFailed')}{errors.save}
                 </div>
               )}
 
@@ -1913,7 +1989,7 @@ export function ProviderEditor() {
                       onClick={() => setConfirmingDelete(true)}
                       className="px-2 text-xs"
                     >
-                      删除服务商
+                      {t('providerEditor.deleteProviderBtn')}
                     </Button>
                   )}
                 </div>
@@ -1921,16 +1997,16 @@ export function ProviderEditor() {
                 <div className="flex items-center justify-end gap-2 shrink-0">
                   <span className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate max-w-[140px]">
                     {fetching || syncingModels
-                      ? '正在同步上游模型…'
+                      ? t('providerEditor.syncingUpstreamNotice')
                       : isSubscriptionPool && subAccounts.length > 0
                         ? (
                           <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block shrink-0" />
-                            <span className="truncate">已自动保存并启用</span>
+                            <span className="truncate">{t('providerEditor.autoSavedNotice')}</span>
                           </span>
                         )
                         : !isSubscriptionPool && draft.models.length === 0
-                          ? '请先选择模型'
+                          ? t('providerEditor.pleaseSelectModel')
                           : ''}
                   </span>
 
@@ -1948,7 +2024,7 @@ export function ProviderEditor() {
                         ) : (
                           <Check className="w-3.5 h-3.5 mr-1.5" />
                         )}
-                        <span>完成</span>
+                        <span>{t('providerEditor.doneBtn')}</span>
                       </Button>
                     ) : (
                       <Button
@@ -1957,7 +2033,7 @@ export function ProviderEditor() {
                         size="sm"
                         onClick={handleClose}
                       >
-                        返回
+                        {t('providerEditor.backBtn')}
                       </Button>
                     )
                   ) : (
@@ -1968,7 +2044,7 @@ export function ProviderEditor() {
                         size="sm"
                         onClick={handleClose}
                       >
-                        取消
+                        {t('providerEditor.cancelBtn')}
                       </Button>
                       <Button
                         type="submit"
@@ -1981,7 +2057,7 @@ export function ProviderEditor() {
                         ) : (
                           <Check className="w-3.5 h-3.5" />
                         )}
-                        <span>{saving ? '保存中…' : '保存'}</span>
+                        <span>{saving ? t('providerEditor.savingBtn') : t('providerEditor.saveBtn')}</span>
                       </Button>
                     </>
                   )}
@@ -1995,12 +2071,12 @@ export function ProviderEditor() {
       {currentEditingProvider && (
         <ConfirmDialog
           open={confirmingDelete}
-          title={"删除服务商“" + (draft.name || currentEditingProvider.name) + "”？"}
+          title={t('providerEditor.deleteConfirmTitleWithName', { name: draft.name || currentEditingProvider.name })}
           details={[
-            '删除后需重新配置。已有请求日志不受影响。',
-            ...(draft.defaultModel ? ['该服务商包含全局默认模型，删除后需要重新指定默认模型。'] : []),
+            t('providerEditor.deleteConfirmDescReconfigure'),
+            ...(draft.defaultModel ? [t('providerEditor.deleteConfirmDescDefaultModel')] : []),
           ]}
-          confirmLabel="删除"
+          confirmLabel={t('providerEditor.deleteAction')}
           busy={deleting}
           onConfirm={async () => {
             setDeleting(true);

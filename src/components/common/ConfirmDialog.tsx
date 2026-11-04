@@ -2,12 +2,14 @@ import React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/common/Button';
+import { useTranslation } from '@/i18n';
 
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
   details: string[];
   confirmLabel: string;
+  cancelLabel?: string;
   variant?: 'danger' | 'warning' | 'primary';
   busy?: boolean;
   onConfirm: () => void;
@@ -19,11 +21,14 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   title,
   details,
   confirmLabel,
+  cancelLabel,
   variant = 'danger',
   busy = false,
   onConfirm,
   onCancel,
 }) => {
+  const { t } = useTranslation();
+
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(isOpen) => !isOpen && onCancel()}>
       <DialogPrimitive.Portal>
@@ -51,7 +56,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 
           <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-800">
             <Button variant="outline" size="default" disabled={busy} onClick={onCancel}>
-              取消
+              {cancelLabel || t('common.cancel')}
             </Button>
             <Button
               variant={variant === 'primary' ? 'default' : 'destructive'}
@@ -60,7 +65,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               disabled={busy}
               onClick={onConfirm}
             >
-              {busy ? '处理中…' : confirmLabel}
+              {busy ? t('common.processing') : confirmLabel}
             </Button>
           </div>
         </DialogPrimitive.Content>

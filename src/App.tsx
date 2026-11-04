@@ -1,5 +1,6 @@
 import React, { useEffect, useSyncExternalStore } from 'react';
 import { applyAppTheme, useAppStore } from '@/store/useAppStore';
+import { useTranslation } from '@/i18n';
 import { Header } from '@/components/layout/Header';
 import { ClientsView, ProviderList } from '@/components/providers/ProviderList';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
@@ -45,6 +46,7 @@ export const App: React.FC = () => {
     setSettingsSection,
     openProviderEditor,
   } = useAppStore();
+  const { t } = useTranslation();
   const systemIsDark = useSyncExternalStore(subscribeColorScheme, getSystemIsDark);
 
   useEffect(() => {
@@ -127,8 +129,8 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={clearError}
-            aria-label="关闭错误提示"
-            title="关闭"
+            aria-label={t('common.close')}
+            title={t('common.close')}
             className="shrink-0 rounded-md p-1 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 hover:bg-red-100 dark:hover:bg-red-900/40 cursor-pointer transition-colors"
           >
             <X className="w-3.5 h-3.5" />

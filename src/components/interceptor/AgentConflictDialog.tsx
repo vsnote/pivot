@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { InterceptorStatus } from '../../types';
 import { Button } from '@/components/common/Button';
+import { useTranslation } from '@/i18n';
 
 interface AgentConflictDialogProps {
   open: boolean;
@@ -29,6 +30,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
   onClose,
   onConfirmTakeover,
 }) => {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   if (!target) return null;
@@ -82,12 +84,14 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
               </div>
               <div>
                 <DialogPrimitive.Title className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                  {isOverwritten ? `${target.name} 配置冲突` : `接管 ${target.name} 代理`}
+                  {isOverwritten
+                    ? t('agentConflict.conflictTitle', { name: target.name })
+                    : t('agentConflict.takeoverTitle', { name: target.name })}
                 </DialogPrimitive.Title>
                 <p id="conflict-dialog-desc" className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                   {isOverwritten
-                    ? '检测到配置已被外部工具修改，可重新接管至 Pivot 本地网关。'
-                    : '检测到当前已存在代理配置，开启接管将自动备份原设置。'}
+                    ? t('agentConflict.conflictDesc')
+                    : t('agentConflict.takeoverDesc')}
                 </p>
               </div>
             </div>
@@ -107,13 +111,17 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
             {/* 端点对比 */}
             <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-950/40 p-3 text-xs space-y-2">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-zinc-500 dark:text-zinc-400 text-[11px] shrink-0 font-sans">当前端点</span>
+                <span className="text-zinc-500 dark:text-zinc-400 text-[11px] shrink-0 font-sans">
+                  {t('agentConflict.currentEndpoint')}
+                </span>
                 <span className="font-mono text-zinc-800 dark:text-zinc-200 truncate text-[11px]" title={endpoint}>
                   {endpoint}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-3 border-t border-zinc-200/60 dark:border-zinc-800/60 pt-2">
-                <span className="text-zinc-500 dark:text-zinc-400 text-[11px] shrink-0 font-sans">接管后网关</span>
+                <span className="text-zinc-500 dark:text-zinc-400 text-[11px] shrink-0 font-sans">
+                  {t('agentConflict.gatewayEndpoint')}
+                </span>
                 <span className="font-mono font-medium text-zinc-900 dark:text-zinc-100 font-semibold text-[11px]">
                   {gatewayEndpoint}
                 </span>
@@ -121,14 +129,14 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
             </div>
 
             <div className="p-3 rounded-lg bg-zinc-50/80 dark:bg-zinc-800/50 border border-zinc-200/60 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
-              开启后，<span className="font-medium text-zinc-800 dark:text-zinc-200">{target.name}</span> 的请求将由 Pivot 网关统一按您的分发规则路由至已启用的服务商渠道。原配置文件将自动安全备份，随时可一键恢复。
+              {t('agentConflict.descriptionNotice', { name: target.name })}
             </div>
 
             {/* 前置检查警示：若当前未配置任何服务商 */}
             {!hasEnabledProviders && (
               <div className="flex items-center gap-2 p-2.5 rounded-md bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-900/40 text-amber-800 dark:text-amber-300">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-500" />
-                <span>当前尚未启用任何服务商渠道，接管后请在服务商列表中配置并启用可用渠道。</span>
+                <span>{t('agentConflict.noProvidersWarning')}</span>
               </div>
             )}
 
@@ -136,7 +144,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
             <div className="flex items-start gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500 leading-relaxed px-0.5">
               <Info className="w-3.5 h-3.5 shrink-0 text-zinc-400 mt-0.5" />
               <span>
-                若后台运行着其他代理管理工具，建议在对应工具中暂停自动同步，避免反复覆盖配置。
+                {t('agentConflict.conflictHint')}
               </span>
             </div>
 
@@ -152,7 +160,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
                 className="flex items-center gap-1 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 shrink-0 cursor-pointer font-sans text-xs transition-colors"
               >
                 {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-                <span>{copied ? '已复制' : '复制命令'}</span>
+                <span>{copied ? t('agentConflict.commandCopied') : t('agentConflict.copyCommand')}</span>
               </button>
             </div>
           </div>
@@ -160,7 +168,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
           {/* 底部按钮栏 */}
           <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50">
             <Button variant="outline" size="default" disabled={busy} onClick={onClose}>
-              取消
+              {t('common.cancel')}
             </Button>
             <Button
               variant="default"
@@ -168,7 +176,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
               disabled={busy}
               onClick={() => onConfirmTakeover(target)}
             >
-              {busy ? '正在接管...' : '确认接管'}
+              {busy ? t('agentConflict.takingOver') : t('agentConflict.confirmTakeover')}
             </Button>
           </div>
         </DialogPrimitive.Content>

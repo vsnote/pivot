@@ -13,6 +13,8 @@ import {
   RouteExplanation,
 } from '@/types';
 
+export type Locale = 'zh-CN' | 'en';
+
 interface AppStore {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
@@ -22,6 +24,9 @@ interface AppStore {
 
   theme: 'dark' | 'light' | 'system';
   setTheme: (theme: 'dark' | 'light' | 'system') => void;
+
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
 
   stats: GatewayStats;
   providers: Provider[];
@@ -97,6 +102,19 @@ export const applyAppTheme = (theme: 'dark' | 'light' | 'system', systemIsDark?:
   }
 };
 
+export const getInitialLocale = (): Locale => {
+  if (typeof window === 'undefined') return 'zh-CN';
+  const saved = localStorage.getItem('pivot_locale');
+  if (saved === 'zh-CN' || saved === 'en') return saved;
+  return 'zh-CN';
+};
+
+export const applyAppLocale = (locale: Locale) => {
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = locale;
+  }
+};
+
 export const useAppStore = create<AppStore>((set, get) => ({
   activeTab: 'providers',
   setActiveTab: (tab) => {
@@ -130,6 +148,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ theme });
     localStorage.setItem('pivot_theme', theme);
     applyAppTheme(theme);
+  },
+  locale: getInitialLocale(),
+  setLocale: (locale) => {
+    set({ locale });
+    localStorage.setItem('pivot_locale', locale);
+    applyAppLocale(locale);
   },
 
   stats: {
@@ -271,7 +295,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ providers, error: null });
     } catch (err: unknown) {
       if (seq !== reorderSeq) return;
-      set({ providers: previous, error: `调整顺序失败：${String(err)}` });
+      set({
+        providers: previous,
+        error:
+          get().locale === 'zh-CN'
+            ? `调整顺序失败：${String(err)}`
+            : `Failed to reorder providers: ${String(err)}`,
+      });
       throw err;
     }
   },
@@ -284,7 +314,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
         error: null,
       }));
     } catch (err: unknown) {
-      set({ error: `删除服务商失败：${String(err)}` });
+      set({
+        error:
+          get().locale === 'zh-CN'
+            ? `删除服务商失败：${String(err)}`
+            : `Failed to delete provider: ${String(err)}`,
+      });
       throw err;
     }
   },

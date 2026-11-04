@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
+import { useTranslation } from '@/i18n';
 import { ProviderAvatar } from '@/components/common/BrandIcons';
 import type { Provider, SubscriptionAccount, AccountQuota, QuotaBucket } from '@/types';
 import {
@@ -26,22 +27,19 @@ interface ProviderContextMenuProps {
 }
 
 function cleanBucketLabel(label: string): string {
-  if (label.includes('Claude') && label.includes('5小时')) return 'Claude (5h)';
+  if (label.includes('Claude') && (label.includes('5小时') || label.includes('5h'))) return 'Claude (5h)';
   if (label.includes('Claude') && (label.includes('周') || label.includes('week'))) return 'Claude (周)';
-  if (label.includes('Gemini') && label.includes('5小时')) return 'Gemini (5h)';
+  if (label.includes('Gemini') && (label.includes('5小时') || label.includes('5h'))) return 'Gemini (5h)';
   if (label.includes('Gemini') && (label.includes('周') || label.includes('week'))) return 'Gemini (周)';
-  if (label.includes('Pro Lite') || label.includes('GPT')) {
-    return label.replace('周期配额', '').replace('配额', '').trim();
-  }
   return label.replace('周期配额', '').replace('配额', '').trim();
 }
 
-function formatShortResetTime(resetTimeStr?: string | null): string | null {
+function formatShortResetTime(resetTimeStr: string | null | undefined, t: (k: string) => string): string | null {
   if (!resetTimeStr) return null;
   const target = new Date(resetTimeStr).getTime();
   if (isNaN(target)) return null;
   const diffMs = target - Date.now();
-  if (diffMs <= 0) return '即将';
+  if (diffMs <= 0) return t('contextMenu.shortSoon');
   const totalMinutes = Math.floor(diffMs / 60000);
   if (totalMinutes < 60) return `${totalMinutes}m`;
   const totalHours = Math.floor(totalMinutes / 60);
@@ -50,22 +48,24 @@ function formatShortResetTime(resetTimeStr?: string | null): string | null {
   return `${days}d`;
 }
 
-function formatFullResetTime(resetTimeStr?: string | null): string {
+function formatFullResetTime(resetTimeStr: string | null | undefined, t: (k: string, p?: Record<string, string | number>) => string): string {
   if (!resetTimeStr) return '';
   const target = new Date(resetTimeStr).getTime();
   if (isNaN(target)) return '';
   const diffMs = target - Date.now();
-  if (diffMs <= 0) return '即将重置';
+  if (diffMs <= 0) return t('contextMenu.resettingSoon');
   const totalMinutes = Math.floor(diffMs / 60000);
-  if (totalMinutes < 60) return `${totalMinutes}分钟后重置`;
+  if (totalMinutes < 60) return t('contextMenu.resetInMins', { m: totalMinutes });
   const totalHours = Math.floor(totalMinutes / 60);
   if (totalHours < 24) {
     const remMins = totalMinutes % 60;
-    return remMins > 0 ? `${totalHours}小时${remMins}分钟后重置` : `${totalHours}小时后重置`;
+    return remMins > 0
+      ? t('contextMenu.resetInHoursMins', { h: totalHours, m: remMins })
+      : t('contextMenu.resetInMins', { m: totalMinutes });
   }
   const days = Math.floor(totalHours / 24);
   const remHours = totalHours % 24;
-  return `${days}天${remHours}小时后重置`;
+  return t('contextMenu.resetInDaysHours', { d: days, h: remHours });
 }
 
 export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
@@ -76,6 +76,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
   onEdit,
   onDelete,
 }) => {
+  const { t } = useTranslation();
   const { testProviderLatency, currentProvider } = useAppStore(
     useShallow((state) => ({
       testProviderLatency: state.testProviderLatency,
@@ -293,7 +294,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
               <span>{provider.name}</span>
               {isSubscription && (
                 <span className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none">
-                  订阅
+                  {t('providers.subscription')}
                 </span>
               )}
             </div>
@@ -306,14 +307,14 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             {/* 顶栏：标签 + 多账号分段器 + 刷新按钮 */}
             <div className="flex items-center justify-between px-1.5 text-[11px]">
               <div className="flex items-center gap-1.5 min-w-0">
-                <span className="font-medium text-muted-foreground shrink-0">订阅配额</span>
+                <span className="font-medium text-muted-foreground shrink-0">{t('contextMenu.subscriptionQuotas')}</span>
                 {/* 多账号时呈现水平切换药丸 */}
                 {subAccounts.length > 1 && (
                   <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
                     {subAccounts.map((acc, idx) => {
                       const isSelected = activeAccount?.id === acc.id;
                       const isCooldown = acc.cooldownUntil > Date.now() / 1000;
-                      const prefix = acc.email ? acc.email.split('@')[0] : `账号${idx + 1}`;
+                      const prefix = acc.email ? acc.email.split('@')[0] : t('contextMenu.accountPrefix', { idx: idx + 1 });
 
                       return (
                         <button
@@ -340,7 +341,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                 type="button"
                 onClick={() => void fetchSubscriptionQuotas(true)}
                 disabled={loadingQuota}
-                title="刷新配额"
+                title={t('contextMenu.refreshQuotas')}
                 className="text-zinc-400 hover:text-foreground transition-colors p-0.5 rounded cursor-pointer disabled:opacity-50 shrink-0"
               >
                 <RefreshCw
@@ -353,18 +354,18 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             {activeAccount && (
               <div className="flex items-center justify-between px-1.5 text-[10px] text-muted-foreground">
                 <span className="font-mono truncate max-w-[170px]" title={activeAccount.email || activeAccount.id}>
-                  {activeAccount.email || `账号 ${activeAccount.id.slice(0, 8)}`}
+                  {activeAccount.email || `${t('contextMenu.accountPrefix', { idx: '' })} ${activeAccount.id.slice(0, 8)}`}
                 </span>
                 {activeAccount.cooldownUntil > Date.now() / 1000 ? (
                   <span className="text-amber-600 dark:text-amber-400 font-medium shrink-0">
-                    429 冷却中 ({Math.ceil((activeAccount.cooldownUntil - Date.now() / 1000) / 60)}m)
+                    {t('contextMenu.cooldownStatus', { m: Math.ceil((activeAccount.cooldownUntil - Date.now() / 1000) / 60) })}
                   </span>
                 ) : !activeAccount.enabled ? (
-                  <span className="text-zinc-400 dark:text-zinc-500 shrink-0">已停用</span>
+                  <span className="text-zinc-400 dark:text-zinc-500 shrink-0">{t('contextMenu.disabledStatus')}</span>
                 ) : (
                   <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 shrink-0 font-medium">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <span>正常</span>
+                    <span>{t('contextMenu.normalStatus')}</span>
                   </span>
                 )}
               </div>
@@ -374,11 +375,11 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             {loadingQuota && subAccounts.length === 0 ? (
               <div className="py-2.5 flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground">
                 <LoaderCircle className="w-3 h-3 animate-spin text-zinc-400" />
-                <span>查询配额中…</span>
+                <span>{t('contextMenu.queryingQuotas')}</span>
               </div>
             ) : subAccounts.length === 0 ? (
               <div className="py-1 px-2 text-center text-[10px] text-muted-foreground/80">
-                尚未绑定订阅账号
+                {t('contextMenu.noAccountsBound')}
               </div>
             ) : activeQuota && activeQuota.buckets.length > 0 ? (
               <div
@@ -390,14 +391,14 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                   const pct = Math.round(b.remainingFraction * 100);
                   const isLow = b.remainingFraction <= 0.2;
                   const isOut = b.isExhausted;
-                  const shortReset = formatShortResetTime(b.resetTime);
-                  const fullReset = formatFullResetTime(b.resetTime);
+                  const shortReset = formatShortResetTime(b.resetTime, t);
+                  const fullReset = formatFullResetTime(b.resetTime, t);
                   const title = cleanBucketLabel(b.label);
 
                   return (
                     <div
                       key={b.id}
-                      title={`${b.label}: ${isOut ? '已耗尽' : `${pct}%`}${fullReset ? ` (${fullReset})` : ''}`}
+                      title={`${b.label}: ${isOut ? t('contextMenu.exhausted') : `${pct}%`}${fullReset ? ` (${fullReset})` : ''}`}
                       className="p-1.5 rounded-md bg-muted/40 border border-border/40 flex flex-col justify-between min-h-[38px] transition-colors"
                     >
                       <div className="text-[10px] text-muted-foreground/90 font-sans truncate">
@@ -413,7 +414,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                                 : 'text-foreground'
                           }`}
                         >
-                          {isOut ? '耗尽' : `${pct}%`}
+                          {isOut ? t('contextMenu.exhaustedShort') : `${pct}%`}
                         </span>
                         {shortReset && (
                           <span className="font-mono text-[9px] text-zinc-400 dark:text-zinc-500 shrink-0 leading-none">
@@ -427,7 +428,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
               </div>
             ) : loadingQuota ? (
               <div className="py-1 text-[10px] text-muted-foreground text-center">
-                更新配额中…
+                {t('contextMenu.updatingQuotas')}
               </div>
             ) : null}
           </div>
@@ -436,7 +437,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
         {/* 模型列表区 */}
         <div className="py-1">
           <div className="flex items-center justify-between px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
-            <span>可用模型 ({provider.models.length})</span>
+            <span>{t('contextMenu.availableModels', { count: provider.models.length })}</span>
           </div>
 
           {/* 搜索框：仅在模型较多时展示 */}
@@ -448,7 +449,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                   type="text"
                   value={modelSearch}
                   onChange={(e) => setModelSearch(e.target.value)}
-                  placeholder="过滤模型..."
+                  placeholder={t('contextMenu.filterModels')}
                   className="w-full bg-transparent outline-none placeholder:text-muted-foreground/60 text-foreground font-mono"
                   onClick={(e) => e.stopPropagation()}
                 />
@@ -460,7 +461,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
           <div className="max-h-36 overflow-y-auto no-scrollbar space-y-0.5 px-1">
             {filteredModels.length === 0 ? (
               <div className="px-2 py-2 text-center text-muted-foreground/70 text-[11px]">
-                {provider.models.length === 0 ? '未配置任何模型' : '无匹配模型'}
+                {provider.models.length === 0 ? t('contextMenu.noModelsConfigured') : t('contextMenu.noMatchingModels')}
               </div>
             ) : (
               filteredModels.map((model) => {
@@ -515,7 +516,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
               <Zap
                 className={`w-3.5 h-3.5 ${testingLatency ? 'animate-pulse text-amber-500' : 'text-zinc-500'}`}
               />
-              <span>{testingLatency ? '正在测试延迟…' : '测试端点延迟'}</span>
+              <span>{testingLatency ? t('contextMenu.testingLatency') : t('contextMenu.testLatency')}</span>
             </div>
             {provider.latencyMs && provider.latencyMs > 0 && (
               <span className="font-mono text-[10px] text-zinc-400">{provider.latencyMs}ms</span>
@@ -535,7 +536,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                 ) : (
                   <Copy className="w-3.5 h-3.5 text-zinc-500" />
                 )}
-                <span>{copiedUrl ? '已复制接口地址' : '复制 Base URL'}</span>
+                <span>{copiedUrl ? t('contextMenu.copiedUrl') : t('contextMenu.copyBaseUrl')}</span>
               </div>
             </button>
           )}
@@ -550,7 +551,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-accent hover:text-accent-foreground text-left transition-colors cursor-pointer"
           >
             <Settings className="w-3.5 h-3.5 text-zinc-500" />
-            <span>编辑服务商配置...</span>
+            <span>{t('contextMenu.editProvider')}</span>
           </button>
 
           <button
@@ -562,7 +563,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
             className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-destructive/10 text-destructive text-left transition-colors cursor-pointer"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            <span>删除服务商</span>
+            <span>{t('contextMenu.deleteProvider')}</span>
           </button>
         </div>
       </div>

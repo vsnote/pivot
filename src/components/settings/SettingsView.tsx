@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useTranslation, type Locale } from '@/i18n';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Button } from '@/components/common/Button';
 import { PivotLogo } from '@/components/common/PivotLogo';
@@ -18,32 +19,10 @@ import {
   ExternalLink,
 } from 'lucide-react';
 
-const themeOptions = [
-  { id: 'light', label: '浅色' },
-  { id: 'dark', label: '深色' },
-  { id: 'system', label: '跟随系统' },
-] as const;
-
-const formatUpdateError = (err: unknown): string => {
-  const msg = err instanceof Error ? err.message : String(err);
-  const lower = msg.toLowerCase();
-
-  if (lower.includes('could not fetch a valid release json') || lower.includes('404')) {
-    return '获取更新信息失败（未找到有效发布版本或网络无法访问）';
-  }
-  if (lower.includes('timed out') || lower.includes('timeout') || lower.includes('connect')) {
-    return '连接 GitHub 更新服务器超时，请检查网络';
-  }
-  if (lower.includes('signature')) {
-    return '升级包签名校验失败，安全终止';
-  }
-  if (lower.includes('failed to send request') || lower.includes('network')) {
-    return '网络请求失败，请检查网络连接或代理';
-  }
-  return msg || '检查更新失败，请稍后重试';
-};
+const themeKeys = ['light', 'dark', 'system'] as const;
 
 export const SettingsView: React.FC = () => {
+  const { t, locale, setLocale } = useTranslation();
   const {
     theme,
     setTheme,
@@ -66,7 +45,7 @@ export const SettingsView: React.FC = () => {
     getVersion()
       .then(setAppVersion)
       .catch(() => {
-        setAppVersion('0.2.2');
+        setAppVersion('0.2.4');
       });
   }, []);
 
@@ -77,6 +56,33 @@ export const SettingsView: React.FC = () => {
   const [updateInstance, setUpdateInstance] = useState<Update | null>(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [updateError, setUpdateError] = useState('');
+
+  const formatUpdateError = (err: unknown): string => {
+    const msg = err instanceof Error ? err.message : String(err);
+    const lower = msg.toLowerCase();
+
+    if (lower.includes('could not fetch a valid release json') || lower.includes('404')) {
+      return locale === 'zh-CN'
+        ? '获取更新信息失败（未找到有效发布版本或网络无法访问）'
+        : 'Failed to fetch update info (No release found or network unreachable)';
+    }
+    if (lower.includes('timed out') || lower.includes('timeout') || lower.includes('connect')) {
+      return locale === 'zh-CN'
+        ? '连接 GitHub 更新服务器超时，请检查网络'
+        : 'Connection to GitHub update server timed out, please check your network';
+    }
+    if (lower.includes('signature')) {
+      return locale === 'zh-CN'
+        ? '升级包签名校验失败，安全终止'
+        : 'Update signature verification failed, aborted for security';
+    }
+    if (lower.includes('failed to send request') || lower.includes('network')) {
+      return locale === 'zh-CN'
+        ? '网络请求失败，请检查网络连接或代理'
+        : 'Network request failed, please check network connection or proxy';
+    }
+    return msg || (locale === 'zh-CN' ? '检查更新失败，请稍后重试' : 'Check for updates failed, please try again later');
+  };
 
   // 检查更新
   const handleCheckUpdate = async (isManual = true) => {
@@ -180,12 +186,12 @@ export const SettingsView: React.FC = () => {
 
       setBackupNotice({
         type: 'success',
-        message: `已成功导出 ${providers.length} 个服务商配置`,
+        message: t('settings.exportSuccess', { count: providers.length }),
       });
       setTimeout(() => setBackupNotice(null), 3500);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      setBackupNotice({ type: 'error', message: `导出失败: ${msg}` });
+      setBackupNotice({ type: 'error', message: t('settings.exportFailed', { error: msg }) });
     }
   };
 
@@ -199,7 +205,7 @@ export const SettingsView: React.FC = () => {
       const data = JSON.parse(text);
 
       if (!data || !Array.isArray(data.providers)) {
-        throw new Error('无效的备份文件：缺少 providers 配置列表');
+        throw new Error(locale === 'zh-CN' ? '无效的备份文件：缺少 providers 配置列表' : 'Invalid backup: missing providers array');
       }
 
       let importedCount = 0;
@@ -212,12 +218,12 @@ export const SettingsView: React.FC = () => {
 
       setBackupNotice({
         type: 'success',
-        message: `已恢复 ${importedCount} 个服务商配置`,
+        message: t('settings.restoreSuccess', { count: importedCount }),
       });
       setTimeout(() => setBackupNotice(null), 4000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      setBackupNotice({ type: 'error', message: `导入失败: ${msg}` });
+      setBackupNotice({ type: 'error', message: t('settings.restoreFailed', { error: msg }) });
     } finally {
       setIsImporting(false);
       if (fileInputRef.current) {
@@ -251,34 +257,53 @@ export const SettingsView: React.FC = () => {
             onClick={() => setBackupNotice(null)}
             className="text-[11px] opacity-70 hover:opacity-100 cursor-pointer"
           >
-            关闭
+            {t('common.close')}
           </button>
         </div>
       )}
 
-      {/* 卡片 1：偏好设置（外观） */}
+      {/* 卡片 1：偏好设置（外观与语言） */}
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            通用偏好
+            {t('settings.generalPreferences')}
           </span>
         </div>
 
-        <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">界面外观</div>
-            <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
-              选择适合的显示风格，或跟随操作系统自动切换
-            </div>
-          </div>
+        {/* 界面外观 */}
+        <div className="px-4 py-3 flex items-center justify-between gap-3">
+          <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+            {t('settings.appearance')}
+          </span>
 
-          <Tabs value={theme} onValueChange={(val) => setTheme(val as 'light' | 'dark' | 'system')} className="shrink-0 self-start sm:self-auto">
-            <TabsList aria-label="主题偏好切换">
-              {themeOptions.map((opt) => (
-                <TabsTrigger key={opt.id} value={opt.id} className="px-3">
-                  {opt.label}
+          <Tabs value={theme} onValueChange={(val) => setTheme(val as 'light' | 'dark' | 'system')} className="shrink-0">
+            <TabsList aria-label={t('settings.appearance')}>
+              {themeKeys.map((id) => (
+                <TabsTrigger key={id} value={id} className="px-3">
+                  {t(`settings.themes.${id}`)}
                 </TabsTrigger>
               ))}
+            </TabsList>
+          </Tabs>
+        </div>
+
+        {/* 分隔线 */}
+        <div className="border-t border-border/60" />
+
+        {/* 界面语言 */}
+        <div className="px-4 py-3 flex items-center justify-between gap-3">
+          <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+            {t('settings.language')}
+          </span>
+
+          <Tabs value={locale} onValueChange={(val) => setLocale(val as Locale)} className="shrink-0">
+            <TabsList aria-label={t('settings.language')}>
+              <TabsTrigger value="zh-CN" className="px-3">
+                {t('settings.languages.zhCN')}
+              </TabsTrigger>
+              <TabsTrigger value="en" className="px-3">
+                {t('settings.languages.en')}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
@@ -288,13 +313,13 @@ export const SettingsView: React.FC = () => {
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            配置备份与迁移
+            {t('settings.backupSection')}
           </span>
         </div>
 
         <div className="p-4 space-y-3.5">
           <div className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-            导出全部服务商配置、模型池与凭据数据为单个 JSON 文件，换机或重装后可据此恢复。备份文件为未加密明文，包含敏感密钥与凭据，请妥善保管。
+            {t('settings.backupDesc')}
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 pt-1">
@@ -303,10 +328,10 @@ export const SettingsView: React.FC = () => {
               variant="outline"
               size="sm"
               onClick={handleExportBackup}
-              title="导出当前所有服务商与模型配置"
+              title={t('settings.exportBackup')}
             >
               <Download className="w-3.5 h-3.5" />
-              <span>导出配置备份 (.json)</span>
+              <span>{t('settings.exportBackup')}</span>
             </Button>
 
             <Button
@@ -315,10 +340,10 @@ export const SettingsView: React.FC = () => {
               size="sm"
               onClick={() => fileInputRef.current?.click()}
               disabled={isImporting}
-              title="从备份文件导入配置"
+              title={t('settings.restoreBackup')}
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>{isImporting ? '正在恢复…' : '从备份文件恢复'}</span>
+              <span>{isImporting ? t('settings.restoring') : t('settings.restoreBackup')}</span>
             </Button>
 
             {/* 隐藏的文件上传 input */}
@@ -337,7 +362,7 @@ export const SettingsView: React.FC = () => {
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
-            关于 Pivot
+            {t('settings.aboutPivot')}
           </span>
           <span className="text-[10px] font-mono text-zinc-400">
             {appVersion ? `v${appVersion}` : ''}
@@ -353,22 +378,8 @@ export const SettingsView: React.FC = () => {
                 Pivot
               </div>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-relaxed">
-                面向 AI Coding 终端工具的本地轻量路由网关与客户端接管中心
+                {t('settings.pivotDesc')}
               </p>
-              <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
-                  客户端一键接管
-                </span>
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
-                  多协议双向互转
-                </span>
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
-                  自适应智能分发
-                </span>
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-muted/60 text-zinc-600 dark:text-zinc-300 border border-border/60">
-                  纯本地零遥测
-                </span>
-              </div>
             </div>
           </div>
 
@@ -376,29 +387,26 @@ export const SettingsView: React.FC = () => {
           <div className="border-t border-border/60" />
 
           {/* 软件更新状态与操作行 */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5 flex-wrap">
-                <span>软件更新</span>
+                <span>{t('settings.softwareUpdate')}</span>
                 {updateState === 'available' && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
                     <Sparkles className="w-2.5 h-2.5" />
-                    发现新版本 v{updateInstance?.version}
+                    {t('settings.newVersionFound', { version: updateInstance?.version ?? '' })}
                   </span>
                 )}
                 {updateState === 'up-to-date' && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                     <CheckCircle2 className="w-2.5 h-2.5" />
-                    已是最新版本
+                    {t('settings.upToDate')}
                   </span>
                 )}
               </div>
-              <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
-                直接从 GitHub Releases 获取经过签名验证的安全升级包
-              </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0 self-start sm:self-auto">
+            <div className="flex items-center gap-2 shrink-0">
               {updateState === 'ready' ? (
                 <Button
                   type="button"
@@ -407,7 +415,7 @@ export const SettingsView: React.FC = () => {
                   className="bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>重启应用生效</span>
+                  <span>{t('settings.restartToApply')}</span>
                 </Button>
               ) : updateState === 'available' ? (
                 <Button
@@ -417,7 +425,7 @@ export const SettingsView: React.FC = () => {
                   className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
                 >
                   <ArrowUpCircle className="w-3.5 h-3.5" />
-                  <span>更新至 v{updateInstance?.version}</span>
+                  <span>{t('settings.updateToVersion', { version: updateInstance?.version ?? '' })}</span>
                 </Button>
               ) : (
                 <Button
@@ -428,7 +436,7 @@ export const SettingsView: React.FC = () => {
                   disabled={updateState === 'checking' || updateState === 'downloading'}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${updateState === 'checking' ? 'animate-spin' : ''}`} />
-                  <span>{updateState === 'checking' ? '正在检查…' : '检查更新'}</span>
+                  <span>{updateState === 'checking' ? t('settings.checkingUpdate') : t('settings.checkUpdate')}</span>
                 </Button>
               )}
             </div>
@@ -438,7 +446,7 @@ export const SettingsView: React.FC = () => {
           {updateState === 'downloading' && (
             <div className="p-3 rounded-md bg-muted/40 border border-border space-y-1.5 animate-in fade-in">
               <div className="flex items-center justify-between text-[11px]">
-                <span className="text-zinc-600 dark:text-zinc-300">正在下载升级包…</span>
+                <span className="text-zinc-600 dark:text-zinc-300">{t('settings.downloadingUpdate')}</span>
                 <span className="font-mono text-zinc-500">{downloadProgress}%</span>
               </div>
               <div className="w-full h-1.5 bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
@@ -453,7 +461,7 @@ export const SettingsView: React.FC = () => {
           {/* 发现新版本时的更新日志摘要 */}
           {updateState === 'available' && updateInstance?.body && (
             <div className="p-3 rounded-md bg-muted/40 border border-border text-[11px] space-y-1 animate-in fade-in max-h-36 overflow-y-auto">
-              <div className="font-medium text-zinc-700 dark:text-zinc-300">更新内容摘要：</div>
+              <div className="font-medium text-zinc-700 dark:text-zinc-300">{t('settings.releaseNotesSummary')}</div>
               <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap leading-relaxed">
                 {updateInstance.body}
               </div>
@@ -472,7 +480,7 @@ export const SettingsView: React.FC = () => {
                 onClick={() => setUpdateState('idle')}
                 className="opacity-70 hover:opacity-100 text-[10px] shrink-0"
               >
-                忽略
+                {t('settings.ignoreError')}
               </button>
             </div>
           )}
@@ -480,14 +488,14 @@ export const SettingsView: React.FC = () => {
           {/* 底部存储与外链 */}
           <div className="pt-2 border-t border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
             <span className="font-mono text-[10px]">
-              纯本地运行 · 数据存储于 ~/.pivot/pivot.db
+              {t('settings.localDatabaseNotice')}
             </span>
             <button
               type="button"
               onClick={handleOpenRepo}
               className="inline-flex items-center gap-1 text-primary hover:underline cursor-pointer text-[11px] self-start sm:self-auto"
             >
-              <span>GitHub 源码仓库</span>
+              <span>{t('settings.githubRepo')}</span>
               <ExternalLink className="w-3 h-3" />
             </button>
           </div>

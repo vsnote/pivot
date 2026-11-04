@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useTranslation } from '@/i18n';
 import { InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
@@ -47,6 +48,7 @@ const DEFAULT_INTERCEPTORS: InterceptorStatus[] = [
 ];
 
 export const InterceptorPanel: React.FC = () => {
+  const { t } = useTranslation();
   const { interceptors, toggleInterceptor, setInterceptorModel, providers, stats } = useAppStore();
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -111,17 +113,17 @@ export const InterceptorPanel: React.FC = () => {
       <div className="p-4 sm:p-5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-3">
         <div>
           <h2 className="text-base font-bold text-zinc-950 dark:text-zinc-100">
-            网关接入地址
+            {t('interceptorPanel.gatewayAddress')}
           </h2>
           <p className="text-xs text-zinc-400 mt-1">
-            适用于 Cursor、Windsurf、Aider 等第三方 Agent、插件或脚本直接接入
+            {t('interceptorPanel.gatewayAddressDesc')}
           </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
           <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
-              <div className="text-[11px] text-zinc-400 mb-0.5">OpenAI 兼容 Base URL</div>
+              <div className="text-[11px] text-zinc-400 mb-0.5">{t('interceptorPanel.openaiBaseUrl')}</div>
               <div className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 http://127.0.0.1:{stats.port}/v1
               </div>
@@ -130,7 +132,7 @@ export const InterceptorPanel: React.FC = () => {
               type="button"
               onClick={() => copyToClipboard('openai-url', `http://127.0.0.1:${stats.port}/v1`)}
               className="shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
-              title="复制 OpenAI 兼容地址"
+              title={t('interceptorPanel.copyOpenAiUrl')}
             >
               {copiedKey === 'openai-url' ? (
                 <Check className="w-3.5 h-3.5 text-emerald-500" />
@@ -142,7 +144,7 @@ export const InterceptorPanel: React.FC = () => {
 
           <div className="p-3.5 rounded-md bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/60 dark:border-zinc-800 flex items-center justify-between">
             <div className="min-w-0 pr-2">
-              <div className="text-[11px] text-zinc-400 mb-0.5">Anthropic 兼容 Base URL</div>
+              <div className="text-[11px] text-zinc-400 mb-0.5">{t('interceptorPanel.anthropicBaseUrl')}</div>
               <div className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 http://127.0.0.1:{stats.port}
               </div>
@@ -151,7 +153,7 @@ export const InterceptorPanel: React.FC = () => {
               type="button"
               onClick={() => copyToClipboard('anthropic-url', `http://127.0.0.1:${stats.port}`)}
               className="shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
-              title="复制 Anthropic 兼容地址"
+              title={t('interceptorPanel.copyAnthropicUrl')}
             >
               {copiedKey === 'anthropic-url' ? (
                 <Check className="w-3.5 h-3.5 text-emerald-500" />
@@ -166,7 +168,7 @@ export const InterceptorPanel: React.FC = () => {
       {/* 本地 CLI 客户端一键代理 */}
       <div className="pb-0.5 pt-2">
         <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-          本地命令行客户端一键代理与启动模型
+          {t('interceptorPanel.cliSectionTitle')}
         </h3>
       </div>
 
@@ -218,12 +220,12 @@ export const InterceptorPanel: React.FC = () => {
                         {tool.installed ? (
                           <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-0.5 font-medium">
                             <CheckCircle2 className="w-3 h-3" />
-                            已安装
+                            {t('interceptorPanel.installed')}
                           </span>
                         ) : (
                           <span className="flex items-center gap-0.5">
                             <AlertCircle className="w-3 h-3" />
-                            未检测到
+                            {t('interceptorPanel.notDetected')}
                           </span>
                         )}
                       </div>
@@ -234,13 +236,13 @@ export const InterceptorPanel: React.FC = () => {
                     checked={tool.isIntercepted}
                     disabled={isToggling}
                     onCheckedChange={(checked) => handleToggle(tool.id, checked)}
-                    ariaLabel={`切换 ${tool.name} 代理`}
+                    ariaLabel={t('interceptorPanel.toggleProxyAria', { name: tool.name })}
                   />
                 </div>
 
                 {/* 状态行 */}
                 <div className="py-2 px-3 rounded-md bg-zinc-50/80 dark:bg-zinc-800/50 border border-zinc-200/50 dark:border-zinc-800/60 flex items-center justify-between text-xs font-mono mb-2.5">
-                  <span className="text-zinc-400">状态</span>
+                  <span className="text-zinc-400">{t('common.status')}</span>
                   <span className="font-semibold flex items-center gap-1.5">
                     <span
                       className={`w-1.5 h-1.5 rounded-full ${
@@ -261,10 +263,10 @@ export const InterceptorPanel: React.FC = () => {
                       }
                     >
                       {isOverwritten
-                        ? '外部改写覆盖 (争夺暂停)'
+                        ? t('interceptorPanel.statusOverwrittenPulse')
                         : tool.isIntercepted
-                          ? `已接管 (:16888)`
-                          : '官方直连'}
+                          ? t('interceptorPanel.statusInterceptedPulse')
+                          : t('interceptorPanel.statusDirect')}
                     </span>
                   </span>
                 </div>
@@ -276,7 +278,9 @@ export const InterceptorPanel: React.FC = () => {
 
                 {/* 启动模型配置 */}
                 <div className="mt-2.5 pt-2 border-t border-zinc-100 dark:border-zinc-800/80 flex items-center justify-between gap-1.5">
-                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0 font-medium">启动模型</span>
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0 font-medium">
+                    {t('interceptorPanel.launchModel')}
+                  </span>
                   <select
                     value={tool.model ?? ''}
                     disabled={availableModels.length === 0}
@@ -286,7 +290,7 @@ export const InterceptorPanel: React.FC = () => {
                     }}
                     className="h-6.5 w-full max-w-[130px] text-[11px] font-mono px-1.5 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400 cursor-pointer truncate"
                   >
-                    <option value="">默认推荐</option>
+                    <option value="">{t('interceptorPanel.defaultRecommended')}</option>
                     {availableModels.map(({ model, providerName }) => (
                       <option key={`${providerName}:${model}`} value={model}>
                         {model} ({providerName})
@@ -300,14 +304,14 @@ export const InterceptorPanel: React.FC = () => {
                   <div className="mt-2.5 p-2 rounded-md bg-amber-50/90 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/40 text-[11px] text-amber-900 dark:text-amber-300 flex items-center justify-between gap-2">
                     <span className="truncate flex items-center gap-1 text-[11px]">
                       <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
-                      第三方工具写入冲突
+                      {t('interceptorPanel.conflictNotice')}
                     </span>
                     <button
                       type="button"
                       onClick={() => setConflictConfirmTarget(tool)}
                       className="text-amber-700 dark:text-amber-300 underline font-medium hover:text-amber-950 dark:hover:text-amber-100 shrink-0 cursor-pointer text-[10px]"
                     >
-                      解决冲突
+                      {t('interceptorPanel.resolveConflictBtn')}
                     </button>
                   </div>
                 )}
@@ -320,7 +324,7 @@ export const InterceptorPanel: React.FC = () => {
       {/* 终端临时命令 */}
       <div className="p-4 sm:p-5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-2.5">
         <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-          临时环境变量
+          {t('interceptorPanel.envTitle')}
         </h3>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
@@ -330,7 +334,7 @@ export const InterceptorPanel: React.FC = () => {
             <button
               onClick={() => copyToClipboard('claude', claudeExport)}
               className="ml-2 shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white cursor-pointer"
-              title="复制"
+              title={t('common.copy')}
             >
               {copiedKey === 'claude' ? (
                 <Check className="w-3.5 h-3.5 text-emerald-400" />
@@ -346,7 +350,7 @@ export const InterceptorPanel: React.FC = () => {
             <button
               onClick={() => copyToClipboard('openai', openaiExport)}
               className="ml-2 shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white cursor-pointer"
-              title="复制"
+              title={t('common.copy')}
             >
               {copiedKey === 'openai' ? (
                 <Check className="w-3.5 h-3.5 text-emerald-400" />

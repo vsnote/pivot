@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useTranslation } from '@/i18n';
 import { Badge } from '@/components/common/Badge';
 import { ProviderAvatar } from '@/components/common/BrandIcons';
 import {
@@ -27,28 +28,28 @@ import {
 
 type TimeRange = 'all' | 'today' | '1h';
 
-function formatClientType(type: string): string {
+function formatClientType(type: string, t: (k: string) => string): string {
   switch (type) {
     case 'claude_code':
-      return 'Claude Code';
+      return t('dashboard.charts.clientTypes.claude_code');
     case 'codex_cli':
-      return 'Codex CLI';
+      return t('dashboard.charts.clientTypes.codex_cli');
     case 'gemini_cli':
-      return 'Gemini CLI';
+      return t('dashboard.charts.clientTypes.gemini_cli');
     case 'pi':
-      return 'Pi Agent';
+      return t('dashboard.charts.clientTypes.pi');
     case 'openai_api':
-      return 'OpenAI API';
+      return t('dashboard.charts.clientTypes.openai_api');
     case 'anthropic_api':
-      return 'Anthropic API';
+      return t('dashboard.charts.clientTypes.anthropic_api');
     case 'generic':
-      return '通用客户端';
+      return t('dashboard.charts.clientTypes.generic');
     default:
       return type;
   }
 }
 
-function ClientLogo({ type, className = 'w-4 h-4' }: { type: ClientType; className?: string }) {
+function ClientLogo({ type, className = 'w-4 h-4' }: { type: ClientType | string; className?: string }) {
   switch (type) {
     case 'claude_code':
     case 'anthropic_api':
@@ -81,41 +82,42 @@ function getEffectiveTokens(log: RequestLog): {
   return { prompt: p, completion: c, total: p + c };
 }
 
-function categorizeError(log: RequestLog): string {
+function categorizeError(log: RequestLog, t: (k: string, p?: Record<string, string | number>) => string): string {
   const code = log.statusCode;
   const msg = (log.errorMessage || '').toLowerCase();
 
   if (code === 429 || msg.includes('rate_limit') || msg.includes('quota') || msg.includes('insufficient_quota')) {
-    return '速率超限或配额耗尽 (429 Too Many Requests)';
+    return t('dashboard.charts.errors.rateLimit');
   }
   if (code === 401 || code === 403 || msg.includes('auth') || msg.includes('key')) {
-    return '鉴权失败或密钥无效 (401/403 Unauthorized)';
+    return t('dashboard.charts.errors.authFailed');
   }
   if (code === 404 || msg.includes('model_not_found') || msg.includes('not found')) {
-    return '模型未收录或路径不存在 (404 Not Found)';
+    return t('dashboard.charts.errors.notFound');
   }
   if (code === 502 || code === 504 || msg.includes('timeout') || msg.includes('timed out')) {
-    return '上游网络超时或网关中断 (502/504 Timeout)';
+    return t('dashboard.charts.errors.timeout');
   }
   if (code >= 500) {
-    return `上游服务商故障 (${code} Internal Error)`;
+    return t('dashboard.charts.errors.internalError', { code });
   }
   if (log.errorMessage) {
     return log.errorMessage.slice(0, 36);
   }
-  return `请求异常 (${code})`;
+  return t('dashboard.charts.errors.requestError', { code });
 }
 
-function formatUptime(secs: number): string {
-  if (secs <= 0) return '刚启动';
+function formatUptime(secs: number, t: (k: string, p?: Record<string, string | number>) => string): string {
+  if (secs <= 0) return t('dashboard.charts.uptimeFormats.justStarted');
   const hours = Math.floor(secs / 3600);
   const minutes = Math.floor((secs % 3600) / 60);
-  if (hours > 0) return `${hours}小时 ${minutes}分钟`;
-  if (minutes > 0) return `${minutes}分钟`;
-  return `${secs}秒`;
+  if (hours > 0) return t('dashboard.charts.uptimeFormats.hoursMinutes', { hours, minutes });
+  if (minutes > 0) return t('dashboard.charts.uptimeFormats.minutes', { minutes });
+  return t('dashboard.charts.uptimeFormats.seconds', { seconds: secs });
 }
 
 export const UsageDashboard: React.FC = () => {
+  const { t, locale } = useTranslation();
   const { logs, stats, providers } = useAppStore();
   const [timeRange, setTimeRange] = useState<TimeRange>('all');
 
@@ -150,7 +152,7 @@ export const UsageDashboard: React.FC = () => {
     let status4xx = 0;
     let status5xx = 0;
 
-    // 维度一：服务商统计 (key: providerId or name)
+    // 1. 服务商维度聚合
     const providerMap: Record<
       string,
       {
@@ -168,12 +170,12 @@ export const UsageDashboard: React.FC = () => {
       }
     > = {};
 
-    // 维度二：模型使用排行 (key: modelName)
+    // 2. 模型使用排行聚合
     const modelMap: Record<
       string,
       {
         model: string;
-        targetModel: string;
+        targetModel?: string;
         providerName: string;
         count: number;
         promptTokens: number;
@@ -183,11 +185,11 @@ export const UsageDashboard: React.FC = () => {
       }
     > = {};
 
-    // 维度三：客户端来源 (key: clientType)
+    // 3. 客户端聚合
     const clientMap: Record<
       string,
       {
-        type: ClientType;
+        type: string;
         count: number;
         promptTokens: number;
         completionTokens: number;
@@ -197,41 +199,39 @@ export const UsageDashboard: React.FC = () => {
       }
     > = {};
 
-    // 维度四：错误分类诊断
+    // 4. 错误诊断聚合
     const errorDiagnosticsMap: Record<string, number> = {};
 
-    // 维度五：24小时活跃时段分布 (0..23)
+    // 5. 24小时分布
     const hourlyCounts = new Array(24).fill(0);
 
-    for (let i = 0; i < filteredLogs.length; i++) {
-      const log = filteredLogs[i];
+    for (const log of filteredLogs) {
       const { prompt, completion, total } = getEffectiveTokens(log);
-      const isSuccess = log.statusCode >= 200 && log.statusCode < 300;
-      const is4xx = log.statusCode >= 400 && log.statusCode < 500;
-      const is5xx = log.statusCode >= 500;
-      const isErr = log.statusCode >= 400;
-
       promptSum += prompt;
       completionSum += completion;
       const cost = estimateCost(log.routedModel || log.incomingModel, prompt, completion);
       costSum += cost;
 
+      const isSuccess = log.statusCode >= 200 && log.statusCode < 300;
+      const isErr = log.statusCode >= 400 || Boolean(log.errorMessage);
+
       if (isSuccess) successCount++;
       if (isErr) errorCount++;
-      if (is4xx) status4xx++;
-      if (is5xx) status5xx++;
-      if (isSuccess) status2xx++;
+
+      if (log.statusCode >= 200 && log.statusCode < 300) status2xx++;
+      else if (log.statusCode >= 400 && log.statusCode < 500) status4xx++;
+      else if (log.statusCode >= 500) status5xx++;
 
       latencySum += log.latencyMs || 0;
       if (log.isStream) streamCount++;
-      if (log.fallbackUsed) fallbackCount++;
+      if (log.fallbackUsed || (log.attempts && log.attempts.length > 1)) fallbackCount++;
 
-      // 1. 服务商统计
+      // 1. 服务商
       const pId = log.routedProviderId || 'unknown';
       const pName =
         log.routedProviderName ||
         providers.find((p) => p.id === pId)?.name ||
-        (pId === 'none' ? '未匹配服务商' : pId);
+        (pId === 'none' ? (locale === 'zh-CN' ? '未匹配服务商' : 'Unmatched') : pId);
 
       if (!providerMap[pId]) {
         const found = providers.find((p) => p.id === pId);
@@ -300,7 +300,7 @@ export const UsageDashboard: React.FC = () => {
 
       // 4. 错误诊断
       if (isErr) {
-        const reason = categorizeError(log);
+        const reason = categorizeError(log, t);
         errorDiagnosticsMap[reason] = (errorDiagnosticsMap[reason] || 0) + 1;
       }
 
@@ -372,7 +372,7 @@ export const UsageDashboard: React.FC = () => {
       hourlyCounts,
       hasRecords: effectiveTotalRequests > 0 || logs.length > 0,
     };
-  }, [filteredLogs, timeRange, stats, providers, logs.length]);
+  }, [filteredLogs, timeRange, stats, providers, logs.length, t, locale]);
 
   const maxHourlyCount = useMemo(() => {
     return Math.max(1, ...metrics.hourlyCounts);
@@ -380,11 +380,13 @@ export const UsageDashboard: React.FC = () => {
 
   return (
     <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
-      {/* 顶部控制栏：标题与状态微徽章、时间跨度切换、重置按钮 */}
+      {/* 顶部控制栏：标题与状态微徽章、时间跨度切换 */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center gap-2">
-            <span className="text-base font-bold text-zinc-900 dark:text-zinc-100">使用统计</span>
+            <span className="text-base font-bold text-zinc-900 dark:text-zinc-100">
+              {t('header.logs')}
+            </span>
             <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-mono bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-border">
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
@@ -392,12 +394,12 @@ export const UsageDashboard: React.FC = () => {
                 }`}
               />
               <span>
-                {stats.isRunning ? `127.0.0.1:${stats.port}` : '网关未启动'}
+                {stats.isRunning ? `127.0.0.1:${stats.port}` : (locale === 'zh-CN' ? '网关未启动' : 'Gateway Stopped')}
               </span>
               {stats.isRunning && stats.uptimeSecs > 0 && (
                 <>
                   <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                  <span className="text-[10px] text-zinc-400">{formatUptime(stats.uptimeSecs)}</span>
+                  <span className="text-[10px] text-zinc-400">{formatUptime(stats.uptimeSecs, t)}</span>
                 </>
               )}
             </div>
@@ -416,7 +418,7 @@ export const UsageDashboard: React.FC = () => {
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              全部历史
+              {t('dashboard.timeRange.all')}
             </button>
             <button
               type="button"
@@ -427,7 +429,7 @@ export const UsageDashboard: React.FC = () => {
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              今日
+              {t('dashboard.timeRange.today')}
             </button>
             <button
               type="button"
@@ -438,7 +440,7 @@ export const UsageDashboard: React.FC = () => {
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              近 1 小时
+              {t('dashboard.timeRange.oneHour')}
             </button>
           </div>
         </div>
@@ -451,10 +453,12 @@ export const UsageDashboard: React.FC = () => {
             <Activity className="w-6 h-6 stroke-[1.5]" />
           </div>
           <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
-            暂无使用数据
+            {locale === 'zh-CN' ? '暂无使用数据' : 'No Usage Data'}
           </h3>
           <p className="text-xs text-zinc-400 max-w-sm mx-auto leading-relaxed">
-            在 Claude Code、Codex CLI 或其他已配置的客户端中发起 AI 对话后，各维度的调用统计、Token 消耗与成本分析将在此实时呈现。
+            {locale === 'zh-CN'
+              ? '在 Claude Code、Codex CLI 或其他已配置的客户端中发起 AI 对话后，各维度的调用统计、Token 消耗与成本分析将在此实时呈现。'
+              : 'Start an AI conversation in Claude Code, Codex CLI, or any configured client to see real-time usage statistics, token consumption, and cost estimates here.'}
           </p>
         </div>
       ) : (
@@ -464,24 +468,26 @@ export const UsageDashboard: React.FC = () => {
             {/* 卡片 1: 总请求数 */}
             <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
               <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">请求总量</span>
+                <span className="text-[11px] font-medium">{t('dashboard.metrics.totalRequests')}</span>
                 <Activity className="w-4 h-4 text-primary" />
               </div>
               <div className="mt-2 flex items-baseline gap-2">
                 <span className="text-2xl font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
                   {metrics.totalRequests.toLocaleString()}
                 </span>
-                <span className="text-xs text-zinc-400">次</span>
+                <span className="text-xs text-zinc-400">{locale === 'zh-CN' ? '次' : 'reqs'}</span>
               </div>
               <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60">
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
                   <CheckCircle2 className="w-3 h-3" />
-                  {metrics.successRate.toFixed(1)}% 成功
+                  {metrics.successRate.toFixed(1)}% {locale === 'zh-CN' ? '成功' : 'success'}
                 </span>
                 {metrics.errorCount > 0 ? (
-                  <span className="text-rose-500 font-medium">{metrics.errorCount} 次失败</span>
+                  <span className="text-rose-500 font-medium">
+                    {metrics.errorCount} {locale === 'zh-CN' ? '次失败' : 'failed'}
+                  </span>
                 ) : (
-                  <span className="text-zinc-400">0 错误</span>
+                  <span className="text-zinc-400">0 {locale === 'zh-CN' ? '错误' : 'errors'}</span>
                 )}
               </div>
             </div>
@@ -489,7 +495,7 @@ export const UsageDashboard: React.FC = () => {
             {/* 卡片 2: Token 消耗 */}
             <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
               <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">Token 吞吐</span>
+                <span className="text-[11px] font-medium">{t('dashboard.metrics.totalTokens')}</span>
                 <Layers className="w-4 h-4 text-blue-500" />
               </div>
               <div className="mt-2 flex items-baseline gap-2">
@@ -499,16 +505,16 @@ export const UsageDashboard: React.FC = () => {
                 <span className="text-xs text-zinc-400">tokens</span>
               </div>
               <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60 text-zinc-400">
-                <span>入 {formatTokens(metrics.promptTokens)}</span>
+                <span>{locale === 'zh-CN' ? '入' : 'In'} {formatTokens(metrics.promptTokens)}</span>
                 <span className="text-zinc-300 dark:text-zinc-600">/</span>
-                <span>出 {formatTokens(metrics.completionTokens)}</span>
+                <span>{locale === 'zh-CN' ? '出' : 'Out'} {formatTokens(metrics.completionTokens)}</span>
               </div>
             </div>
 
             {/* 卡片 3: 预估花费 */}
             <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
               <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">预估总成本</span>
+                <span className="text-[11px] font-medium">{t('dashboard.metrics.estimatedCost')}</span>
                 <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
                   USD
                 </span>
@@ -519,15 +525,15 @@ export const UsageDashboard: React.FC = () => {
                 </span>
               </div>
               <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60 text-zinc-400">
-                <span>均次 {formatCurrency(metrics.avgCostPerReq)}</span>
-                <span className="text-[10px] text-zinc-400">官方计费标准</span>
+                <span>{locale === 'zh-CN' ? '均次' : 'Avg'} {formatCurrency(metrics.avgCostPerReq)}</span>
+                <span className="text-[10px] text-zinc-400">{locale === 'zh-CN' ? '官方标准' : 'Official rate'}</span>
               </div>
             </div>
 
             {/* 卡片 4: 性能与流式 */}
             <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
               <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">平均延迟</span>
+                <span className="text-[11px] font-medium">{t('dashboard.metrics.avgLatency')}</span>
                 <Clock className="w-4 h-4 text-amber-500" />
               </div>
               <div className="mt-2 flex items-baseline gap-2">
@@ -539,11 +545,11 @@ export const UsageDashboard: React.FC = () => {
               <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60 text-zinc-400">
                 <span className="flex items-center gap-1">
                   <Zap className="w-3 h-3 text-amber-500" />
-                  {metrics.streamRatio}% 流式
+                  {metrics.streamRatio}% {locale === 'zh-CN' ? '流式' : 'stream'}
                 </span>
                 {metrics.fallbackRatio > 0 && (
                   <span className="text-amber-600 dark:text-amber-400">
-                    {metrics.fallbackRatio}% 兜底
+                    {metrics.fallbackRatio}% {locale === 'zh-CN' ? '兜底' : 'fallback'}
                   </span>
                 )}
               </div>
@@ -557,16 +563,16 @@ export const UsageDashboard: React.FC = () => {
               <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
                   <Server className="w-3.5 h-3.5 text-zinc-500" />
-                  <span>服务商调用分布</span>
+                  <span>{t('dashboard.charts.providerDistribution')}</span>
                 </div>
                 <span className="text-[11px] font-mono text-zinc-400">
-                  {metrics.providerList.length} 家服务商
+                  {metrics.providerList.length} {locale === 'zh-CN' ? '家服务商' : 'providers'}
                 </span>
               </div>
 
               <div className="p-3 divide-y divide-border/60">
                 {metrics.providerList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">暂无服务商调用记录</div>
+                  <div className="p-6 text-center text-xs text-zinc-400">{locale === 'zh-CN' ? '暂无服务商调用记录' : 'No provider records'}</div>
                 ) : (
                   metrics.providerList.map((p) => {
                     const reqShare =
@@ -592,13 +598,13 @@ export const UsageDashboard: React.FC = () => {
                             </span>
                             {pSuccessRate < 90 && (
                               <Badge variant="destructive" className="text-[9px] py-0 px-1">
-                                {pSuccessRate}% 成功
+                                {pSuccessRate}% {locale === 'zh-CN' ? '成功' : 'success'}
                               </Badge>
                             )}
                           </div>
                           <div className="flex items-center gap-2.5 shrink-0 text-xs font-mono">
                             <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                              {p.count} 次
+                              {p.count} {locale === 'zh-CN' ? '次' : 'reqs'}
                             </span>
                             <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
                               ({reqShare}%)
@@ -639,7 +645,7 @@ export const UsageDashboard: React.FC = () => {
               <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
                   <Sparkles className="w-3.5 h-3.5 text-zinc-500" />
-                  <span>热门模型使用排行</span>
+                  <span>{t('dashboard.charts.modelDistribution')}</span>
                 </div>
                 <span className="text-[11px] font-mono text-zinc-400">
                   Top {Math.min(5, metrics.modelList.length)}
@@ -648,7 +654,7 @@ export const UsageDashboard: React.FC = () => {
 
               <div className="p-3 divide-y divide-border/60">
                 {metrics.modelList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">暂无模型调用数据</div>
+                  <div className="p-6 text-center text-xs text-zinc-400">{locale === 'zh-CN' ? '暂无模型调用数据' : 'No model usage data'}</div>
                 ) : (
                   metrics.modelList.slice(0, 6).map((m, index) => {
                     const mShare =
@@ -672,7 +678,7 @@ export const UsageDashboard: React.FC = () => {
                             {m.targetModel && m.targetModel !== m.model && (
                               <span
                                 className="text-[10px] font-mono text-zinc-400 truncate max-w-[110px]"
-                                title={`映射至: ${m.targetModel}`}
+                                title={`${locale === 'zh-CN' ? '映射至' : 'Mapped to'}: ${m.targetModel}`}
                               >
                                 → {m.targetModel}
                               </span>
@@ -680,7 +686,7 @@ export const UsageDashboard: React.FC = () => {
                           </div>
                           <div className="flex items-center gap-2 shrink-0 text-xs font-mono">
                             <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                              {m.count} 次
+                              {m.count} {locale === 'zh-CN' ? '次' : 'reqs'}
                             </span>
                             <span className="text-[11px] text-zinc-400">({mShare}%)</span>
                           </div>
@@ -697,7 +703,7 @@ export const UsageDashboard: React.FC = () => {
                         {/* 细分指标 */}
                         <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
                           <span>
-                            {formatTokens(m.totalTokens)} tok ({formatTokens(m.promptTokens)}入 / {formatTokens(m.completionTokens)}出)
+                            {formatTokens(m.totalTokens)} tok ({formatTokens(m.promptTokens)} {locale === 'zh-CN' ? '入' : 'in'} / {formatTokens(m.completionTokens)} {locale === 'zh-CN' ? '出' : 'out'})
                           </span>
                           <span className="text-emerald-600 dark:text-emerald-400 font-medium">
                             {formatCurrency(m.cost)}
@@ -718,16 +724,16 @@ export const UsageDashboard: React.FC = () => {
               <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
                   <Terminal className="w-3.5 h-3.5 text-zinc-500" />
-                  <span>客户端接入来源</span>
+                  <span>{t('dashboard.charts.clientDistribution')}</span>
                 </div>
                 <span className="text-[11px] font-mono text-zinc-400">
-                  {metrics.clientList.length} 类客户端
+                  {metrics.clientList.length} {locale === 'zh-CN' ? '类客户端' : 'clients'}
                 </span>
               </div>
 
               <div className="p-3 divide-y divide-border/60">
                 {metrics.clientList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">暂无客户端请求</div>
+                  <div className="p-6 text-center text-xs text-zinc-400">{locale === 'zh-CN' ? '暂无客户端请求' : 'No client requests'}</div>
                 ) : (
                   metrics.clientList.map((c) => {
                     const cShare =
@@ -743,12 +749,12 @@ export const UsageDashboard: React.FC = () => {
                               <ClientLogo type={c.type} className="w-3.5 h-3.5" />
                             </div>
                             <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                              {formatClientType(c.type)}
+                              {formatClientType(c.type, t)}
                             </span>
                           </div>
                           <div className="flex items-center gap-2 text-xs font-mono">
                             <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                              {c.count} 次
+                              {c.count} {locale === 'zh-CN' ? '次' : 'reqs'}
                             </span>
                             <span className="text-[11px] text-zinc-400">({cShare}%)</span>
                           </div>
@@ -765,9 +771,9 @@ export const UsageDashboard: React.FC = () => {
                           <span>{formatTokens(c.totalTokens)} tok</span>
                           <div className="flex items-center gap-2">
                             {c.errorCount > 0 ? (
-                              <span className="text-rose-500">{c.errorCount} 失败</span>
+                              <span className="text-rose-500">{c.errorCount} {locale === 'zh-CN' ? '失败' : 'failed'}</span>
                             ) : (
-                              <span className="text-emerald-600 dark:text-emerald-400">正常</span>
+                              <span className="text-emerald-600 dark:text-emerald-400">{t('common.normal')}</span>
                             )}
                             <span>·</span>
                             <span className="text-emerald-600 dark:text-emerald-400 font-medium">
@@ -792,10 +798,10 @@ export const UsageDashboard: React.FC = () => {
                     ) : (
                       <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
                     )}
-                    <span>链路健康与异常诊断</span>
+                    <span>{t('dashboard.charts.recentErrors')}</span>
                   </div>
                   <span className="text-[11px] font-mono text-zinc-400">
-                    成功率 {metrics.successRate.toFixed(1)}%
+                    {t('dashboard.metrics.successRate')} {metrics.successRate.toFixed(1)}%
                   </span>
                 </div>
 
@@ -803,7 +809,7 @@ export const UsageDashboard: React.FC = () => {
                   {/* 三色状态码分段进度条 */}
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
-                      <span>状态码分布</span>
+                      <span>{t('dashboard.charts.statusDistribution')}</span>
                       <span>
                         2xx: {metrics.status2xx} · 4xx: {metrics.status4xx} · 5xx: {metrics.status5xx}
                       </span>
@@ -815,7 +821,7 @@ export const UsageDashboard: React.FC = () => {
                           style={{
                             width: `${(metrics.status2xx / Math.max(1, metrics.totalRequests)) * 100}%`,
                           }}
-                          title={`成功 (2xx): ${metrics.status2xx}`}
+                          title={`2xx: ${metrics.status2xx}`}
                         />
                       )}
                       {metrics.status4xx > 0 && (
@@ -824,7 +830,7 @@ export const UsageDashboard: React.FC = () => {
                           style={{
                             width: `${(metrics.status4xx / Math.max(1, metrics.totalRequests)) * 100}%`,
                           }}
-                          title={`客户端/限流异常 (4xx): ${metrics.status4xx}`}
+                          title={`4xx: ${metrics.status4xx}`}
                         />
                       )}
                       {metrics.status5xx > 0 && (
@@ -833,7 +839,7 @@ export const UsageDashboard: React.FC = () => {
                           style={{
                             width: `${(metrics.status5xx / Math.max(1, metrics.totalRequests)) * 100}%`,
                           }}
-                          title={`上游故障 (5xx): ${metrics.status5xx}`}
+                          title={`5xx: ${metrics.status5xx}`}
                         />
                       )}
                     </div>
@@ -842,13 +848,13 @@ export const UsageDashboard: React.FC = () => {
                   {/* 异常原因归因列表 */}
                   <div className="pt-2 border-t border-border/60">
                     <div className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 mb-2">
-                      常见异常诊断
+                      {t('dashboard.charts.recentErrors')}
                     </div>
 
                     {metrics.errorDiagnostics.length === 0 ? (
                       <div className="p-3 rounded-md bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-900/40 flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300">
                         <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-500" />
-                        <span>全链路运行平稳，当前未记录到任何异常报错。</span>
+                        <span>{t('dashboard.charts.noErrors')}</span>
                       </div>
                     ) : (
                       <div className="space-y-1.5">
@@ -864,7 +870,7 @@ export const UsageDashboard: React.FC = () => {
                               </span>
                             </div>
                             <span className="text-xs font-mono font-bold text-rose-600 dark:text-rose-400 shrink-0">
-                              {count} 次
+                              {count} {locale === 'zh-CN' ? '次' : 'reqs'}
                             </span>
                           </div>
                         ))}
@@ -876,8 +882,8 @@ export const UsageDashboard: React.FC = () => {
 
               {/* 底部微信息 */}
               <div className="px-4 py-2 bg-muted/20 border-t border-border flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-                <span>兜底策略：触发备用服务商 {metrics.fallbackRatio}%</span>
-                <span>流式长连接 SSE: {metrics.streamRatio}%</span>
+                <span>{locale === 'zh-CN' ? '兜底策略：触发备用服务商' : 'Fallback triggered:'} {metrics.fallbackRatio}%</span>
+                <span>{locale === 'zh-CN' ? '流式长连接 SSE:' : 'Stream SSE:'} {metrics.streamRatio}%</span>
               </div>
             </div>
           </div>
@@ -887,10 +893,10 @@ export const UsageDashboard: React.FC = () => {
             <div className="flex items-center justify-between text-xs">
               <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
                 <TrendingUp className="w-3.5 h-3.5 text-primary" />
-                <span>24 小时活跃时段分布</span>
+                <span>{t('dashboard.charts.requestsOverTime')}</span>
               </div>
               <span className="text-[11px] text-zinc-400 font-mono">
-                峰值: {maxHourlyCount > 1 ? `${maxHourlyCount} 次/时` : '-'}
+                {locale === 'zh-CN' ? '峰值' : 'Peak'}: {maxHourlyCount > 1 ? `${maxHourlyCount} ${locale === 'zh-CN' ? '次/时' : 'reqs/h'}` : '-'}
               </span>
             </div>
 
@@ -907,7 +913,7 @@ export const UsageDashboard: React.FC = () => {
                   >
                     {/* Tooltip on hover */}
                     <div className="absolute -top-7 hidden group-hover:flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 shadow-md whitespace-nowrap z-30 pointer-events-none">
-                      {hour}:00 · {count}次
+                      {hour}:00 · {count}{locale === 'zh-CN' ? '次' : 'reqs'}
                     </div>
 
                     <div
