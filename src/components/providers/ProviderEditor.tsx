@@ -64,14 +64,8 @@ export function ProviderEditor() {
   const { t, locale } = useTranslation();
   const { editingProvider, presets, providers, closeProviderEditor, saveProvider, deleteProvider, activeTab } =
     useAppStore();
-  // 还没有可用的默认服务商时，新添加的第一个服务商默认承担该角色。
-  // 路由只在已启用的服务商里找默认目标，所以停用的默认不算数；
-  // 与后端第三方导入路径 is_default: existing.is_empty() 保持一致。
-  const [autoDefault] = useState(
-    () => !editingProvider && !providers.some((provider) => provider.isDefault && provider.enabled),
-  );
   const [currentEditingProvider, setCurrentEditingProvider] = useState<Provider | null>(editingProvider);
-  const [initial, setInitial] = useState(() => createProviderDraft(editingProvider, presets, autoDefault));
+  const [initial, setInitial] = useState(() => createProviderDraft(editingProvider, presets));
   const [draft, setDraft] = useState(initial);
 
   const findExistingProviderForPreset = (preset?: Preset) => {
@@ -324,16 +318,13 @@ export function ProviderEditor() {
       const primary = syncedModels.find((m) => m === 'gpt-6-astra') || syncedModels[0];
       nextModels = [primary];
     }
-    const finalDefault = draft.defaultModel && nextModels.includes(draft.defaultModel)
-      ? draft.defaultModel
-      : nextModels[0] || null;
 
     replaceModels(nextModels);
 
     const providerToSave = prepareProvider({
       ...draft,
       models: nextModels,
-      defaultModel: finalDefault,
+      defaultModel: null,
       enabled: true,
     });
     await saveProvider(providerToSave);
@@ -610,7 +601,7 @@ export function ProviderEditor() {
     setConfirmation(null);
     invalidateModels();
     setPool([]);
-    setDraft(applyProviderPreset(draft, next, autoDefault));
+    setDraft(applyProviderPreset(draft, next));
     setShowKeys(false);
     setShowAuthHelp(false);
     setManualModel('');
@@ -698,13 +689,10 @@ export function ProviderEditor() {
 
       // 保持清洗后的有效已选模型；若此前未选或全部失效，默认选中上游获取到的全部模型
       const nextSelected = validSelected.length > 0 ? validSelected : unique;
-      const nextDefaultModel = draft.defaultModel && unique.includes(draft.defaultModel)
-        ? draft.defaultModel
-        : null;
 
       update({
         models: nextSelected,
-        defaultModel: nextDefaultModel,
+        defaultModel: null,
       });
 
       if (removedCount > 0) {
@@ -731,7 +719,7 @@ export function ProviderEditor() {
     const next = uniqueValues(models);
     update({
       models: next,
-      defaultModel: draft.defaultModel && next.includes(draft.defaultModel) ? draft.defaultModel : null,
+      defaultModel: null,
     });
   };
 
@@ -784,12 +772,6 @@ export function ProviderEditor() {
         locale === 'zh-CN'
           ? '请先点击添加正在输入的模型，或清空输入框'
           : 'Please click Add to add current input or clear input box';
-    const defaultModel = draft.defaultModel?.trim() ?? '';
-    if (/[\s,，]/u.test(defaultModel))
-      nextErrors.defaultModel =
-        locale === 'zh-CN'
-          ? '请输入一个完整的模型 ID，不要包含空格或逗号'
-          : 'Please enter a complete model ID without spaces or commas';
 
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) {
@@ -1864,7 +1846,6 @@ export function ProviderEditor() {
                         {filteredModels.map((model) => {
                           const isSelected = draft.models.includes(model);
                           const isInvalid = invalidModels.includes(model);
-                          const isDefaultModel = draft.defaultModel === model;
                           const cap = capabilities[model];
                           const isCopied = copiedModel === model;
 
@@ -1918,13 +1899,6 @@ export function ProviderEditor() {
 
                               {/* 右侧：标记与提示 */}
                               <div className="flex items-center gap-1.5 shrink-0">
-                                {isDefaultModel && (
-                                  <span
-                                    className="px-1 py-px rounded text-[9px] font-sans font-normal leading-tight bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0"
-                                  >
-                                    {t('providerEditor.defaultBadge')}
-                                  </span>
-                                )}
                                 {isInvalid && (
                                   <span
                                     className="shrink-0 text-amber-500 flex items-center"
@@ -2074,7 +2048,6 @@ export function ProviderEditor() {
           title={t('providerEditor.deleteConfirmTitleWithName', { name: draft.name || currentEditingProvider.name })}
           details={[
             t('providerEditor.deleteConfirmDescReconfigure'),
-            ...(draft.defaultModel ? [t('providerEditor.deleteConfirmDescDefaultModel')] : []),
           ]}
           confirmLabel={t('providerEditor.deleteAction')}
           busy={deleting}

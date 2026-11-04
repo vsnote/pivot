@@ -183,31 +183,16 @@ test('删除失败会把原因写进全局错误并且不静默改列表', async
   assert.equal(store.getState().error, null);
 });
 
-test('保存默认服务商后本地列表只有一个默认标记', async () => {
-  const first = { id: 'provider-a', name: 'A', priority: 2, isDefault: true };
+test('保存服务商后本地列表及时更新对应记录', async () => {
+  const first = { id: 'provider-a', name: 'A', priority: 2 };
   const second = { id: 'provider-b', name: 'B', priority: 1 };
   const store = await createStore({ native: false, invoke: async (command) => {
     if (command === 'get_providers') return [first, second];
   } });
   await store.getState().fetchInitialData();
-  await store.getState().saveProvider({ ...second, isDefault: true });
-  const defaults = store.getState().providers.filter((provider) => provider.isDefault).map((provider) => provider.id);
-  assert.deepEqual(defaults, ['provider-b']);
-});
-
-test('保存默认模型后本地列表只有一个默认模型标记', async () => {
-  const first = { id: 'provider-a', name: 'A', priority: 2, defaultModel: 'model-a', isDefault: true };
-  const second = { id: 'provider-b', name: 'B', priority: 1, defaultModel: null };
-  const store = await createStore({ native: false, invoke: async (command) => {
-    if (command === 'get_providers') return [first, second];
-  } });
-  await store.getState().fetchInitialData();
-  await store.getState().saveProvider({ ...second, defaultModel: 'model-b', isDefault: true });
-  const providers = store.getState().providers;
-  assert.equal(providers.find((p) => p.id === 'provider-a').defaultModel, null);
-  assert.equal(providers.find((p) => p.id === 'provider-a').isDefault, false);
-  assert.equal(providers.find((p) => p.id === 'provider-b').defaultModel, 'model-b');
-  assert.equal(providers.find((p) => p.id === 'provider-b').isDefault, true);
+  await store.getState().saveProvider({ ...second, name: 'B-Updated' });
+  const updated = store.getState().providers.find((p) => p.id === 'provider-b');
+  assert.equal(updated.name, 'B-Updated');
 });
 
 test('切换为跟随系统时向原生窗口传递 null，切换深浅色时传递对应主题名', async () => {

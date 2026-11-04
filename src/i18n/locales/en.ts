@@ -66,7 +66,7 @@ export const en: TranslationDictionary = {
     notTakenOver: 'No agents intercepted; requests connect directly. Expand the guide below for manual setup.',
     defaultFooter: 'When intercepted, agent requests are routed through Pivot; otherwise they connect directly.',
     startupModel: 'Startup Model',
-    defaultModelRecommend: 'Default Model',
+    defaultModelRecommend: 'Default',
     universalCard: {
       title: 'Universal Agent Manual Setup',
       description: 'Enter the Base URL below in any developer tool that supports custom APIs. Use any string for the API Key (e.g. pivot). Pivot will intelligently route requests to the appropriate upstream provider based on the model.',

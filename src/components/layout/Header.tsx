@@ -2,7 +2,6 @@ import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/i18n';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
-import { Plus } from 'lucide-react';
 
 const tabKeys = ['providers', 'clients', 'logs', 'settings'] as const;
 type TabId = (typeof tabKeys)[number];
@@ -14,8 +13,6 @@ export const Header: React.FC = () => {
     settingsSection,
     setActiveTab,
     setSettingsSection,
-    isProviderEditorOpen,
-    openProviderEditor,
   } = useAppStore();
 
   const current: TabId =
@@ -41,9 +38,13 @@ export const Header: React.FC = () => {
       className="relative h-12 w-full select-none shrink-0 z-40 bg-background/80 border-b border-border backdrop-blur-md flex items-center"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
-      {/* 居中导航：统一采用整窗中轴绝对居中，与下方主内容卡片严格对齐 */}
+      {/* 方案 3：自然左对齐流式导航
+          - 避让原生红绿灯区域（左侧留出恒定 96px 安全间距，距红绿灯约 18px 舒适留白）；
+          - 中英文首个 Tab 严格对齐于相同 X 轴锚点，词条长短自然向右延伸；
+          - 整个顶栏剩余区域均为原生窗口拖拽区，视觉纯净专注。
+      */}
       <div
-        className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2"
+        className="flex items-center pl-[96px]"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         <Tabs value={current} onValueChange={selectTab}>
@@ -56,24 +57,6 @@ export const Header: React.FC = () => {
           </TabsList>
         </Tabs>
       </div>
-
-      {/* 右侧功能操作区：脱离常规文档流绝对定位，既不干扰导航居中对称性，切换 Tab 时导航也绝不跳动 */}
-      {current === 'providers' && !isProviderEditorOpen && (
-        <div
-          className="absolute right-3.5 top-1/2 -translate-y-1/2 flex items-center"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          <button
-            type="button"
-            onClick={() => openProviderEditor(null)}
-            title={t('header.addProviderShortcut')}
-            aria-label={t('header.addProvider')}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors cursor-pointer"
-          >
-            <Plus className="w-4 h-4 stroke-[2.2]" />
-          </button>
-        </div>
-      )}
     </header>
   );
 };

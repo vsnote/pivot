@@ -380,33 +380,8 @@ impl Database {
         let models_json =
             serde_json::to_string(&provider.models).unwrap_or_else(|_| "[]".to_string());
         let now = chrono::Utc::now().to_rfc3339();
-        let default_model = provider
-            .default_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_string);
 
         let tx = conn.transaction()?;
-        let is_default = if default_model.is_some() {
-            true
-        } else {
-            provider.is_default
-        };
-        // The default provider / model is a single catch-all slot, so claiming it here
-        // releases it from whichever provider held it before.
-        if is_default {
-            tx.execute(
-                "UPDATE providers SET is_default = 0 WHERE id <> ?1",
-                params![provider.id],
-            )?;
-        }
-        if default_model.is_some() {
-            tx.execute(
-                "UPDATE providers SET default_model = NULL WHERE id <> ?1",
-                params![provider.id],
-            )?;
-        }
         tx.execute(
             "INSERT INTO providers (id, name, protocol, base_url, api_keys, models, enabled, priority, weight, timeout_secs, latency_ms, created_at, updated_at, preset_id, default_model, is_default, auth_type)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
@@ -423,8 +398,8 @@ impl Database {
                 latency_ms = excluded.latency_ms,
                 updated_at = excluded.updated_at,
                 preset_id = excluded.preset_id,
-                default_model = excluded.default_model,
-                is_default = excluded.is_default,
+                default_model = NULL,
+                is_default = 0,
                 auth_type = excluded.auth_type;",
             params![
                 provider.id,
@@ -441,8 +416,8 @@ impl Database {
                 provider.created_at.clone().unwrap_or_else(|| now.clone()),
                 now,
                 provider.preset_id,
-                default_model,
-                if is_default { 1 } else { 0 },
+                Option::<String>::None,
+                0,
                 provider.auth_type.clone(),
             ],
         )?;
@@ -972,44 +947,17 @@ mod provider_tests {
     }
 
     #[test]
-    fn only_one_provider_can_be_the_default_one() {
-        let path = temp_db_path("defaults");
+    fn saving_providers_persists_cleanly() {
+        let path = temp_db_path("saving_cleanly");
         let db = Database::new(path.clone()).unwrap();
-        let mut first = provider_fixture("first", "First", None);
-        first.default_model = Some("  gpt-4o  ".into());
-        first.is_default = true;
+        let first = provider_fixture("first", "First", None);
         db.save_provider(&first).unwrap();
 
-        let mut second = provider_fixture("second", "Second", None);
-        second.is_default = true;
+        let second = provider_fixture("second", "Second", None);
         db.save_provider(&second).unwrap();
 
         let providers = db.get_providers().unwrap();
-        let default_models: Vec<&str> = providers
-            .iter()
-            .filter(|p| p.is_default)
-            .map(|p| p.id.as_str())
-            .collect();
-        assert_eq!(default_models, vec!["second"]);
-        let openai = providers.iter().find(|p| p.id == "first").unwrap();
-        // Whitespace is trimmed on the way in and the rewrite target is kept.
-        assert_eq!(openai.default_model.as_deref(), Some("gpt-4o"));
-        assert!(!openai.is_default);
-        // Clearing the flag leaves no default provider behind.
-        let mut second = second.clone();
-        second.is_default = false;
-        db.save_provider(&second).unwrap();
-        assert!(db.get_providers().unwrap().iter().all(|p| !p.is_default));
-
-        // Setting a default model on a provider clears it from other providers
-        let mut third = provider_fixture("third", "Third", None);
-        third.default_model = Some("claude-3-7-sonnet".into());
-        db.save_provider(&third).unwrap();
-        let providers_after_third = db.get_providers().unwrap();
-        let first_reloaded = providers_after_third.iter().find(|p| p.id == "first").unwrap();
-        assert_eq!(first_reloaded.default_model, None);
-        let third_reloaded = providers_after_third.iter().find(|p| p.id == "third").unwrap();
-        assert_eq!(third_reloaded.default_model.as_deref(), Some("claude-3-7-sonnet"));
+        assert_eq!(providers.len(), 2);
 
         drop(db);
         let _ = std::fs::remove_file(path);

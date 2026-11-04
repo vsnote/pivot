@@ -942,26 +942,7 @@ impl InterceptorManager {
                 let _ = atomic_write(&catalog_path, &catalog_str);
             }
 
-            let model_provider_count = count_model_providers(&providers);
             let preferred_model = self.db.get_interceptor_model("codex_cli").ok().flatten()
-                .or_else(|| {
-                    providers
-                        .iter()
-                        .find(|p| p.enabled && p.default_model.is_some())
-                        .or_else(|| providers.iter().find(|p| p.is_default && p.enabled))
-                        .and_then(|p| {
-                            let prefix = p.name.to_lowercase().replace(' ', "-");
-                            let m = p.default_model.as_deref().or_else(|| p.models.first().map(|s| s.as_str()))?;
-                            let is_duplicate = model_provider_count.get(m).copied().unwrap_or(0) > 1;
-                            Some(if m.to_lowercase().starts_with(&format!("{}/", prefix)) {
-                                m.to_string()
-                            } else if is_duplicate {
-                                format!("{}/{}", prefix, m)
-                            } else {
-                                m.to_string()
-                            })
-                        })
-                })
                 .or_else(|| {
                     catalog["models"]
                         .as_array()
@@ -1876,15 +1857,9 @@ pub fn resolve_model_input_modalities(model_name: &str) -> Vec<&'static str> {
     }
 }
 
-/// 获取服务商已声明的全部模型（包含 default_model 并去重）
+/// 获取服务商已声明的全部模型（去重）
 fn provider_declared_models(provider: &Provider) -> Vec<String> {
     let mut models = Vec::new();
-    if let Some(ref dm) = provider.default_model {
-        let dm_trimmed = dm.trim();
-        if !dm_trimmed.is_empty() {
-            models.push(dm_trimmed.to_string());
-        }
-    }
     for m in &provider.models {
         let trimmed = m.trim().to_string();
         if !trimmed.is_empty() && !models.contains(&trimmed) {
@@ -2091,27 +2066,6 @@ pub fn generate_pi_models_list(
     // 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
     let model_provider_count = count_model_providers(providers);
 
-    // 默认模型的兜底目标先记下来，等清单生成后按同一套 id 规则回填，避免 defaultModel 指向不存在的 id
-    let default_target = providers
-        .iter()
-        .find(|p| p.enabled && p.default_model.is_some())
-        .or_else(|| providers.iter().find(|p| p.is_default && p.enabled))
-        .and_then(|p| {
-            let m = p
-                .default_model
-                .as_deref()
-                .or_else(|| p.models.first().map(|s| s.as_str()))?
-                .trim()
-                .to_string();
-            if m.is_empty() {
-                None
-            } else {
-                Some((p.id.clone(), m))
-            }
-        });
-
-    let mut preferred_model = None;
-
     for provider in providers.iter().filter(|p| p.enabled) {
         let provider_models = provider_declared_models(provider);
         let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
@@ -2146,20 +2100,10 @@ pub fn generate_pi_models_list(
                 "contextWindow": ctx,
                 "maxTokens": 16384,
             }));
-
-            if preferred_model.is_none() {
-                if let Some((ref def_provider, ref def_model)) = default_target {
-                    if *def_provider == provider.id && *def_model == model_name {
-                        preferred_model = Some(id);
-                    }
-                }
-            }
         }
     }
 
-    if preferred_model.is_none() {
-        preferred_model = models.first().and_then(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()));
-    }
+    let preferred_model = models.first().and_then(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()));
 
     (models, preferred_model)
 }

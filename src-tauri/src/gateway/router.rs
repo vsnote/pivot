@@ -293,9 +293,9 @@ fn plan_route_inner(
             p.name.to_lowercase().contains("deepseek") || p.preset_id.as_deref() == Some("deepseek")
         }) {
             let target = ds_provider
-                .default_model
-                .as_deref()
-                .or_else(|| ds_provider.models.first().map(String::as_str))
+                .models
+                .first()
+                .map(String::as_str)
                 .unwrap_or(incoming_model);
             note(trace, "family", true, || {
                 format!("厂商家族推断：DeepSeek 模型由 {} 承接 (目标 {})", ds_provider.name, target)
@@ -307,33 +307,14 @@ fn plan_route_inner(
         }
     }
 
-    // 3. Unknown model name: hand it to the default provider / model.
-    let Some(default_provider) = active_providers
-        .iter()
-        .find(|p| p.default_model.is_some())
-        .or_else(|| active_providers.iter().find(|p| p.is_default))
-    else {
-        note(trace, "default", false, || {
-            "没有配置默认模型".to_string()
-        });
-        return Err(format!(
-            "Model '{}' is not declared by any enabled provider and no default provider is configured; mark one provider as default in Pivot",
-            incoming_model
-        ));
-    };
-    let model = candidate_model(default_provider, incoming_model)
-        .unwrap_or_else(|| incoming_model.to_string());
-    note(trace, "default", true, || {
-        format!(
-            "未命中前几层，交给默认模型 {} / {}",
-            default_provider.name, model
-        )
+    // 3. Unknown model name: fail clearly without cross-model silent rewrites.
+    note(trace, "route", false, || {
+        format!("未找到支持模型 '{}' 的可用服务商", incoming_model)
     });
-
-    Ok(RoutePlan {
-        primary: planned(default_provider, &model),
-        fallbacks: automatic_fallbacks(&active_providers, &default_provider.id, &model),
-    })
+    Err(format!(
+        "Model '{}' is not declared by any enabled provider",
+        incoming_model
+    ))
 }
 
 fn planned(provider: &Provider, model: &str) -> PlannedCandidate {
@@ -437,25 +418,7 @@ fn find_declared_or_normalized_model(provider: &Provider, incoming: &str) -> Opt
     None
 }
 
-fn declared_default_model(provider: &Provider) -> Option<String> {
-    provider
-        .default_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .map(str::to_string)
-}
 
-/// Model name to ask `provider` for when `model` is requested: the name itself
-/// when the provider declares it (or matches via normalization), otherwise the provider's own default model.
-/// `None` means this provider cannot serve the request at all.
-fn candidate_model(provider: &Provider, model: &str) -> Option<String> {
-    if let Some(matched) = find_declared_or_normalized_model(provider, model) {
-        Some(matched)
-    } else {
-        declared_default_model(provider)
-    }
-}
 
 /// Automatic fallback queue for `model`: providers that declare the very same
 /// model name (highest priority first). Cross-model rewriting is forbidden
@@ -546,15 +509,7 @@ mod tests {
         }
     }
 
-    fn with_default_model(mut provider: Provider, model: &str) -> Provider {
-        provider.default_model = Some(model.to_string());
-        provider
-    }
 
-    fn as_default(mut provider: Provider) -> Provider {
-        provider.is_default = true;
-        provider
-    }
 
     #[test]
     fn prefix_routing_pins_the_named_provider_and_keeps_its_model() {
@@ -592,24 +547,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_model_is_rewritten_by_the_default_provider() {
+    fn unknown_model_returns_clear_error() {
         let providers = vec![
             provider("deepseek", &["deepseek-v4-pro"], 20),
-            with_default_model(as_default(provider("antigravity", &["gemini-3.8-flash-high"], 10)), "gemini-3.8-flash-high"),
+            provider("antigravity", &["gemini-3.8-flash-high"], 10),
         ];
 
-        let plan = plan_route("claude-3-5-haiku-20241022", &providers).unwrap();
-
-        assert_eq!(plan.primary.provider_id, "antigravity");
-        assert_eq!(plan.primary.model, "gemini-3.8-flash-high");
-        assert!(plan.fallbacks.is_empty(), "deepseek does not declare that model");
+        let err = plan_route("claude-3-5-haiku-20241022", &providers).unwrap_err();
+        assert!(err.contains("claude-3-5-haiku-20241022"));
+        assert!(err.contains("not declared"));
     }
 
     #[test]
     fn fallbacks_only_route_to_providers_with_the_same_model() {
         let providers = vec![
-            with_default_model(as_default(provider("primary", &["claude-3-7-sonnet"], 30)), "gemini-3.8-flash-high"),
-            with_default_model(provider("renaming", &["claude-4"], 20), "deepseek-v4-pro"),
+            provider("primary", &["claude-3-7-sonnet"], 30),
+            provider("renaming", &["claude-4"], 20),
             provider("same-name", &["claude-3-7-sonnet"], 10),
             provider("unrelated", &["qwen3-max"], 5),
         ];
@@ -631,29 +584,8 @@ mod tests {
     }
 
     #[test]
-    fn bare_default_provider_passes_unknown_models_through() {
-        let providers = vec![as_default(provider("catch-all", &["some-model"], 10))];
-
-        let plan = plan_route("brand-new-model", &providers).unwrap();
-
-        assert_eq!(plan.primary.provider_id, "catch-all");
-        assert_eq!(plan.primary.model, "brand-new-model");
-        assert!(plan.fallbacks.is_empty());
-    }
-
-    #[test]
-    fn unknown_model_without_default_provider_is_a_clear_error() {
-        let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 10)];
-
-        let error = plan_route("claude-3-7-sonnet", &providers).unwrap_err();
-
-        assert!(error.contains("claude-3-7-sonnet"), "{}", error);
-        assert!(error.contains("default provider"), "{}", error);
-    }
-
-    #[test]
-    fn disabled_default_provider_does_not_resolve_unknown_models() {
-        let mut disabled = as_default(with_default_model(provider("offline", &[], 10), "gemini-3.8-flash-high"));
+    fn disabled_provider_does_not_resolve_models() {
+        let mut disabled = provider("offline", &["claude-3-7-sonnet"], 10);
         disabled.enabled = false;
         let providers = vec![provider("deepseek", &["deepseek-v4-pro"], 5), disabled];
 
@@ -740,10 +672,7 @@ mod tests {
     fn explain_route_traces_every_layer() {
         let providers = vec![
             provider("anthropic", &["claude-3-7-sonnet"], 20),
-            as_default(with_default_model(
-                provider("catch-all", &["some-model"], 10),
-                "gemini-3.8-flash-high",
-            )),
+            provider("google", &["gemini-3.8-flash-high"], 10),
         ];
 
         let explained = explain_route("anthropic/claude-3-7-sonnet", &providers);
@@ -765,11 +694,16 @@ mod tests {
             .any(|step| step.layer == "normalized" && step.matched));
 
         let explained = explain_route("brand-new-model", &providers);
+        assert!(explained.plan.is_none());
+        assert!(explained
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not declared"));
         assert!(explained
             .steps
             .iter()
-            .any(|step| step.layer == "default" && step.matched));
-        assert_eq!(explained.plan.unwrap().primary.provider_id, "catch-all");
+            .any(|step| step.layer == "route" && !step.matched));
     }
 
     #[test]
@@ -782,11 +716,11 @@ mod tests {
             .error
             .as_deref()
             .unwrap_or_default()
-            .contains("default provider"));
+            .contains("not declared"));
         assert!(explained
             .steps
             .iter()
-            .any(|step| step.layer == "default" && !step.matched));
+            .any(|step| step.layer == "route" && !step.matched));
     }
 
 }

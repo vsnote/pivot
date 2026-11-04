@@ -258,18 +258,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const next = exists
           ? state.providers.map((p) => (p.id === provider.id ? provider : p))
           : [...state.providers, provider];
-        // 后端保证默认服务商与默认模型唯一，本地列表立即跟上，避免出现多个默认标记。
-        const isClaimingDefault = !!provider.isDefault;
-        const hasDefaultModel = Boolean(provider.defaultModel);
         return {
-          providers: next.map((p) => {
-            if (p.id === provider.id) return provider;
-            return {
-              ...p,
-              ...(isClaimingDefault ? { isDefault: false } : {}),
-              ...(hasDefaultModel ? { defaultModel: null } : {}),
-            };
-          }),
+          providers: next.map((p) => (p.id === provider.id ? provider : p)),
         };
       });
     } catch (err: unknown) {

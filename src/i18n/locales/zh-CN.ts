@@ -66,7 +66,7 @@ export const zhCN: TranslationDictionary = {
     notTakenOver: '没有客户端被接管，请求仍直连官方；手动接入请展开下方指南。',
     defaultFooter: '接管后客户端请求将流经 Pivot 分发；未接管则走官方直连。',
     startupModel: '启动模型',
-    defaultModelRecommend: '默认模型',
+    defaultModelRecommend: '默认',
     universalCard: {
       title: '通用客户端手动接入',
       description: '在任意支持自定义 API 的开发工具中填入下方 Base URL，API Key 可填任意字符串（如 pivot），Pivot 将根据请求的模型智能分发到对应的上游服务商。',

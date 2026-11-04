@@ -308,24 +308,14 @@ function IngressCard() {
   const hasEnabledProviders = providers.some((p) => p.enabled);
   const gatewayUp = stats.isRunning;
 
-  const globalDefaultModel = useMemo(() => {
-    const p = providers.find((p) => p.enabled && p.defaultModel);
-    return p?.defaultModel ?? null;
-  }, [providers]);
-
-  const availableModels = useMemo(() => {
-    const list: { model: string; providerName: string }[] = [];
-    const seen = new Set<string>();
-    for (const provider of providers) {
-      if (!provider.enabled) continue;
-      for (const m of provider.models) {
-        if (!seen.has(m)) {
-          seen.add(m);
-          list.push({ model: m, providerName: provider.name });
-        }
-      }
-    }
-    return list;
+  const groupedModels = useMemo(() => {
+    return providers
+      .filter((p) => p.enabled && p.models && p.models.length > 0)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        models: Array.from(new Set(p.models.filter(Boolean))),
+      }));
   }, [providers]);
 
   const doToggle = async (id: InterceptorStatus['id'], enable: boolean) => {
@@ -394,27 +384,27 @@ function IngressCard() {
                       <>
                         <Select
                           value={client.model ?? ''}
-                          disabled={availableModels.length === 0}
+                          disabled={groupedModels.length === 0}
                           onChange={(e) => {
                             const next = e.target.value || null;
                             void setInterceptorModel(client.id, next);
                           }}
-                          containerClassName="w-32 sm:w-44 shrink-0"
+                          containerClassName="w-36 sm:w-48 shrink-0"
                           className="h-7 text-[11px] font-mono py-0.5 pl-2 pr-6"
                           aria-label={`${label} ${t('clients.startupModel')}`}
                         >
-                          <option value="">
-                            {globalDefaultModel
-                              ? `${t('clients.defaultModelRecommend')} (${globalDefaultModel})`
-                              : t('clients.defaultModelRecommend')}
-                          </option>
-                          {client.model && !availableModels.some((o) => o.model === client.model) && (
+                          <option value="">{t('clients.defaultModelRecommend')}</option>
+                          {client.model && !groupedModels.some((g) => g.models.includes(client.model!)) && (
                             <option value={client.model}>{client.model}</option>
                           )}
-                          {availableModels.map(({ model, providerName }) => (
-                            <option key={`${providerName}:${model}`} value={model}>
-                              {model} ({providerName})
-                            </option>
+                          {groupedModels.map((group) => (
+                            <optgroup key={group.id} label={group.name}>
+                              {group.models.map((model) => (
+                                <option key={`${group.id}:${model}`} value={model}>
+                                  {model}
+                                </option>
+                              ))}
+                            </optgroup>
                           ))}
                         </Select>
 
@@ -832,26 +822,36 @@ export function ProviderList() {
             </Button>
           </div>
         ) : (
-          <div className="divide-y divide-border" ref={listRef}>
-            {orderedProviders.map((provider) => (
-              <ProviderCard
-                key={provider.id}
-                provider={provider}
-                isDragged={drag?.id === provider.id}
-                onPointerDown={(event) => handleRowPointerDown(event, provider)}
-                onRowClick={() => handleRowClick(provider)}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setContextMenu({
-                    x: event.clientX,
-                    y: event.clientY,
-                    provider,
-                  });
-                }}
-                shouldSuppressClick={shouldSuppressClick}
-              />
-            ))}
-          </div>
+          <>
+            <div className="divide-y divide-border" ref={listRef}>
+              {orderedProviders.map((provider) => (
+                <ProviderCard
+                  key={provider.id}
+                  provider={provider}
+                  isDragged={drag?.id === provider.id}
+                  onPointerDown={(event) => handleRowPointerDown(event, provider)}
+                  onRowClick={() => handleRowClick(provider)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setContextMenu({
+                      x: event.clientX,
+                      y: event.clientY,
+                      provider,
+                    });
+                  }}
+                  shouldSuppressClick={shouldSuppressClick}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => openProviderEditor(null)}
+              className="w-full py-2.5 px-4 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 border-t border-border flex items-center justify-center gap-1.5 transition-colors cursor-pointer select-none"
+            >
+              <Plus className="w-3.5 h-3.5 stroke-[2.2]" />
+              <span>{t('providers.addProvider')}</span>
+            </button>
+          </>
         )}
       </section>
 

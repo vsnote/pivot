@@ -13,7 +13,6 @@ export function editablePresetUrl(preset: Preset) {
 export function createProviderDraft(
   provider: Provider | null,
   presets: Preset[],
-  autoDefault = false,
 ): Provider {
   if (provider) {
     // Only migrate an unambiguous legacy preset; customized endpoints remain custom.
@@ -22,26 +21,22 @@ export function createProviderDraft(
     return { ...provider, presetId: provider.presetId ?? preset?.id ?? null,
       authType: provider.authType ?? preset?.authType ?? null,
       apiKeys: [...provider.apiKeys], models: uniqueValues(provider.models),
-      defaultModel: provider.defaultModel ?? null, isDefault: provider.isDefault ?? false };
+      defaultModel: null, isDefault: false };
   }
   return { id: `prov_${crypto.randomUUID()}`, name: '', protocol: 'openai', baseUrl: '',
-    presetId: null, authType: null, apiKeys: [], models: [], defaultModel: null, isDefault: autoDefault,
+    presetId: null, authType: null, apiKeys: [], models: [], defaultModel: null, isDefault: false,
     enabled: true, priority: 10, weight: 1, timeoutSecs: 60 };
 }
 
 export function applyProviderPreset(
   draft: Provider,
   preset?: Preset,
-  preserveIsDefault = false,
 ): Provider {
-  // Changing the service clears everything that belonged to the previous one,
-  // including the default model and the catch-all role. A brand new provider
-  // that is about to become the library's first default keeps that role.
   return { ...draft, presetId: preset?.id ?? null, name: preset?.name ?? '',
     protocol: preset?.protocol ?? 'openai', baseUrl: preset?.baseUrl ?? '',
     authType: preset?.authType ?? null,
     apiKeys: [], models: [], defaultModel: null,
-    isDefault: preserveIsDefault ? draft.isDefault : false, latencyMs: undefined };
+    isDefault: false, latencyMs: undefined };
 }
 
 export function validateBaseUrl(value: string): string | null {
@@ -60,7 +55,7 @@ export function validateBaseUrl(value: string): string | null {
 export function prepareProvider(draft: Provider): Provider {
   return { ...draft, name: draft.name.trim(), baseUrl: draft.baseUrl.trim().replace(/\/+$/, ''),
     apiKeys: uniqueValues(draft.apiKeys), models: uniqueValues(draft.models),
-    defaultModel: draft.defaultModel?.trim() || null, isDefault: !!draft.isDefault,
+    defaultModel: null, isDefault: false,
     updatedAt: new Date().toISOString() };
 }
 
