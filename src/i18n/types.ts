@@ -67,6 +67,7 @@ export interface TranslationDictionary {
     defaultFooter: string;
     startupModel: string;
     defaultModelRecommend: string;
+    noAvailableModels: string;
     universalCard: {
       title: string;
       description: string;

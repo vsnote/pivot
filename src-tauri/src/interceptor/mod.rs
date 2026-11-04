@@ -471,6 +471,19 @@ impl InterceptorManager {
         }
     }
 
+    pub fn get_effective_tool_model(&self, id: &str) -> Option<String> {
+        self.db
+            .get_interceptor_model(id)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                self.db
+                    .get_providers()
+                    .ok()
+                    .and_then(|providers| resolve_default_tool_model(id, &providers))
+            })
+    }
+
     pub fn get_claude_code_status(&self) -> InterceptorInfo {
         let settings_path = Self::claude_settings_path();
         let settings_backup_path = Self::claude_settings_backup_path();
@@ -555,7 +568,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("claude_code", is_overwritten),
             third_party,
             is_overwritten,
-            model: self.db.get_interceptor_model("claude_code").ok().flatten(),
+            model: self.get_effective_tool_model("claude_code"),
         }
     }
 
@@ -615,7 +628,7 @@ impl InterceptorManager {
                 settings_val["modelPicker"] = picker;
             }
 
-            let selected_model = self.db.get_interceptor_model("claude_code").ok().flatten();
+            let selected_model = self.get_effective_tool_model("claude_code");
             if let Some(ref m) = selected_model {
                 settings_val["model"] = json!(m);
                 if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
@@ -753,7 +766,7 @@ impl InterceptorManager {
             env_obj.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
             env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
         }
-        let selected_model = self.db.get_interceptor_model("claude_code").ok().flatten();
+        let selected_model = self.get_effective_tool_model("claude_code");
         if let Some(ref m) = selected_model {
             v["model"] = json!(m);
             if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
@@ -868,7 +881,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("codex_cli", is_overwritten),
             third_party,
             is_overwritten,
-            model: self.db.get_interceptor_model("codex_cli").ok().flatten(),
+            model: self.get_effective_tool_model("codex_cli"),
         }
     }
 
@@ -893,7 +906,7 @@ impl InterceptorManager {
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
                 let target_endpoint = format!("{}/v1", self.gateway_url);
-                let preferred_model = self.db.get_interceptor_model("codex_cli").ok().flatten();
+                let preferred_model = self.get_effective_tool_model("codex_cli");
                 if let Ok(updated) = update_codex_config_toml(
                     &content,
                     &target_endpoint,
@@ -942,7 +955,7 @@ impl InterceptorManager {
                 let _ = atomic_write(&catalog_path, &catalog_str);
             }
 
-            let preferred_model = self.db.get_interceptor_model("codex_cli").ok().flatten()
+            let preferred_model = self.get_effective_tool_model("codex_cli")
                 .or_else(|| {
                     catalog["models"]
                         .as_array()
@@ -1104,7 +1117,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("gemini_cli", is_overwritten),
             third_party,
             is_overwritten,
-            model: self.db.get_interceptor_model("gemini_cli").ok().flatten(),
+            model: self.get_effective_tool_model("gemini_cli"),
         }
     }
 
@@ -1127,7 +1140,7 @@ impl InterceptorManager {
             } else if let Some(p) = env_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
-            let selected_model = self.db.get_interceptor_model("gemini_cli").ok().flatten();
+            let selected_model = self.get_effective_tool_model("gemini_cli");
             let new_env = update_gemini_env_with_model(&orig_env, &self.gateway_url, selected_model.as_deref());
             let _ = atomic_write(&env_path, &new_env);
 
@@ -1296,7 +1309,7 @@ impl InterceptorManager {
             conflict: self.check_third_party_conflict("pi", is_overwritten),
             third_party,
             is_overwritten,
-            model: self.db.get_interceptor_model("pi").ok().flatten(),
+            model: self.get_effective_tool_model("pi"),
         }
     }
 
@@ -1334,7 +1347,7 @@ impl InterceptorManager {
             if let Ok(content) = fs::read_to_string(&settings_path) {
                 if let Ok(mut sv) = serde_json::from_str::<Value>(&content) {
                     if sv.get("defaultProvider").and_then(|p| p.as_str()) == Some("pivot") {
-                        let selected_model = self.db.get_interceptor_model("pi").ok().flatten();
+                        let selected_model = self.get_effective_tool_model("pi");
                         let effective_model = selected_model.or(preferred_model);
                         if let Some(ref pm) = effective_model {
                             sv["defaultModel"] = json!(pm);
@@ -1855,6 +1868,71 @@ pub fn resolve_model_input_modalities(model_name: &str) -> Vec<&'static str> {
     } else {
         vec!["text"]
     }
+}
+
+/// 为指定 Agent 智能解析默认启动模型（动态家族匹配，绝不硬编码过时模型版本号）
+pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Option<String> {
+    let active_providers: Vec<&Provider> = providers
+        .iter()
+        .filter(|p| p.enabled && !p.models.is_empty())
+        .collect();
+    if active_providers.is_empty() {
+        return None;
+    }
+
+    match tool_id {
+        "claude_code" => {
+            // 优先匹配 Anthropic 协议/名称的服务商首个模型，或包含 claude 的模型
+            for p in &active_providers {
+                if p.protocol == "anthropic" || p.name.to_lowercase().contains("anthropic") {
+                    if let Some(m) = p.models.first() {
+                        return Some(m.clone());
+                    }
+                }
+                if let Some(m) = p.models.iter().find(|m| m.to_lowercase().contains("claude")) {
+                    return Some(m.clone());
+                }
+            }
+        }
+        "codex_cli" => {
+            // 优先匹配 OpenAI/ChatGPT 协议/名称的服务商首个模型，或包含 gpt / codex 的模型
+            for p in &active_providers {
+                let lower_name = p.name.to_lowercase();
+                if p.protocol == "openai"
+                    || p.protocol == "chatgpt"
+                    || lower_name.contains("openai")
+                    || lower_name.contains("chatgpt")
+                {
+                    if let Some(m) = p.models.first() {
+                        return Some(m.clone());
+                    }
+                }
+                if let Some(m) = p.models.iter().find(|m| {
+                    let lower = m.to_lowercase();
+                    lower.contains("gpt") || lower.contains("codex")
+                }) {
+                    return Some(m.clone());
+                }
+            }
+        }
+        "gemini_cli" => {
+            // 优先匹配 Gemini 协议/名称的服务商首个模型，或包含 gemini 的模型
+            for p in &active_providers {
+                if p.protocol == "gemini" || p.name.to_lowercase().contains("gemini") {
+                    if let Some(m) = p.models.first() {
+                        return Some(m.clone());
+                    }
+                }
+                if let Some(m) = p.models.iter().find(|m| m.to_lowercase().contains("gemini")) {
+                    return Some(m.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // 未命中家族匹配时，一律回退到排在第一位的已启用服务商的首个模型
+    active_providers.first().and_then(|p| p.models.first()).cloned()
 }
 
 /// 获取服务商已声明的全部模型（去重）

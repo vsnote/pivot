@@ -7,7 +7,16 @@ import { panelClass } from '@/components/common/panelStyles';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
-import { Select } from '@/components/common/Select';
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectGroup,
+  SelectLabel,
+  SelectItem,
+  SelectSeparator,
+} from '@/components/common/Select';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import { ProviderContextMenu } from './ProviderContextMenu';
@@ -43,6 +52,60 @@ function ClientMark({ id }: { id: InterceptorStatus['id'] }) {
   if (id === 'gemini_cli') return <GeminiLogo className="w-full h-full" />;
   if (id === 'pi') return <PiLogo className="w-full h-full" />;
   return <ClaudeLogo className="w-full h-full" />;
+}
+
+function resolveDefaultModelForClient(
+  clientId: string,
+  providers: Provider[],
+): string | null {
+  const active = providers.filter((p) => p.enabled && p.models && p.models.length > 0);
+  if (active.length === 0) return null;
+
+  switch (clientId) {
+    case 'claude_code': {
+      for (const p of active) {
+        if (p.protocol === 'anthropic' || p.name.toLowerCase().includes('anthropic')) {
+          if (p.models[0]) return p.models[0];
+        }
+        const m = p.models.find((name) => name.toLowerCase().includes('claude'));
+        if (m) return m;
+      }
+      break;
+    }
+    case 'codex_cli': {
+      for (const p of active) {
+        const lowerName = p.name.toLowerCase();
+        if (
+          p.protocol === 'openai' ||
+          p.protocol === 'chatgpt' ||
+          lowerName.includes('openai') ||
+          lowerName.includes('chatgpt')
+        ) {
+          if (p.models[0]) return p.models[0];
+        }
+        const m = p.models.find((name) => {
+          const lower = name.toLowerCase();
+          return lower.includes('gpt') || lower.includes('codex');
+        });
+        if (m) return m;
+      }
+      break;
+    }
+    case 'gemini_cli': {
+      for (const p of active) {
+        if (p.protocol === 'gemini' || p.name.toLowerCase().includes('gemini')) {
+          if (p.models[0]) return p.models[0];
+        }
+        const m = p.models.find((name) => name.toLowerCase().includes('gemini'));
+        if (m) return m;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return active[0]?.models[0] ?? null;
 }
 
 interface PressState {
@@ -336,6 +399,12 @@ function IngressCard() {
       setConflictConfirmTarget(client);
       return;
     }
+    if (enable && !client.model) {
+      const fallbackDefault = resolveDefaultModelForClient(client.id, providers);
+      if (fallbackDefault) {
+        void setInterceptorModel(client.id, fallbackDefault);
+      }
+    }
     void doToggle(client.id, enable);
   };
 
@@ -381,52 +450,84 @@ function IngressCard() {
 
                   <div className="shrink-0 flex items-center gap-2.5">
                     {client.installed ? (
-                      <>
-                        <Select
-                          value={client.model ?? ''}
-                          disabled={groupedModels.length === 0}
-                          onChange={(e) => {
-                            const next = e.target.value || null;
-                            void setInterceptorModel(client.id, next);
-                          }}
-                          containerClassName="w-36 sm:w-48 shrink-0"
-                          className="h-7 text-[11px] font-mono py-0.5 pl-2 pr-6"
-                          aria-label={`${label} ${t('clients.startupModel')}`}
-                        >
-                          <option value="">{t('clients.defaultModelRecommend')}</option>
-                          {client.model && !groupedModels.some((g) => g.models.includes(client.model!)) && (
-                            <option value={client.model}>{client.model}</option>
-                          )}
-                          {groupedModels.map((group) => (
-                            <optgroup key={group.id} label={group.name}>
-                              {group.models.map((model) => (
-                                <option key={`${group.id}:${model}`} value={model}>
-                                  {model}
-                                </option>
-                              ))}
-                            </optgroup>
-                          ))}
-                        </Select>
+                      (() => {
+                        const isModelInPool = Boolean(
+                          client.model && groupedModels.some((g) => g.models.includes(client.model!)),
+                        );
+                        const fallbackDefault = resolveDefaultModelForClient(client.id, providers);
+                        const effectiveValue = isModelInPool ? client.model! : (fallbackDefault ?? '');
 
-                        {busy ? (
-                          <LoaderCircle className="w-4 h-4 animate-spin text-zinc-400" />
-                        ) : client.isOverwritten ? (
-                          <button
-                            type="button"
-                            onClick={() => setConflictConfirmTarget(client)}
-                            className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/50 cursor-pointer"
-                          >
-                            {t('clients.resolveConflict')}
-                          </button>
-                        ) : (
-                          <Switch
-                            checked={client.isIntercepted}
-                            disabled={togglingId !== null}
-                            onCheckedChange={(checked) => handleSwitch(client, checked)}
-                            ariaLabel={t(client.isIntercepted ? 'clients.restoreClientAria' : 'clients.interceptClientAria', { name: label })}
-                          />
-                        )}
-                      </>
+                        return (
+                          <>
+                            <div
+                              className={`w-36 sm:w-48 shrink-0 transition-opacity ${
+                                !client.isIntercepted ? 'opacity-40' : ''
+                              }`}
+                            >
+                              <Select
+                                value={effectiveValue || undefined}
+                                disabled={groupedModels.length === 0 || !client.isIntercepted || busy}
+                                onValueChange={(next: string) => {
+                                  void setInterceptorModel(client.id, next);
+                                }}
+                              >
+                                <SelectTrigger
+                                  className="h-7 text-[11px] font-mono py-0.5 px-2"
+                                  aria-label={`${label} ${t('clients.startupModel')}`}
+                                >
+                                  <SelectValue placeholder={t('clients.noAvailableModels')} />
+                                </SelectTrigger>
+                                <SelectContent className="max-h-72 min-w-[12rem] max-w-[20rem] font-mono text-[11px]">
+                                  {client.model && !isModelInPool && (
+                                    <>
+                                      <SelectGroup>
+                                        <SelectItem value={client.model}>
+                                          {client.model}
+                                        </SelectItem>
+                                      </SelectGroup>
+                                      {groupedModels.length > 0 && <SelectSeparator />}
+                                    </>
+                                  )}
+                                  {groupedModels.map((group, groupIdx) => (
+                                    <div key={group.id}>
+                                      {groupIdx > 0 && <SelectSeparator />}
+                                      <SelectGroup>
+                                        <SelectLabel className="font-sans font-medium text-[10px] text-muted-foreground px-2 py-1">
+                                          {group.name}
+                                        </SelectLabel>
+                                        {group.models.map((model) => (
+                                          <SelectItem key={`${group.id}:${model}`} value={model}>
+                                            {model}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectGroup>
+                                    </div>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            {busy ? (
+                              <LoaderCircle className="w-4 h-4 animate-spin text-zinc-400" />
+                            ) : client.isOverwritten ? (
+                              <button
+                                type="button"
+                                onClick={() => setConflictConfirmTarget(client)}
+                                className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/50 cursor-pointer"
+                              >
+                                {t('clients.resolveConflict')}
+                              </button>
+                            ) : (
+                              <Switch
+                                checked={client.isIntercepted}
+                                disabled={togglingId !== null}
+                                onCheckedChange={(checked) => handleSwitch(client, checked)}
+                                ariaLabel={t(client.isIntercepted ? 'clients.restoreClientAria' : 'clients.interceptClientAria', { name: label })}
+                              />
+                            )}
+                          </>
+                        );
+                      })()
                     ) : (
                       <span className="text-[11px] text-zinc-400 dark:text-zinc-500 py-1">
                         {t('clients.statusNotInstalled')}
