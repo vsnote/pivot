@@ -123,6 +123,8 @@ try {
     assert.equal(detectProviderBrand('自定义网关', 'openai', 'baidu'), 'wenxin');
     assert.equal(detectProviderBrand('自定义网关', 'openai', '01ai'), '01ai');
     assert.equal(detectProviderBrand('未知自建服务', 'openai', undefined), 'custom');
+    assert.equal(detectProviderBrand('anyrouter-linuxdo', 'anthropic', undefined), 'custom');
+    assert.equal(detectProviderBrand('自建中转', 'gemini', undefined), 'custom');
   });
 } finally {
   try {

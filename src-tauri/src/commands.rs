@@ -218,10 +218,13 @@ async fn measure_http_latency(
         .timeout(std::time::Duration::from_secs(5));
 
     if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
+        let trimmed_key = key.trim();
         if protocol == "anthropic" {
-            req = req.header("x-api-key", key.trim());
+            req = req
+                .header("x-api-key", trimmed_key)
+                .header("authorization", format!("Bearer {}", trimmed_key));
         } else {
-            req = req.header("authorization", format!("Bearer {}", key.trim()));
+            req = req.header("authorization", format!("Bearer {}", trimmed_key));
         }
     }
 

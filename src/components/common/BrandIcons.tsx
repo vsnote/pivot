@@ -126,8 +126,8 @@ export function detectProviderBrand(
   if (n.includes('claudecode') || n.includes('claude code')) return 'claudecode';
   if (n.includes('claude')) return 'claude';
   if (n.includes('pi agent') || n === 'pi' || n.startsWith('pi ') || n.startsWith('pi-')) return 'pi';
-  if (n.includes('anthropic') || p === 'anthropic') return 'anthropic';
-  if (n.includes('gemini') || n.includes('google') || p === 'gemini') return 'gemini';
+  if (n.includes('anthropic')) return 'anthropic';
+  if (n.includes('gemini') || n.includes('google')) return 'gemini';
   if (n.includes('mistral') || n.includes('codestral')) return 'mistral';
   if (n.includes('siliconflow') || n.includes('硅基流动') || n.includes('siliconcloud'))
     return 'siliconflow';

@@ -31,7 +31,13 @@ import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/i18n';
 import type { Preset, Protocol, Provider, SubscriptionAccount, AccountQuota } from '@/types';
 import clsx from 'clsx';
-import { Select } from '@/components/common/Select';
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '@/components/common/Select';
 import { Switch } from '@/components/common/Switch';
 import {
   applyProviderPreset,
@@ -613,24 +619,13 @@ export function ProviderEditor() {
   };
 
   const changeUrl = (baseUrl: string) => {
-    let sameOrigin = false;
-    try {
-      sameOrigin = new URL(baseUrl).origin === new URL(draft.baseUrl).origin;
-    } catch {
-      /* ignore */
-    }
     invalidateModels();
     setLatencyResult(null);
-    const clearKeys = !sameOrigin && draft.apiKeys.some((key) => key.trim());
-    update({ baseUrl, latencyMs: undefined, ...(clearKeys ? { apiKeys: [] } : {}) });
+    update({ baseUrl, latencyMs: undefined });
     setNotice(
-      clearKeys
-        ? (locale === 'zh-CN'
-            ? '接口主机已更改，原密钥已清除，请填写此服务商的新密钥。'
-            : 'Host URL changed, previous keys cleared. Please enter new keys for this provider.')
-        : (locale === 'zh-CN'
-            ? '连接信息已更改，已选模型保留，建议重新获取模型进行验证。'
-            : 'Connection info changed, selected models kept. We recommend fetching models again to verify.'),
+      locale === 'zh-CN'
+        ? '连接信息已更改，已选模型与密钥保留，建议重新获取模型进行验证。'
+        : 'Connection info changed, models and keys kept. We recommend fetching models again to verify.',
     );
   };
 
@@ -683,15 +678,13 @@ export function ProviderEditor() {
         } catch {}
       }
 
-      // 2. 清理 draft.models 中不存在于真实上游列表中的模型
+      // 2. 清理 draft.models 中不存在于真实上游列表中的模型，保持已选有效模型不变
+      // 获取模型后默认不自动全选，全部可用模型放入候选池供用户自主按需挑选
       const validSelected = draft.models.filter((m) => unique.includes(m));
       const removedCount = draft.models.length - validSelected.length;
 
-      // 保持清洗后的有效已选模型；若此前未选或全部失效，默认选中上游获取到的全部模型
-      const nextSelected = validSelected.length > 0 ? validSelected : unique;
-
       update({
-        models: nextSelected,
+        models: validSelected,
         defaultModel: null,
       });
 
@@ -896,49 +889,25 @@ export function ProviderEditor() {
 
   return (
     <div className="w-full pb-6 space-y-3 animate-in fade-in duration-150">
-      {/* 顶部面包屑返回导航：去除非弹窗的关闭按钮，清晰指示层级 */}
+      {/* 顶部面包屑返回导航：清晰指示层级 */}
       <div className="flex items-center justify-between pb-1">
-        {confirmation ? (
-          <div className="flex items-center gap-2 px-2.5 py-1 -ml-1 rounded-md bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/50 animate-in fade-in duration-150">
-            <span className="text-xs font-medium text-rose-700 dark:text-rose-300">
-              {confirmation.kind === 'preset'
-                ? (locale === 'zh-CN' ? '放弃已填内容并重选预设？' : 'Discard input and select preset?')
-                : t('providerEditor.leaveConfirmTitle')}
-            </span>
-            <button
-              type="button"
-              onClick={handleConfirmAbandon}
-              className="inline-flex h-7 items-center justify-center rounded-md bg-rose-600 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-rose-700 cursor-pointer"
-            >
-              {t('providerEditor.discard')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirmation(null)}
-              className="inline-flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-white dark:text-zinc-400 dark:hover:bg-zinc-800 cursor-pointer"
-            >
-              {t('providerEditor.continueEditing')}
-            </button>
-          </div>
-        ) : (
-          <nav aria-label={locale === 'zh-CN' ? '页面层级' : 'Navigation hierarchy'} className="flex items-center gap-1.5 text-xs">
-            <button
-              type="button"
-              onClick={handleBack}
-              className="-ml-2 inline-flex h-7 items-center gap-1 rounded-md px-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              title={t('common.back')}
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>{t('header.providers')}</span>
-            </button>
-            <span className="text-zinc-300 dark:text-zinc-700 select-none">/</span>
-            <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[160px] sm:max-w-[260px]">
-              {choosing
-                ? (locale === 'zh-CN' ? '选择预设' : 'Select Preset')
-                : draft.name.trim() || (currentEditingProvider ? (locale === 'zh-CN' ? '未命名服务商' : 'Unnamed Provider') : t('providerEditor.newProvider'))}
-            </span>
-          </nav>
-        )}
+        <nav aria-label={locale === 'zh-CN' ? '页面层级' : 'Navigation hierarchy'} className="flex items-center gap-1.5 text-xs">
+          <button
+            type="button"
+            onClick={handleBack}
+            className="-ml-2 inline-flex h-7 items-center gap-1 rounded-md px-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            title={t('common.back')}
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>{t('header.providers')}</span>
+          </button>
+          <span className="text-zinc-300 dark:text-zinc-700 select-none">/</span>
+          <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[160px] sm:max-w-[260px]">
+            {choosing
+              ? (locale === 'zh-CN' ? '选择预设' : 'Select Preset')
+              : draft.name.trim() || (currentEditingProvider ? (locale === 'zh-CN' ? '未命名服务商' : 'Unnamed Provider') : t('providerEditor.newProvider'))}
+          </span>
+        </nav>
       </div>
 
       {/* 页面主卡片 */}
@@ -1095,22 +1064,29 @@ export function ProviderEditor() {
                       ) : (
                         <Select
                           value={draft.protocol}
-                          onChange={(e) => {
+                          onValueChange={(val) => {
                             invalidateModels();
                             update({
-                              protocol: e.target.value as Protocol,
-                              apiKeys: [],
+                              protocol: val as Protocol,
                               models: [],
                             });
-                            setNotice(locale === 'zh-CN' ? '协议已更改，请重新填写密钥并选择可用模型。' : 'Protocol changed, please update API keys and models.');
+                            setNotice(
+                              locale === 'zh-CN'
+                                ? '协议已更改，密钥已保留，请按需选择或获取可用模型。'
+                                : 'Protocol changed, keys kept. Please select or fetch available models.',
+                            );
                           }}
-                          containerClassName="w-full"
                         >
-                          {PROTOCOLS.map((id) => (
-                            <option key={id} value={id}>
-                              {t(`providerEditor.protocols.${id}`)}
-                            </option>
-                          ))}
+                          <SelectTrigger className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PROTOCOLS.map((id) => (
+                              <SelectItem key={id} value={id}>
+                                {t(`providerEditor.protocols.${id}`)}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
                         </Select>
                       )}
                     </div>
@@ -2041,6 +2017,25 @@ export function ProviderEditor() {
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(confirmation)}
+        title={
+          confirmation?.kind === 'preset'
+            ? (locale === 'zh-CN' ? '放弃已填内容并重选预设？' : 'Discard input and select preset?')
+            : t('providerEditor.leaveConfirmTitle')
+        }
+        details={[
+          confirmation?.kind === 'preset'
+            ? (locale === 'zh-CN' ? '当前表单中已填写的数据将会丢失。' : 'The data filled in the current form will be lost.')
+            : t('providerEditor.leaveConfirmDetail'),
+        ]}
+        confirmLabel={t('providerEditor.discard')}
+        cancelLabel={t('providerEditor.continueEditing')}
+        variant="danger"
+        onConfirm={handleConfirmAbandon}
+        onCancel={() => setConfirmation(null)}
+      />
 
       {currentEditingProvider && (
         <ConfirmDialog

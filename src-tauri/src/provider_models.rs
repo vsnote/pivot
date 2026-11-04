@@ -96,8 +96,14 @@ fn models_url(protocol: &str, base: &str) -> Result<Url, String> {
     let mut url = validate_base_url(base)?;
     let path = url.path().trim_end_matches('/');
     // Use the same API base as the gateway's chat requests, including custom version paths.
-    let path = if (protocol == "anthropic" || protocol == "openai") && path.is_empty() {
-        "/v1/models".to_string()
+    let path = if (protocol == "anthropic" || protocol == "openai")
+        && (path.is_empty() || path == "/api")
+    {
+        if path == "/api" {
+            "/api/v1/models".to_string()
+        } else {
+            "/v1/models".to_string()
+        }
     } else {
         format!("{path}/models")
     };
@@ -203,7 +209,9 @@ pub async fn fetch_models(
                     .header("anthropic-version", "2023-06-01")
                     .query(&[("limit", "1000")]);
                 if !api_key.trim().is_empty() {
-                    request = request.header("x-api-key", api_key.trim());
+                    let key = api_key.trim();
+                    request = request.header("x-api-key", key);
+                    request = request.bearer_auth(key);
                 }
             } else if protocol == "gemini" {
                 request = request.query(&[("pageSize", "1000")]);
@@ -285,7 +293,7 @@ mod tests {
         ) -> Json<Value> {
             assert_eq!(headers["x-api-key"], "test-key");
             assert_eq!(headers["anthropic-version"], "2023-06-01");
-            assert!(!headers.contains_key("authorization"));
+            assert_eq!(headers["authorization"], "Bearer test-key");
             if query.contains_key("after_id") {
                 Json(json!({"data":[{"id":"claude-b"},{"id":"claude-a"}],"has_more":false}))
             } else {

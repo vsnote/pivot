@@ -577,7 +577,7 @@ fn resolve_upstream_endpoint(base_url: &str, suffix: &str) -> String {
     }
     let url_parsed = reqwest::Url::parse(clean);
     let path = url_parsed.as_ref().map(|u| u.path().trim_end_matches('/')).unwrap_or("");
-    if path.is_empty() {
+    if path.is_empty() || path == "/api" {
         format!("{clean}/v1{suffix}")
     } else {
         format!("{clean}{suffix}")
@@ -612,7 +612,9 @@ async fn dispatch_anthropic_request(
                 .header("anthropic-version", "2023-06-01");
 
             if let Some(key) = effective_key {
-                req_builder = req_builder.header("x-api-key", key);
+                req_builder = req_builder
+                    .header("x-api-key", key)
+                    .header("authorization", format!("Bearer {}", key));
             }
 
             let res = req_builder.json(&req_body).send().await.map_err(|e| {
@@ -1943,7 +1945,9 @@ async fn dispatch_openai_request(
                 .header("anthropic-version", "2023-06-01");
 
             if let Some(key) = effective_key {
-                req_builder = req_builder.header("x-api-key", key);
+                req_builder = req_builder
+                    .header("x-api-key", key)
+                    .header("authorization", format!("Bearer {}", key));
             }
 
             let res = req_builder.json(&anthropic_req).send().await.map_err(|e| {
