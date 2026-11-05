@@ -68,6 +68,9 @@ export const en: TranslationDictionary = {
     startupModel: 'Startup Model',
     defaultModelRecommend: 'Default',
     noAvailableModels: 'No models available',
+    searchModel: 'Search models...',
+    noMatchingModels: 'No matching models',
+    useCustomModel: 'Use custom model "{name}"',
     universalCard: {
       title: 'Universal Agent Manual Setup',
       description: 'Enter the Base URL below in any developer tool that supports custom APIs. Use any string for the API Key (e.g. pivot). Pivot will intelligently route requests to the appropriate upstream provider based on the model.',

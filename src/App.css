@@ -102,7 +102,9 @@
   [role="tab"],
   [role="tab"]:focus,
   [role="tab"]:active,
-  [role="tab"]:focus-visible {
+  [role="tab"]:focus-visible,
+  button:focus:not(:focus-visible),
+  button:active {
     outline: none !important;
     -webkit-tap-highlight-color: transparent;
   }

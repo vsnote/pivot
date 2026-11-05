@@ -181,7 +181,7 @@ export const InterceptorPanel: React.FC = () => {
           return (
             <div
               key={tool.id}
-              className={`rounded-lg p-4 sm:p-5 flex flex-col justify-between transition-all duration-150 bg-white dark:bg-zinc-900 border shadow-xs ${
+              className={`rounded-lg p-4 sm:p-5 flex flex-col justify-between transition-colors duration-150 bg-white dark:bg-zinc-900 border shadow-xs ${
                 isOverwritten
                   ? 'border-amber-500/60 dark:border-amber-500/60 ring-1 ring-amber-500/20'
                   : tool.isIntercepted

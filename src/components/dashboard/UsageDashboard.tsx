@@ -412,9 +412,9 @@ export const UsageDashboard: React.FC = () => {
             <button
               type="button"
               onClick={() => setTimeRange('all')}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all cursor-pointer ${
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
                 timeRange === 'all'
-                  ? 'bg-background text-foreground shadow-2xs'
+                  ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -423,9 +423,9 @@ export const UsageDashboard: React.FC = () => {
             <button
               type="button"
               onClick={() => setTimeRange('today')}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all cursor-pointer ${
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
                 timeRange === 'today'
-                  ? 'bg-background text-foreground shadow-2xs'
+                  ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -434,9 +434,9 @@ export const UsageDashboard: React.FC = () => {
             <button
               type="button"
               onClick={() => setTimeRange('1h')}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all cursor-pointer ${
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
                 timeRange === '1h'
-                  ? 'bg-background text-foreground shadow-2xs'
+                  ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >

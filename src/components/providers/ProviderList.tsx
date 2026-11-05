@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
@@ -7,16 +7,7 @@ import { panelClass } from '@/components/common/panelStyles';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
-import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectGroup,
-  SelectLabel,
-  SelectItem,
-  SelectSeparator,
-} from '@/components/common/Select';
+import { ClientModelSelect } from './ClientModelSelect';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import { ProviderContextMenu } from './ProviderContextMenu';
@@ -372,13 +363,25 @@ function IngressCard() {
   const gatewayUp = stats.isRunning;
 
   const groupedModels = useMemo(() => {
+    const seen = new Set<string>();
     return providers
       .filter((p) => p.enabled && p.models && p.models.length > 0)
-      .map((p) => ({
-        id: p.id,
-        name: p.name,
-        models: Array.from(new Set(p.models.filter(Boolean))),
-      }));
+      .map((p) => {
+        const uniqueModels: string[] = [];
+        for (const m of p.models) {
+          const trimmed = m?.trim();
+          if (trimmed && !seen.has(trimmed)) {
+            seen.add(trimmed);
+            uniqueModels.push(trimmed);
+          }
+        }
+        return {
+          id: p.id,
+          name: p.name,
+          models: uniqueModels,
+        };
+      })
+      .filter((p) => p.models.length > 0);
   }, [providers]);
 
   const doToggle = async (id: InterceptorStatus['id'], enable: boolean) => {
@@ -451,60 +454,27 @@ function IngressCard() {
                   <div className="shrink-0 flex items-center gap-2.5">
                     {client.installed ? (
                       (() => {
-                        const isModelInPool = Boolean(
-                          client.model && groupedModels.some((g) => g.models.includes(client.model!)),
-                        );
                         const fallbackDefault = resolveDefaultModelForClient(client.id, providers);
-                        const effectiveValue = isModelInPool ? client.model! : (fallbackDefault ?? '');
+                        const effectiveValue = client.model || fallbackDefault || '';
 
                         return (
                           <>
                             <div
-                              className={`w-36 sm:w-48 shrink-0 transition-opacity ${
+                              className={`inline-flex shrink-0 transition-opacity ${
                                 !client.isIntercepted ? 'opacity-40' : ''
                               }`}
                             >
-                              <Select
-                                value={effectiveValue || undefined}
+                              <ClientModelSelect
+                                value={effectiveValue}
                                 disabled={groupedModels.length === 0 || !client.isIntercepted || busy}
+                                ariaLabel={`${label} ${t('clients.startupModel')}`}
+                                title={effectiveValue || undefined}
+                                placeholder={t('clients.noAvailableModels')}
+                                groupedModels={groupedModels}
                                 onValueChange={(next: string) => {
                                   void setInterceptorModel(client.id, next);
                                 }}
-                              >
-                                <SelectTrigger
-                                  className="h-7 text-[11px] font-mono py-0.5 px-2"
-                                  aria-label={`${label} ${t('clients.startupModel')}`}
-                                >
-                                  <SelectValue placeholder={t('clients.noAvailableModels')} />
-                                </SelectTrigger>
-                                <SelectContent className="max-h-72 min-w-[12rem] max-w-[20rem] font-mono text-[11px]">
-                                  {client.model && !isModelInPool && (
-                                    <>
-                                      <SelectGroup>
-                                        <SelectItem value={client.model}>
-                                          {client.model}
-                                        </SelectItem>
-                                      </SelectGroup>
-                                      {groupedModels.length > 0 && <SelectSeparator />}
-                                    </>
-                                  )}
-                                  {groupedModels.map((group, groupIdx) => (
-                                    <Fragment key={group.id}>
-                                      {groupIdx > 0 && <SelectSeparator />}
-                                      <SelectGroup>
-                                        <SelectLabel className="font-sans font-medium text-[10px] text-muted-foreground px-2 py-1">
-                                          {group.name}
-                                        </SelectLabel>
-                                        {group.models.map((model) => (
-                                          <SelectItem key={`${group.id}:${model}`} value={model}>
-                                            {model}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectGroup>
-                                    </Fragment>
-                                  ))}
-                                </SelectContent>
-                              </Select>
+                              />
                             </div>
 
                             {busy ? (

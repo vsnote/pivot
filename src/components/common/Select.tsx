@@ -17,9 +17,9 @@ export const SelectTrigger = React.forwardRef<
     ref={ref}
     className={cn(
       'flex h-8 w-full items-center justify-between rounded-md border border-input bg-background px-2.5 py-1 text-xs text-foreground shadow-2xs ring-offset-background transition-colors placeholder:text-muted-foreground',
-      'hover:bg-accent/50 focus:outline-none focus:ring-1 focus:ring-ring focus:border-ring',
+      'hover:bg-accent/50 focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
       'disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer select-none',
-      '[&>span]:truncate [&>span]:text-left',
+      '[&>span]:truncate [&>span]:text-left [&>span]:min-w-0',
       className
     )}
     {...props}
@@ -168,7 +168,7 @@ export const NativeSelect: React.FC<NativeSelectProps> = ({
         className={cn(
           'flex h-8 w-full appearance-none rounded-md border border-input bg-background pl-2.5 pr-7 py-1 text-xs text-foreground shadow-2xs transition-colors cursor-pointer font-medium',
           'hover:bg-accent/50',
-          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring',
+          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
           'disabled:cursor-not-allowed disabled:opacity-50',
           className
         )}

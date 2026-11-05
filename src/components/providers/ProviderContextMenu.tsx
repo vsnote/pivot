@@ -322,9 +322,9 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
                           type="button"
                           onClick={() => setSelectedAccountId(acc.id)}
                           title={acc.email || acc.id}
-                          className={`px-1.5 py-0.2 rounded text-[10px] font-mono shrink-0 transition-colors cursor-pointer ${
+                          className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-medium shrink-0 transition-colors cursor-pointer outline-none ${
                             isSelected
-                              ? 'bg-zinc-200 dark:bg-zinc-800 text-foreground font-semibold shadow-2xs'
+                              ? 'bg-zinc-200 dark:bg-zinc-800 text-foreground shadow-2xs'
                               : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                           }`}
                         >

@@ -1689,13 +1689,13 @@ export function ProviderEditor() {
                     {pool.length > 0 && (
                       <div className="flex items-center gap-2 shrink-0">
                         {/* 视图分段选择：全部 / 已选 / 未选 */}
-                        <div className="inline-flex p-0.5 rounded-md bg-zinc-500/[0.08] dark:bg-white/[0.08] text-[11px] font-medium">
+                        <div className="inline-flex p-0.5 rounded-md bg-zinc-500/[0.08] dark:bg-white/[0.08] text-[11px] font-medium border border-border/40">
                           <button
                             type="button"
                             onClick={() => setModelFilterTab('all')}
-                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                            className={`px-2 py-0.5 rounded border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
                               modelFilterTab === 'all'
-                                ? 'bg-background text-foreground shadow-2xs font-semibold'
+                                ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                                 : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
                             }`}
                           >
@@ -1704,9 +1704,9 @@ export function ProviderEditor() {
                           <button
                             type="button"
                             onClick={() => setModelFilterTab('selected')}
-                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                            className={`px-2 py-0.5 rounded border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
                               modelFilterTab === 'selected'
-                                ? 'bg-background text-foreground shadow-2xs font-semibold'
+                                ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                                 : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
                             }`}
                           >
@@ -1715,9 +1715,9 @@ export function ProviderEditor() {
                           <button
                             type="button"
                             onClick={() => setModelFilterTab('unselected')}
-                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                            className={`px-2 py-0.5 rounded border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
                               modelFilterTab === 'unselected'
-                                ? 'bg-background text-foreground shadow-2xs font-semibold'
+                                ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                                 : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
                             }`}
                           >
@@ -1766,9 +1766,9 @@ export function ProviderEditor() {
                             key={fam.key}
                             type="button"
                             onClick={() => setModelSearch(active ? '' : fam.key)}
-                            className={`px-1.5 py-0.5 rounded-[4px] font-mono text-[10px] transition-colors cursor-pointer shrink-0 ${
+                            className={`px-1.5 py-0.5 rounded-[4px] font-mono text-[10px] font-medium transition-colors cursor-pointer shrink-0 outline-none ${
                               active
-                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium shadow-2xs'
+                                ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 shadow-2xs'
                                 : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
                             }`}
                           >
