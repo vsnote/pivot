@@ -139,7 +139,7 @@ export const App: React.FC = () => {
       )}
 
       {/* 主视图内容区域：统一定宽与内边距 */}
-      <main className="flex-1 min-h-0 w-full overflow-y-auto px-4 py-4">
+      <main className="flex-1 min-h-0 w-full overflow-y-auto no-scrollbar px-4 py-4">
         <div
           className={`mx-auto w-full transition-[max-width] duration-150 ${
             activeTab === 'logs' || (activeTab === 'settings' && settingsSection === 'logs')

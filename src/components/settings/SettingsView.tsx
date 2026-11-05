@@ -233,7 +233,7 @@ export const SettingsView: React.FC = () => {
   };
 
   return (
-    <div className="w-full pb-10 space-y-3.5 animate-in fade-in duration-150">
+    <div className="w-full space-y-3.5 animate-in fade-in duration-150">
       {/* 备份导入/导出状态通知条 */}
       {backupNotice && (
         <div
