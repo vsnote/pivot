@@ -4,10 +4,25 @@ import { useTranslation } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { Check, ChevronDown, Search, X, Sparkles } from 'lucide-react';
 
+export interface GroupedModelOption {
+  value: string;
+  label: string;
+}
+
+export type GroupedModelItem = string | GroupedModelOption;
+
 export interface GroupedModel {
   id: string;
   name: string;
-  models: string[];
+  models: GroupedModelItem[];
+}
+
+export function getOptionValue(item: GroupedModelItem): string {
+  return typeof item === 'string' ? item : item.value;
+}
+
+export function getOptionLabel(item: GroupedModelItem): string {
+  return typeof item === 'string' ? item : item.label;
 }
 
 interface ClientModelSelectProps {
@@ -47,8 +62,43 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
   }, [open]);
 
   const isModelInPool = useMemo(() => {
-    return Boolean(value && groupedModels.some((g) => g.models.includes(value)));
+    return Boolean(
+      value &&
+        groupedModels.some((g) =>
+          g.models.some((m) => getOptionValue(m) === value || getOptionLabel(m) === value),
+        ),
+    );
   }, [value, groupedModels]);
+
+  // 解析当前选中值的可读展示名（有 provider/ 前缀时展示纯净模型名）
+  const displayLabel = useMemo(() => {
+    if (!value) return placeholder;
+    for (const group of groupedModels) {
+      for (const item of group.models) {
+        if (getOptionValue(item) === value) {
+          return getOptionLabel(item);
+        }
+      }
+    }
+    return value;
+  }, [value, placeholder, groupedModels]);
+
+  // 根据当前客户端候选模型池的最长名称，动态计算浮层菜单最佳弹性宽度
+  const popoverWidthRem = useMemo(() => {
+    let maxLen = 0;
+    if (value && !isModelInPool) {
+      maxLen = Math.max(maxLen, value.length);
+    }
+    for (const group of groupedModels) {
+      for (const item of group.models) {
+        const len = getOptionLabel(item).length;
+        if (len > maxLen) maxLen = len;
+      }
+    }
+    // 字符数转换为 rem 宽度：等宽字体每字符约 0.46rem，加上左对勾及右侧留白约 3.8rem
+    const computedRem = maxLen * 0.46 + 3.8;
+    return Math.min(Math.max(computedRem, 15), 20);
+  }, [groupedModels, value, isModelInPool]);
 
   const query = search.trim().toLowerCase();
 
@@ -58,7 +108,11 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
     return groupedModels
       .map((g) => ({
         ...g,
-        models: g.models.filter((m) => m.toLowerCase().includes(query)),
+        models: g.models.filter((m) => {
+          const label = getOptionLabel(m).toLowerCase();
+          const val = getOptionValue(m).toLowerCase();
+          return label.includes(query) || val.includes(query);
+        }),
       }))
       .filter((g) => g.models.length > 0);
   }, [groupedModels, query]);
@@ -83,7 +137,7 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
       if (hasUnlistedMatch && totalMatchCount === 1) {
         handleSelect(value);
       } else if (filteredGroups.length === 1 && filteredGroups[0].models.length === 1) {
-        handleSelect(filteredGroups[0].models[0]);
+        handleSelect(getOptionValue(filteredGroups[0].models[0]));
       } else if (totalMatchCount === 0 && search.trim()) {
         // 无匹配时直接将输入内容作为自定义模型选中
         handleSelect(search.trim());
@@ -107,7 +161,7 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
           )}
         >
           <span className="truncate text-left min-w-0 flex-1 mr-1.5">
-            {value || placeholder}
+            {displayLabel}
           </span>
           <ChevronDown
             className={cn(
@@ -121,7 +175,8 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
       <PopoverContent
         align="end"
         sideOffset={4}
-        className="w-72 p-1.5 shadow-xl font-mono text-xs"
+        style={{ width: `${popoverWidthRem}rem` }}
+        className="min-w-[15rem] max-w-[20rem] p-1.5 shadow-xl font-mono text-xs transition-[width] duration-150"
         onCloseAutoFocus={(e) => {
           e.preventDefault();
         }}
@@ -179,13 +234,15 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
                 {group.name}
               </div>
               <div className="space-y-0.5">
-                {group.models.map((model) => {
-                  const isSelected = model === value;
+                {group.models.map((item) => {
+                  const optVal = getOptionValue(item);
+                  const optLabel = getOptionLabel(item);
+                  const isSelected = optVal === value || optLabel === value;
                   return (
                     <button
                       type="button"
-                      key={`${group.id}:${model}`}
-                      onClick={() => handleSelect(model)}
+                      key={`${group.id}:${optVal}`}
+                      onClick={() => handleSelect(optVal)}
                       className={cn(
                         'relative flex w-full cursor-pointer select-none items-center rounded-md py-1.5 pl-7 pr-2 text-left outline-none transition-colors font-mono',
                         'hover:bg-accent hover:text-accent-foreground',
@@ -199,7 +256,7 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
                           <Check className="h-3.5 w-3.5 text-primary stroke-[2.5]" />
                         )}
                       </span>
-                      <span className="truncate">{model}</span>
+                      <span className="truncate">{optLabel}</span>
                     </button>
                   );
                 })}

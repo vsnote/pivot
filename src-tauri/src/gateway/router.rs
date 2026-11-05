@@ -243,7 +243,7 @@ fn plan_route_inner(
             });
             return Ok(RoutePlan {
                 primary: planned(provider, sub_model),
-                fallbacks: automatic_fallbacks(&active_providers, &provider.id, sub_model),
+                fallbacks: Vec::new(),
             });
         }
         note(trace, "prefix", false, || {
@@ -263,7 +263,7 @@ fn plan_route_inner(
         });
         return Ok(RoutePlan {
             primary: planned(provider, incoming_model),
-            fallbacks: automatic_fallbacks(&active_providers, &provider.id, incoming_model),
+            fallbacks: Vec::new(),
         });
     }
     note(trace, "exact", false, || {
@@ -278,7 +278,7 @@ fn plan_route_inner(
             });
             return Ok(RoutePlan {
                 primary: planned(provider, &matched),
-                fallbacks: automatic_fallbacks(&active_providers, &provider.id, &matched),
+                fallbacks: Vec::new(),
             });
         }
     }
@@ -302,7 +302,7 @@ fn plan_route_inner(
             });
             return Ok(RoutePlan {
                 primary: planned(ds_provider, target),
-                fallbacks: automatic_fallbacks(&active_providers, &ds_provider.id, target),
+                fallbacks: Vec::new(),
             });
         }
     }
@@ -420,25 +420,6 @@ fn find_declared_or_normalized_model(provider: &Provider, incoming: &str) -> Opt
 
 
 
-/// Automatic fallback queue for `model`: providers that declare the very same
-/// model name (highest priority first). Cross-model rewriting is forbidden
-/// to ensure predictability and compatibility.
-fn automatic_fallbacks(
-    active_providers: &[&Provider],
-    excluded_id: &str,
-    model: &str,
-) -> Vec<PlannedCandidate> {
-    let mut same_name = Vec::new();
-
-    for provider in active_providers.iter().filter(|p| p.id != excluded_id) {
-        if let Some(matched) = find_declared_or_normalized_model(provider, model) {
-            same_name.push(planned(provider, &matched));
-        }
-    }
-
-    same_name
-}
-
 /// Helper function to match pattern against model name (supports wildcard `*`, `?`, `[...]` or regex)
 pub fn pattern_matches(pattern: &str, text: &str) -> bool {
     if pattern == "*" || pattern.eq_ignore_ascii_case(text) {
@@ -522,9 +503,7 @@ mod tests {
 
         assert_eq!(plan.primary.provider_id, "anthropic");
         assert_eq!(plan.primary.model, "claude-3-7-sonnet");
-        assert_eq!(plan.fallbacks.len(), 1);
-        assert_eq!(plan.fallbacks[0].provider_id, "aggregator");
-        assert_eq!(plan.fallbacks[0].model, "claude-3-7-sonnet");
+        assert!(plan.fallbacks.is_empty());
     }
 
     #[test]
@@ -541,9 +520,7 @@ mod tests {
 
         assert_eq!(plan.primary.provider_id, "antigravity");
         assert_eq!(plan.primary.model, "gemini-3.8-flash-high");
-        assert_eq!(plan.fallbacks.len(), 1);
-        assert_eq!(plan.fallbacks[0].provider_id, "fallback-a");
-        assert_eq!(plan.fallbacks[0].model, "gemini-3.8-flash-high");
+        assert!(plan.fallbacks.is_empty());
     }
 
     #[test]
@@ -559,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn fallbacks_only_route_to_providers_with_the_same_model() {
+    fn no_cross_provider_fallbacks_are_generated() {
         let providers = vec![
             provider("primary", &["claude-3-7-sonnet"], 30),
             provider("renaming", &["claude-4"], 20),
@@ -570,17 +547,7 @@ mod tests {
         let plan = plan_route("claude-3-7-sonnet", &providers).unwrap();
 
         assert_eq!(plan.primary.provider_id, "primary");
-        let chain: Vec<(&str, &str)> = plan
-            .fallbacks
-            .iter()
-            .map(|c| (c.provider_id.as_str(), c.model.as_str()))
-            .collect();
-        assert_eq!(
-            chain,
-            vec![
-                ("same-name", "claude-3-7-sonnet"),
-            ]
-        );
+        assert!(plan.fallbacks.is_empty());
     }
 
     #[test]
@@ -607,9 +574,7 @@ mod tests {
         assert_eq!(matched.primary.provider.id, "anthropic");
         assert_eq!(matched.primary.target_model, "claude-3-7-sonnet");
         assert_eq!(matched.primary.api_key.as_deref(), Some("sk-anthropic"));
-        assert_eq!(matched.fallbacks.len(), 1);
-        assert_eq!(matched.fallbacks[0].provider.id, "antigravity");
-        assert_eq!(matched.fallbacks[0].target_model, "claude-3-7-sonnet");
+        assert!(matched.fallbacks.is_empty());
 
         let key1 = engine.select_api_key(&providers[0], Some("user_session_abc")).unwrap();
         let key2 = engine.select_api_key(&providers[0], Some("user_session_abc")).unwrap();

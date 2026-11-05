@@ -7,7 +7,7 @@ import { panelClass } from '@/components/common/panelStyles';
 import { Provider, InterceptorStatus } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
-import { ClientModelSelect } from './ClientModelSelect';
+import { ClientModelSelect, GroupedModelOption } from './ClientModelSelect';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { AgentConflictDialog } from '@/components/interceptor/AgentConflictDialog';
 import { ProviderContextMenu } from './ProviderContextMenu';
@@ -363,22 +363,43 @@ function IngressCard() {
   const gatewayUp = stats.isRunning;
 
   const groupedModels = useMemo(() => {
-    const seen = new Set<string>();
+    // 统计各模型在所有已启用服务商中的出现频次
+    const modelCount = new Map<string, number>();
+    for (const p of providers) {
+      if (!p.enabled || !p.models) continue;
+      for (const m of p.models) {
+        const trimmed = m?.trim();
+        if (trimmed) {
+          modelCount.set(trimmed, (modelCount.get(trimmed) || 0) + 1);
+        }
+      }
+    }
+
     return providers
       .filter((p) => p.enabled && p.models && p.models.length > 0)
       .map((p) => {
-        const uniqueModels: string[] = [];
+        const seen = new Set<string>();
+        const prefix = p.name.toLowerCase().replace(/\s+/g, '-');
+        const items: GroupedModelOption[] = [];
+
         for (const m of p.models) {
           const trimmed = m?.trim();
-          if (trimmed && !seen.has(trimmed)) {
-            seen.add(trimmed);
-            uniqueModels.push(trimmed);
-          }
+          if (!trimmed || seen.has(trimmed)) continue;
+          seen.add(trimmed);
+
+          // 若同名模型在多个服务商中出现，以 providerPrefix/model 前缀区分，确保精确路由
+          const isDuplicate = (modelCount.get(trimmed) || 0) > 1;
+          const value = isDuplicate ? `${prefix}/${trimmed}` : trimmed;
+          items.push({
+            value,
+            label: trimmed,
+          });
         }
+
         return {
           id: p.id,
           name: p.name,
-          models: uniqueModels,
+          models: items,
         };
       })
       .filter((p) => p.models.length > 0);
