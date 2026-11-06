@@ -119,19 +119,17 @@ interface DragState extends PressState {
 interface ProviderCardProps {
   provider: Provider;
   isDragged: boolean;
-  onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onDragHandlePointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
   onRowClick: () => void;
   onContextMenu: (event: React.MouseEvent) => void;
-  shouldSuppressClick: () => boolean;
 }
 
 function ProviderCard({
   provider,
   isDragged,
-  onPointerDown,
+  onDragHandlePointerDown,
   onRowClick,
   onContextMenu,
-  shouldSuppressClick,
 }: ProviderCardProps) {
   const { t } = useTranslation();
   const { openProviderEditor, toggleProvider, testProviderLatency } = useAppStore(
@@ -191,20 +189,15 @@ function ProviderCard({
     <div
       role="button"
       tabIndex={0}
+      data-provider-id={provider.id}
       onClick={onRowClick}
       onContextMenu={onContextMenu}
-      onClickCapture={(event) => {
-        if (!shouldSuppressClick()) return;
-        event.stopPropagation();
-        event.preventDefault();
-      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           openProviderEditor(provider);
         }
       }}
-      onPointerDown={onPointerDown}
       className={`group relative flex items-center justify-between gap-3 px-4 py-2.5 transition-colors cursor-pointer select-none ${
         isDragged
           ? 'bg-zinc-100/70 dark:bg-zinc-800/40'
@@ -218,10 +211,20 @@ function ProviderCard({
         <div className="h-6 w-full" aria-hidden />
       ) : (
         <>
-          <GripVertical
-            aria-hidden
-            className="pointer-events-none absolute left-0.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-70 dark:text-zinc-500"
-          />
+          {/* 绝对定位在左侧留白缝隙中，不占文档流空间，保证所有行 Avatar 像素级严密对齐 */}
+          {onDragHandlePointerDown && (
+            <div
+              role="button"
+              tabIndex={-1}
+              aria-label={t('providers.dragToReorder')}
+              title={t('providers.dragToReorder')}
+              onPointerDown={onDragHandlePointerDown}
+              onClick={(e) => e.stopPropagation()}
+              className="absolute left-0.5 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center w-3 h-5 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-grab active:cursor-grabbing transition-opacity opacity-0 group-hover:opacity-70 hover:!opacity-100 touch-none select-none"
+            >
+              <GripVertical className="h-3 w-3" />
+            </div>
+          )}
 
           {/* 左侧：Logo + 服务商名称 + 标签 + 简化端点 */}
           <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -480,14 +483,10 @@ function IngressCard() {
 
                         return (
                           <>
-                            <div
-                              className={`inline-flex shrink-0 transition-opacity ${
-                                !client.isIntercepted ? 'opacity-40' : ''
-                              }`}
-                            >
+                            <div className="inline-flex shrink-0">
                               <ClientModelSelect
                                 value={effectiveValue}
-                                disabled={groupedModels.length === 0 || !client.isIntercepted || busy}
+                                disabled={groupedModels.length === 0 || busy}
                                 ariaLabel={`${label} ${t('clients.startupModel')}`}
                                 title={effectiveValue || undefined}
                                 placeholder={t('clients.noAvailableModels')}
@@ -520,7 +519,7 @@ function IngressCard() {
                         );
                       })()
                     ) : (
-                      <span className="text-[11px] text-zinc-400 dark:text-zinc-500 py-1">
+                      <span className="inline-flex items-center h-6 text-[11px] text-zinc-400 dark:text-zinc-500">
                         {t('clients.statusNotInstalled')}
                       </span>
                     )}
@@ -581,15 +580,16 @@ function UniversalClientCard() {
   const { t } = useTranslation();
   const stats = useAppStore((state) => state.stats);
   const [copiedType, setCopiedType] = useState<'openai' | 'anthropic' | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
 
-  const openaiUrl = `http://${stats.host}:${stats.port}/v1`;
-  const anthropicUrl = `http://${stats.host}:${stats.port}`;
+  const host = stats.host === '0.0.0.0' ? '127.0.0.1' : stats.host;
+  const openaiUrl = `http://${host}:${stats.port}/v1`;
+  const anthropicUrl = `http://${host}:${stats.port}`;
 
   const copyUrl = (type: 'openai' | 'anthropic', url: string) => {
     navigator.clipboard.writeText(url);
     setCopiedType(type);
-    setTimeout(() => setCopiedType(null), 2000);
+    setTimeout(() => setCopiedType(null), 1500);
   };
 
   return (
@@ -736,7 +736,6 @@ export function ProviderList() {
   const [drag, setDrag] = useState<DragState | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const pressRef = useRef<PressState | null>(null);
-  const suppressClickRef = useRef(false);
   const providersRef = useRef(providers);
   providersRef.current = providers;
 
@@ -748,17 +747,22 @@ export function ProviderList() {
   const [deleteTarget, setDeleteTarget] = useState<Provider | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  const handleRowPointerDown = (event: React.PointerEvent<HTMLDivElement>, provider: Provider) => {
+  const handleDragHandlePointerDown = (
+    event: React.PointerEvent<HTMLDivElement>,
+    provider: Provider,
+  ) => {
     if (event.button !== 0) return;
-    const target = event.target as HTMLElement;
-    if (target.closest('[role="switch"], input, select, a, button')) return;
+    event.stopPropagation();
+
+    const row = event.currentTarget.closest<HTMLDivElement>('[data-provider-id]');
+    if (!row) return;
 
     const listRect = listRef.current?.getBoundingClientRect();
     if (!listRect) return;
-    const rowRect = event.currentTarget.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
     pressRef.current = {
       id: provider.id,
-      row: event.currentTarget,
+      row,
       startX: event.clientX,
       startY: event.clientY,
       grabOffset: event.clientY - rowRect.top,
@@ -767,12 +771,6 @@ export function ProviderList() {
       listTop: listRect.top,
       rowHeight: rowRect.height,
     };
-  };
-
-  const shouldSuppressClick = () => {
-    if (!suppressClickRef.current) return false;
-    suppressClickRef.current = false;
-    return true;
   };
 
   const handleRowClick = (provider: Provider) => {
@@ -786,20 +784,19 @@ export function ProviderList() {
 
       const current = dragRef.current;
       if (!current) {
-        const dx = event.clientX - press.startX;
-        const dy = event.clientY - press.startY;
+        const dx = Math.abs(event.clientX - press.startX);
+        const dy = Math.abs(event.clientY - press.startY);
 
-        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+        // 用户在专用拖拽手柄上操作，轻移 3px 即可顺滑启动拖拽
+        if (dy < 3 && dx < 3) {
           return;
         }
 
-        // 确认是整行拖动后才捕获指针，避免一开始就抢走模型条的横向滑动
         try {
           press.row.setPointerCapture(event.pointerId);
         } catch {
           // ignore
         }
-        suppressClickRef.current = true;
         document.body.style.cursor = 'grabbing';
         document.body.style.userSelect = 'none';
         const started: DragState = {
@@ -845,10 +842,6 @@ export function ProviderList() {
           });
         }
       }
-      // click 在 pointerup 之后同步派发，这里避免把拖动结束误判成打开编辑器
-      setTimeout(() => {
-        suppressClickRef.current = false;
-      }, 0);
     };
 
     const onUp = () => finish(true);
@@ -921,7 +914,7 @@ export function ProviderList() {
                   key={provider.id}
                   provider={provider}
                   isDragged={drag?.id === provider.id}
-                  onPointerDown={(event) => handleRowPointerDown(event, provider)}
+                  onDragHandlePointerDown={(event) => handleDragHandlePointerDown(event, provider)}
                   onRowClick={() => handleRowClick(provider)}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -931,7 +924,6 @@ export function ProviderList() {
                       provider,
                     });
                   }}
-                  shouldSuppressClick={shouldSuppressClick}
                 />
               ))}
             </div>
@@ -1007,10 +999,8 @@ export function ProviderList() {
             <ProviderCard
               provider={draggedProvider}
               isDragged={false}
-              onPointerDown={() => {}}
               onRowClick={() => {}}
               onContextMenu={() => {}}
-              shouldSuppressClick={() => false}
             />
           </div>,
           document.body,

@@ -154,7 +154,7 @@ export const ClientModelSelect: React.FC<ClientModelSelectProps> = ({
           aria-label={ariaLabel}
           title={title}
           className={cn(
-            'flex h-7 w-fit min-w-[5.5rem] max-w-[11.5rem] sm:max-w-[18rem] items-center justify-between rounded-md border border-input bg-background px-2 py-0.5 text-[11px] font-mono text-foreground shadow-2xs transition-colors',
+            'flex h-6 w-fit min-w-[5.5rem] max-w-[11.5rem] sm:max-w-[18rem] items-center justify-between rounded-md border border-input bg-background px-2 py-0.5 text-[11px] font-mono text-foreground shadow-2xs transition-colors',
             'hover:bg-accent/50 focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
             'disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer select-none',
             open && 'bg-accent/60'

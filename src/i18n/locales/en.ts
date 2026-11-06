@@ -50,6 +50,7 @@ export const en: TranslationDictionary = {
     deleteConfirmDetail1: 'The provider\'s API keys, custom models, and routing rules will be removed.',
     deleteConfirmDetail2: 'This action cannot be undone.',
     confirmDelete: 'Delete',
+    dragToReorder: 'Drag to reorder',
   },
   clients: {
     title: 'Agents',
@@ -293,6 +294,7 @@ export const en: TranslationDictionary = {
     defaultBadge: 'Default',
     manualModelPlaceholder: 'Enter model ID (Press Enter to add)',
     addManualModel: 'Add',
+    deleteModelFromPool: 'Remove from model pool',
     // Bottom actions
     saveFailed: 'Save failed: ',
     deleteProviderBtn: 'Delete Provider',
@@ -416,5 +418,11 @@ export const en: TranslationDictionary = {
     ignoreError: 'Dismiss',
     localDatabaseNotice: 'Pure local · Data stored in ~/.pivot/pivot.db',
     githubRepo: 'GitHub Repository',
+    shortcutsSection: 'Keyboard Shortcuts',
+    shortcuts: {
+      switchViews: 'Switch primary views',
+      newProvider: 'Quick add provider',
+      backOrCancel: 'Back / Dismiss',
+    },
   },
 };

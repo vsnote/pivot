@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/i18n';
 import { Badge } from '@/components/common/Badge';
+import { Button } from '@/components/common/Button';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { ProviderAvatar } from '@/components/common/BrandIcons';
 import {
   OpenAISpiralIcon,
@@ -24,6 +26,7 @@ import {
   Zap,
   CheckCircle2,
   AlertTriangle,
+  Trash2,
 } from 'lucide-react';
 
 type TimeRange = 'all' | 'today' | '1h';
@@ -118,8 +121,10 @@ function formatUptime(secs: number, t: (k: string, p?: Record<string, string | n
 
 export const UsageDashboard: React.FC = () => {
   const { t, locale } = useTranslation();
-  const { logs, stats, providers } = useAppStore();
+  const { logs, stats, providers, clearLogs } = useAppStore();
   const [timeRange, setTimeRange] = useState<TimeRange>('all');
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clearingLogs, setClearingLogs] = useState(false);
 
   // 根据所选时间范围筛选日志
   const filteredLogs = useMemo(() => {
@@ -407,6 +412,22 @@ export const UsageDashboard: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* 清空日志按钮 */}
+          {logs.length > 0 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={clearingLogs}
+              onClick={() => setShowClearConfirm(true)}
+              className="h-7 px-2 text-xs text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+              title={t('dashboard.metrics.clearLogs')}
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1" />
+              <span>{t('dashboard.metrics.clearLogs')}</span>
+            </Button>
+          )}
+
           {/* 时间范围切换 */}
           <div className="flex items-center rounded-lg bg-zinc-500/[0.07] dark:bg-white/[0.07] p-0.5 border border-border text-xs">
             <button
@@ -940,6 +961,27 @@ export const UsageDashboard: React.FC = () => {
           </div>
         </>
       )}
+
+      {/* 清空日志二次确认弹窗 */}
+      <ConfirmDialog
+        open={showClearConfirm}
+        title={t('dashboard.metrics.clearLogsConfirm')}
+        details={[t('dashboard.metrics.clearLogsDetail')]}
+        confirmLabel={t('dashboard.metrics.clearLogs')}
+        cancelLabel={t('common.cancel')}
+        variant="danger"
+        busy={clearingLogs}
+        onConfirm={async () => {
+          try {
+            setClearingLogs(true);
+            await clearLogs();
+          } finally {
+            setClearingLogs(false);
+            setShowClearConfirm(false);
+          }
+        }}
+        onCancel={() => setShowClearConfirm(false)}
+      />
     </div>
   );
 };

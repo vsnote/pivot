@@ -309,6 +309,44 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
 
+      {/* 卡片：常用快捷键 */}
+      <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
+        <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
+          <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
+            {t('settings.shortcutsSection')}
+          </span>
+        </div>
+
+        <div className="divide-y divide-border/60 text-xs">
+          <div className="px-4 py-2.5 flex items-center justify-between gap-3">
+            <span className="text-zinc-700 dark:text-zinc-300">
+              {t('settings.shortcuts.switchViews')}
+            </span>
+            <kbd className="px-2 py-0.5 rounded border border-border bg-muted/40 font-mono text-[11px] text-zinc-600 dark:text-zinc-300 shadow-2xs">
+              {typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC') ? '⌘ 1 ~ 4' : 'Ctrl + 1 ~ 4'}
+            </kbd>
+          </div>
+
+          <div className="px-4 py-2.5 flex items-center justify-between gap-3">
+            <span className="text-zinc-700 dark:text-zinc-300">
+              {t('settings.shortcuts.newProvider')}
+            </span>
+            <kbd className="px-2 py-0.5 rounded border border-border bg-muted/40 font-mono text-[11px] text-zinc-600 dark:text-zinc-300 shadow-2xs">
+              {typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC') ? '⌘ N' : 'Ctrl + N'}
+            </kbd>
+          </div>
+
+          <div className="px-4 py-2.5 flex items-center justify-between gap-3">
+            <span className="text-zinc-700 dark:text-zinc-300">
+              {t('settings.shortcuts.backOrCancel')}
+            </span>
+            <kbd className="px-2 py-0.5 rounded border border-border bg-muted/40 font-mono text-[11px] text-zinc-600 dark:text-zinc-300 shadow-2xs">
+              Esc
+            </kbd>
+          </div>
+        </div>
+      </div>
+
       {/* 卡片 2：配置数据备份与恢复 */}
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border">

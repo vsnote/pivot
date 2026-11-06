@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  ArrowLeft,
   Check,
   Copy,
   Eye,
@@ -10,6 +9,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Trash2,
   X,
   AlertCircle,
   AlertTriangle,
@@ -107,7 +107,7 @@ export function ProviderEditor() {
   });
 
   useEffect(() => {
-    if (draft.id && pool.length > 0) {
+    if (draft.id) {
       try {
         localStorage.setItem(`pivot_provider_pool_${draft.id}`, JSON.stringify(pool));
       } catch {}
@@ -534,6 +534,19 @@ export function ProviderEditor() {
     }
   };
 
+  const handleCloseRef = useRef(handleClose);
+  handleCloseRef.current = handleClose;
+
+  useEffect(() => {
+    const handleRequestClose = () => {
+      handleCloseRef.current();
+    };
+    window.addEventListener('pivot:request-close-provider-editor', handleRequestClose);
+    return () => {
+      window.removeEventListener('pivot:request-close-provider-editor', handleRequestClose);
+    };
+  }, []);
+
   useEffect(() => () => {
     requestId.current++;
   }, []);
@@ -547,6 +560,22 @@ export function ProviderEditor() {
         event.target instanceof HTMLSelectElement
       )
         return;
+
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        event.preventDefault();
+        if (choosing && presetSearch) {
+          setPresetSearch('');
+          return;
+        }
+        if (modelSearch) {
+          setModelSearch('');
+          return;
+        }
+        target.blur();
+        return;
+      }
+
       event.preventDefault();
       if (confirmation) setConfirmation(null);
       else handleBack();
@@ -730,7 +759,26 @@ export function ProviderEditor() {
     setCopiedModel(modelId);
     setTimeout(() => {
       setCopiedModel((prev) => (prev === modelId ? null : prev));
-    }, 1200);
+    }, 1500);
+  };
+
+  const handleRemoveModelFromPool = (e: React.MouseEvent | React.KeyboardEvent, model: string) => {
+    e.stopPropagation();
+    setPool((prev) => {
+      const next = prev.filter((m) => m !== model);
+      if (draft.id) {
+        try {
+          localStorage.setItem(`pivot_provider_pool_${draft.id}`, JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+    if (fetched) {
+      setFetched((prev) => (prev ? prev.filter((m) => m !== model) : null));
+    }
+    if (draft.models.includes(model)) {
+      replaceModels(draft.models.filter((m) => m !== model));
+    }
   };
 
   const addManualModel = () => {
@@ -809,16 +857,13 @@ export function ProviderEditor() {
     return presets.filter((p) => `${p.name} ${p.id}`.toLowerCase().includes(q));
   }, [presets, presetSearch]);
 
-  // 同步模型池：成功获取上游后严格以上游真实列表为准，清理并淘汰任何不存在的模型
+  // 同步模型池：保持已选模型在候选池中，避免未保存的新增模型丢失
   useEffect(() => {
     setPool((prev) => {
-      if (fetched && fetched.length > 0) {
-        return fetched;
-      }
       const next = uniqueValues([...prev, ...draft.models]);
       return next.length === prev.length ? prev : next;
     });
-  }, [fetched, draft.models]);
+  }, [draft.models]);
 
   // 模型能力标记：目录未收录的模型不显示任何标记
   const [capabilities, setCapabilities] = useState<Record<string, ModelCapability>>({});
@@ -888,28 +933,7 @@ export function ProviderEditor() {
   };
 
   return (
-    <div className="w-full pb-6 space-y-3 animate-in fade-in duration-150">
-      {/* 顶部面包屑返回导航：清晰指示层级 */}
-      <div className="flex items-center justify-between pb-1">
-        <nav aria-label={locale === 'zh-CN' ? '页面层级' : 'Navigation hierarchy'} className="flex items-center gap-1.5 text-xs">
-          <button
-            type="button"
-            onClick={handleBack}
-            className="-ml-2 inline-flex h-7 items-center gap-1 rounded-md px-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            title={t('common.back')}
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>{t('header.providers')}</span>
-          </button>
-          <span className="text-zinc-300 dark:text-zinc-700 select-none">/</span>
-          <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[160px] sm:max-w-[260px]">
-            {choosing
-              ? (locale === 'zh-CN' ? '选择预设' : 'Select Preset')
-              : draft.name.trim() || (currentEditingProvider ? (locale === 'zh-CN' ? '未命名服务商' : 'Unnamed Provider') : t('providerEditor.newProvider'))}
-          </span>
-        </nav>
-      </div>
-
+    <div className="w-full pb-6 animate-in fade-in duration-150">
       {/* 页面主卡片 */}
       <div
         ref={drawerRef}
@@ -922,26 +946,37 @@ export function ProviderEditor() {
           {choosing ? (
             /* 选择服务商预设 */
             <div className="space-y-2">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
-                <Input
-                  autoFocus
-                  type="text"
-                  placeholder={t('providerEditor.searchPresets')}
-                  value={presetSearch}
-                  onChange={(e) => setPresetSearch(e.target.value)}
-                  className="pl-8 pr-8 h-8 text-xs bg-zinc-500/[0.05] dark:bg-white/[0.05] border-transparent shadow-none focus-visible:border-transparent focus-visible:ring-zinc-400/40 dark:focus-visible:ring-zinc-500/40"
-                />
-                {presetSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setPresetSearch('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
-                    title={t('common.close')}
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                  <Input
+                    autoFocus
+                    type="text"
+                    placeholder={t('providerEditor.searchPresets')}
+                    value={presetSearch}
+                    onChange={(e) => setPresetSearch(e.target.value)}
+                    className="pl-8 pr-8 h-8 text-xs bg-zinc-500/[0.05] dark:bg-white/[0.05] border-transparent shadow-none focus-visible:border-transparent focus-visible:ring-zinc-400/40 dark:focus-visible:ring-zinc-500/40"
+                  />
+                  {presetSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setPresetSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-0.5 cursor-pointer"
+                      title={t('common.close')}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleClose}
+                  className="h-8 px-3 text-xs shrink-0 cursor-pointer"
+                >
+                  {t('providerEditor.backBtn')}
+                </Button>
               </div>
 
               {matchingPresets.length === 0 ? (
@@ -1873,7 +1908,7 @@ export function ProviderEditor() {
                                 </button>
                               </div>
 
-                              {/* 右侧：标记与提示 */}
+                              {/* 右侧：标记与提示及操作 */}
                               <div className="flex items-center gap-1.5 shrink-0">
                                 {isInvalid && (
                                   <span
@@ -1882,6 +1917,16 @@ export function ProviderEditor() {
                                     <AlertTriangle className="w-3 h-3" />
                                   </span>
                                 )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleRemoveModelFromPool(e, model)}
+                                  onKeyDown={(e) => e.stopPropagation()}
+                                  className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 p-0.5 rounded hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-all cursor-pointer"
+                                  title={t('providerEditor.deleteModelFromPool')}
+                                  aria-label={t('providerEditor.deleteModelFromPool')}
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
                               </div>
                             </div>
                           );
@@ -1969,10 +2014,8 @@ export function ProviderEditor() {
                         disabled={saving || syncingModels}
                         onClick={handleFinishSubscription}
                       >
-                        {saving ? (
+                        {saving && (
                           <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
-                        ) : (
-                          <Check className="w-3.5 h-3.5 mr-1.5" />
                         )}
                         <span>{t('providerEditor.doneBtn')}</span>
                       </Button>
@@ -1981,7 +2024,7 @@ export function ProviderEditor() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={handleClose}
+                        onClick={handleBack}
                       >
                         {t('providerEditor.backBtn')}
                       </Button>
@@ -1992,9 +2035,9 @@ export function ProviderEditor() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={handleClose}
+                        onClick={handleBack}
                       >
-                        {t('providerEditor.cancelBtn')}
+                        {t('providerEditor.backBtn')}
                       </Button>
                       <Button
                         type="submit"
@@ -2002,10 +2045,8 @@ export function ProviderEditor() {
                         size="sm"
                         disabled={saving || deleting || fetching || draft.models.length === 0}
                       >
-                        {saving ? (
-                          <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Check className="w-3.5 h-3.5" />
+                        {saving && (
+                          <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />
                         )}
                         <span>{saving ? t('providerEditor.savingBtn') : t('providerEditor.saveBtn')}</span>
                       </Button>

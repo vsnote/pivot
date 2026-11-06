@@ -13,6 +13,7 @@ export const Header: React.FC = () => {
     settingsSection,
     setActiveTab,
     setSettingsSection,
+    isProviderEditorOpen,
   } = useAppStore();
 
   const current: TabId =
@@ -24,12 +25,30 @@ export const Header: React.FC = () => {
           ? 'settings'
           : 'providers';
 
+  // 记录点击按下前的激活 Tab，防止 Radix onMouseDown 切换后导致 onClick 误判为「同 Tab 二次点击」
+  const previousTabOnPointerDown = React.useRef<TabId>(current);
+
   const selectTab = (id: string) => {
     if (id === 'settings') {
       setSettingsSection('about');
       return;
     }
     setActiveTab(id as TabId);
+  };
+
+  const handlePointerDown = () => {
+    previousTabOnPointerDown.current = current;
+  };
+
+  const handleTabClick = (id: TabId) => {
+    // 只有在按下发生前本身就已经处于「服务商」且正在编辑时，才视为「再次点击已激活 Tab 退出编辑」
+    if (
+      id === 'providers' &&
+      previousTabOnPointerDown.current === 'providers' &&
+      isProviderEditorOpen
+    ) {
+      window.dispatchEvent(new CustomEvent('pivot:request-close-provider-editor'));
+    }
   };
 
   return (
@@ -50,7 +69,13 @@ export const Header: React.FC = () => {
         <Tabs value={current} onValueChange={selectTab}>
           <TabsList variant="ghost" aria-label={t('header.navAria')}>
             {tabKeys.map((id) => (
-              <TabsTrigger key={id} value={id}>
+              <TabsTrigger
+                key={id}
+                value={id}
+                onPointerDown={handlePointerDown}
+                onMouseDown={handlePointerDown}
+                onClick={() => handleTabClick(id)}
+              >
                 {t(`header.${id}`)}
               </TabsTrigger>
             ))}

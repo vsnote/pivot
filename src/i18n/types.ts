@@ -50,6 +50,7 @@ export interface TranslationDictionary {
     deleteConfirmDetail1: string;
     deleteConfirmDetail2: string;
     confirmDelete: string;
+    dragToReorder: string;
   };
   clients: {
     title: string;
@@ -293,6 +294,7 @@ export interface TranslationDictionary {
     defaultBadge: string;
     manualModelPlaceholder: string;
     addManualModel: string;
+    deleteModelFromPool: string;
     // Bottom actions
     saveFailed: string;
     deleteProviderBtn: string;
@@ -416,5 +418,11 @@ export interface TranslationDictionary {
     ignoreError: string;
     localDatabaseNotice: string;
     githubRepo: string;
+    shortcutsSection: string;
+    shortcuts: {
+      switchViews: string;
+      newProvider: string;
+      backOrCancel: string;
+    };
   };
 }

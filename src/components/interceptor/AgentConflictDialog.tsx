@@ -56,7 +56,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
     try {
       await navigator.clipboard.writeText(exportCommand);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => setCopied(false), 1500);
     } catch {
       // 忽略复制失败
     }

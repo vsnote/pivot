@@ -50,6 +50,7 @@ export const zhCN: TranslationDictionary = {
     deleteConfirmDetail1: '删除后该服务商的 API Key、自定义模型以及路由分流规则将一并移除。',
     deleteConfirmDetail2: '该操作不可恢复。',
     confirmDelete: '确认删除',
+    dragToReorder: '拖拽调整排序',
   },
   clients: {
     title: '客户端列表',
@@ -264,7 +265,7 @@ export const zhCN: TranslationDictionary = {
     hideKey: '隐藏密钥',
     showPlainKey: '显示明文密钥',
     // Models
-    availableModelPool: '可用模型池',
+    availableModelPool: '可用模型',
     selectedCount: '已选 {selected} {total}',
     modelsNotProvided: '{count} 个未在上游提供',
     removeInvalid: '移除',
@@ -293,6 +294,7 @@ export const zhCN: TranslationDictionary = {
     defaultBadge: '默认',
     manualModelPlaceholder: '输入模型 ID（回车添加）',
     addManualModel: '添加',
+    deleteModelFromPool: '从模型池中删除',
     // Bottom actions
     saveFailed: '保存失败：',
     deleteProviderBtn: '删除服务商',
@@ -416,5 +418,11 @@ export const zhCN: TranslationDictionary = {
     ignoreError: '忽略',
     localDatabaseNotice: '纯本地运行 · 数据存储于 ~/.pivot/pivot.db',
     githubRepo: 'GitHub 源码仓库',
+    shortcutsSection: '常用快捷键',
+    shortcuts: {
+      switchViews: '切换主要视图',
+      newProvider: '快速添加服务商',
+      backOrCancel: '返回上一层 / 关闭浮层',
+    },
   },
 };

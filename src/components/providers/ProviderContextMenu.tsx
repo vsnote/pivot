@@ -243,7 +243,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
     setCopiedModel(modelId);
     setTimeout(() => {
       setCopiedModel((prev) => (prev === modelId ? null : prev));
-    }, 1200);
+    }, 1500);
   };
 
   const filteredModels = useMemo(() => {
