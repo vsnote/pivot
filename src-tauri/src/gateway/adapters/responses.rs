@@ -874,9 +874,13 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
     let tool_choice = body.get("tool_choice").cloned();
     let reasoning_effort = body
         .get("reasoning_effort")
-        .or_else(|| body.get("reasoning"))
-        .or_else(|| body.get("model_reasoning_effort"))
         .and_then(Value::as_str)
+        .or_else(|| {
+            body.get("reasoning").and_then(|r| {
+                r.as_str().or_else(|| r.get("effort").and_then(Value::as_str))
+            })
+        })
+        .or_else(|| body.get("model_reasoning_effort").and_then(Value::as_str))
         .map(|s| s.to_string());
 
     OpenAIChatRequest {
@@ -1192,6 +1196,7 @@ pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str
     if let Some(ref effort) = req.reasoning_effort {
         if !effort.is_empty() {
             body["reasoning_effort"] = json!(effort);
+            body["reasoning"] = json!({ "effort": effort });
         }
     }
 
@@ -1803,5 +1808,35 @@ mod tests {
         assert_eq!(assistant_parts.len(), 1);
         assert_eq!(assistant_parts[0]["type"], "output_text");
         assert_eq!(assistant_parts[0]["text"], "Here is the analysis");
+    }
+
+    #[test]
+    fn test_convert_responses_req_to_chat_reasoning_effort_nested() {
+        // Test nested reasoning object as sent by Codex CLI (e.g. {"reasoning": {"effort": "xhigh"}})
+        let body = json!({
+            "model": "gpt-6-astra",
+            "reasoning": {
+                "effort": "xhigh",
+                "context": "all_turns"
+            },
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Solve this equation"
+                }
+            ]
+        });
+
+        let chat_req = convert_responses_req_to_chat(&body);
+        assert_eq!(chat_req.reasoning_effort.as_deref(), Some("xhigh"));
+
+        // Test string reasoning effort (top-level reasoning_effort)
+        let body_str = json!({
+            "model": "gpt-6-astra",
+            "reasoning_effort": "medium"
+        });
+        let chat_req_str = convert_responses_req_to_chat(&body_str);
+        assert_eq!(chat_req_str.reasoning_effort.as_deref(), Some("medium"));
     }
 }

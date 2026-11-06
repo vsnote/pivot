@@ -154,6 +154,14 @@ fn normalize_openai_req_for_upstream(req: &mut OpenAIChatRequest) {
         req.tool_choice = None;
     }
 
+    if let Some(ref mut effort) = req.reasoning_effort {
+        if effort.is_empty() {
+            req.reasoning_effort = None;
+        } else if effort.eq_ignore_ascii_case("ultra") {
+            *effort = "max".to_string();
+        }
+    }
+
     for msg in &mut req.messages {
         match msg.role.as_str() {
             "developer" => msg.role = "system".to_string(),
@@ -387,6 +395,19 @@ fn detect_client_type(headers: &HeaderMap, default_type: &str) -> String {
     default_type.to_string()
 }
 
+fn resolve_forward_user_agent(client_ua: Option<&str>, client_type: &str) -> String {
+    if let Some(ua) = client_ua.filter(|s| !s.trim().is_empty()) {
+        return ua.to_string();
+    }
+    match client_type {
+        "codex_cli" => crate::oauth::codex_user_agent(),
+        "claude_code" => "Claude-Code/0.2.29".to_string(),
+        "gemini_cli" => "gemini-cli/1.0.0".to_string(),
+        "pi" => "pi/1.0.0".to_string(),
+        _ => format!("Pivot/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS),
+    }
+}
+
 /// Handler for Claude Code and Anthropic clients calling `/v1/messages`
 async fn handle_messages(
     State(state): State<GatewayState>,
@@ -401,6 +422,7 @@ async fn handle_messages(
     let client_type = detect_client_type(&headers, "claude_code");
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
+    let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
     let providers = state.db.get_providers().unwrap_or_default();
 
     let is_stream = req.stream.unwrap_or(false);
@@ -471,6 +493,8 @@ async fn handle_messages(
             &req_id,
             is_stream,
             client_key.as_deref(),
+            client_ua,
+            &client_type,
         )
         .await;
 
@@ -591,11 +615,14 @@ async fn dispatch_anthropic_request(
     req_id: &str,
     is_stream: bool,
     client_key: Option<&str>,
+    client_ua: Option<&str>,
+    client_type: &str,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let effective_key = cand.api_key.as_deref().or(client_key);
     let estimated_prompt = estimate_anthropic_req_prompt_tokens(req);
+    let forward_ua = resolve_forward_user_agent(client_ua, client_type);
 
     match cand.provider.protocol.as_str() {
         "anthropic" => {
@@ -608,6 +635,7 @@ async fn dispatch_anthropic_request(
             let mut req_builder = client
                 .post(&url)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
 
@@ -749,6 +777,7 @@ async fn dispatch_anthropic_request(
             let mut req_builder = client
                 .post(&url)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
 
             if let Some(key) = effective_key {
@@ -1003,6 +1032,7 @@ async fn dispatch_anthropic_request(
             let mut req_builder = client
                 .post(&endpoint)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
 
             let req_body_val = if is_subscription_pool {
@@ -1198,6 +1228,7 @@ async fn handle_chat_completions(
     let client_type = detect_client_type(&headers, "codex_cli");
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
+    let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
     let providers = state.db.get_providers().unwrap_or_default();
 
     let is_stream = req.stream.unwrap_or(false);
@@ -1266,6 +1297,8 @@ async fn handle_chat_completions(
             &req_id,
             is_stream,
             client_key.as_deref(),
+            client_ua,
+            &client_type,
         )
         .await;
 
@@ -1407,6 +1440,7 @@ async fn handle_responses(
     let client_type = detect_client_type(&headers, "codex_cli");
     let session_id = extract_session_id(&headers);
     let client_key = extract_client_api_key(&headers);
+    let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
     let providers = state.db.get_providers().unwrap_or_default();
 
     let is_compaction = responses::is_compaction_request(&body);
@@ -1478,6 +1512,8 @@ async fn handle_responses(
             &req_id,
             is_stream,
             client_key.as_deref(),
+            client_ua,
+            &client_type,
         )
         .await
         {
@@ -1786,11 +1822,14 @@ async fn dispatch_openai_request(
     req_id: &str,
     is_stream: bool,
     client_key: Option<&str>,
+    client_ua: Option<&str>,
+    client_type: &str,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let effective_key = cand.api_key.as_deref().or(client_key);
     let estimated_prompt = estimate_openai_req_prompt_tokens(req);
+    let forward_ua = resolve_forward_user_agent(client_ua, client_type);
 
     match cand.provider.protocol.as_str() {
         "chatgpt" => {
@@ -1806,6 +1845,7 @@ async fn dispatch_openai_request(
             let mut req_builder = client
                 .post(&url)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
 
             if let Some(key) = effective_key {
@@ -1941,6 +1981,7 @@ async fn dispatch_openai_request(
             let mut req_builder = client
                 .post(&url)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
 
@@ -2116,6 +2157,7 @@ async fn dispatch_openai_request(
             let mut req_builder = client
                 .post(&endpoint)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
 
             let req_body_val = if is_subscription_pool {
@@ -2364,6 +2406,7 @@ async fn handle_gemini_generate_content(
         });
 
     let client_type = detect_client_type(&headers, "gemini_cli");
+    let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
     let session_id = extract_session_id(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
 
@@ -2439,6 +2482,8 @@ async fn handle_gemini_generate_content(
             is_stream,
             method,
             client_key,
+            client_ua,
+            &client_type,
         )
         .await;
 
@@ -2546,9 +2591,12 @@ async fn dispatch_gemini_request(
     is_stream: bool,
     _method: &str,
     client_key: Option<&str>,
+    client_ua: Option<&str>,
+    client_type: &str,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
     let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
+    let forward_ua = resolve_forward_user_agent(client_ua, client_type);
 
     match cand.provider.protocol.as_str() {
         "gemini" => {
@@ -2610,6 +2658,7 @@ async fn dispatch_gemini_request(
             let mut req_builder = client
                 .post(&endpoint)
                 .timeout(timeout)
+                .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
 
             let req_body_val = if is_subscription_pool {
@@ -2932,5 +2981,26 @@ mod tests {
         // 4. Multimodal message preserved as array
         assert_eq!(req.messages[3].role, "user");
         assert!(req.messages[3].content.as_ref().unwrap().is_array());
+    }
+
+    #[test]
+    fn test_resolve_forward_user_agent() {
+        assert_eq!(
+            resolve_forward_user_agent(Some("codex_exec/0.154.0 (Mac OS)"), "codex_cli"),
+            "codex_exec/0.154.0 (Mac OS)"
+        );
+        assert_eq!(
+            resolve_forward_user_agent(None, "codex_cli"),
+            crate::oauth::codex_user_agent()
+        );
+        assert_eq!(
+            resolve_forward_user_agent(None, "claude_code"),
+            "Claude-Code/0.2.29"
+        );
+        assert_eq!(
+            resolve_forward_user_agent(Some("   "), "gemini_cli"),
+            "gemini-cli/1.0.0"
+        );
+        assert!(resolve_forward_user_agent(None, "custom").starts_with("Pivot/"));
     }
 }

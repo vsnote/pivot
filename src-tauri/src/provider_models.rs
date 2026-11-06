@@ -193,7 +193,9 @@ pub async fn fetch_models(
 ) -> Result<Vec<String>, String> {
     let url = models_url(protocol, base_url)?;
     // Never forward a draft credential to a redirected host. Avoid echoing request URLs or bodies in errors.
+    let default_ua = format!("Pivot/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
     let client = reqwest::Client::builder()
+        .user_agent(default_ua)
         .redirect(Policy::none())
         .timeout(Duration::from_secs(15))
         .build()
