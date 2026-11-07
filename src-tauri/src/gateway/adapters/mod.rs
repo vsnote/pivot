@@ -16,6 +16,7 @@ pub struct SseState {
     pub current_tool_id: Option<String>,
     pub current_tool_name: Option<String>,
     pub last_thought_signature: Option<String>,
+    pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub stream_finished: bool,
 }
@@ -247,11 +248,13 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                         _ => "end_turn",
                     }
                 };
-                if let Some(output_tokens) = usage
-                    .and_then(|u| u.get("candidatesTokenCount"))
-                    .and_then(Value::as_u64)
-                {
-                    state.total_output_tokens = output_tokens as u32;
+                if let Some(usage) = usage {
+                    if let Some(input_tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+                        state.total_input_tokens = input_tokens as u32;
+                    }
+                    if let Some(output_tokens) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+                        state.total_output_tokens = output_tokens as u32;
+                    }
                 }
                 events.extend(finish_gemini_stream(state, stop_reason));
                 return events;
@@ -259,11 +262,13 @@ pub fn parse_gemini_chunk_to_anthropic_events(
         }
     }
 
-    if let Some(output_tokens) = usage
-        .and_then(|u| u.get("candidatesTokenCount"))
-        .and_then(Value::as_u64)
-    {
-        state.total_output_tokens = output_tokens as u32;
+    if let Some(usage) = usage {
+        if let Some(input_tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+            state.total_input_tokens = input_tokens as u32;
+        }
+        if let Some(output_tokens) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+            state.total_output_tokens = output_tokens as u32;
+        }
     }
     events
 }
@@ -280,12 +285,18 @@ pub fn finish_openai_stream(state: &mut SseState, stop_reason: &str) -> Vec<Stri
         return events;
     }
     close_active_anthropic_blocks(&mut events, state);
+    let mut usage_obj = json!({
+        "output_tokens": state.total_output_tokens
+    });
+    if state.total_input_tokens > 0 {
+        usage_obj["input_tokens"] = json!(state.total_input_tokens);
+    }
     events.push(format!(
         "event: message_delta\ndata: {}\n\n",
         json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-            "usage": { "output_tokens": state.total_output_tokens }
+            "usage": usage_obj
         })
     ));
     events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
@@ -623,7 +634,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
                 "max_tokens" => "length",
                 _ => "stop",
             };
-            let chunk = json!({
+            let mut chunk = json!({
                 "id": msg_id,
                 "object": "chat.completion.chunk",
                 "created": chrono::Utc::now().timestamp(),
@@ -634,6 +645,15 @@ pub fn parse_anthropic_event_to_openai_chunks(
                     "finish_reason": finish_reason
                 }]
             });
+            if let Some(usage) = val.get("usage") {
+                let out_tokens = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let in_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                chunk["usage"] = json!({
+                    "prompt_tokens": in_tokens,
+                    "completion_tokens": out_tokens,
+                    "total_tokens": in_tokens + out_tokens
+                });
+            }
             chunks.push(format!("data: {}\n\n", chunk));
         }
         "message_stop" => {
@@ -776,12 +796,41 @@ mod tests {
         let c4 = parse_anthropic_event_to_openai_chunks(msg_delta, "req-oai", "gpt-4o");
         assert_eq!(c4.len(), 1);
         assert!(c4[0].contains(r#""finish_reason":"tool_calls""#));
+        assert!(c4[0].contains(r#""completion_tokens":20"#));
 
         // 5. Message stop -> [DONE]
         let stop = r#"data: {"type":"message_stop"}"#;
         let c5 = parse_anthropic_event_to_openai_chunks(stop, "req-oai", "gpt-4o");
         assert_eq!(c5.len(), 1);
         assert!(c5[0].contains("[DONE]"));
+    }
+
+    #[test]
+    fn test_gemini_stream_to_anthropic_and_openai_usage() {
+        let mut state = SseState::new();
+        state.total_input_tokens = 50;
+
+        let chunk1 = r#"data: {"candidates":[{"content":{"parts":[{"text":"Hi!"}]}}]}"#;
+        let _ = parse_gemini_chunk_to_anthropic_events(chunk1, &mut state, "req-u", "gemini-2.5-pro");
+
+        let chunk2 = r#"data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":55,"candidatesTokenCount":15}}"#;
+        let anthropic_events = parse_gemini_chunk_to_anthropic_events(chunk2, &mut state, "req-u", "gemini-2.5-pro");
+
+        let all_a = anthropic_events.concat();
+        assert!(all_a.contains(r#""output_tokens":15"#));
+        assert!(all_a.contains(r#""input_tokens":55"#));
+
+        // Now translate to OpenAI chunks
+        let mut oai_chunks = Vec::new();
+        for a_evt in &anthropic_events {
+            oai_chunks.extend(parse_anthropic_event_to_openai_chunks(a_evt, "req-u", "gemini-2.5-pro"));
+        }
+
+        let all_o = oai_chunks.concat();
+        assert!(all_o.contains(r#""prompt_tokens":55"#));
+        assert!(all_o.contains(r#""completion_tokens":15"#));
+        assert!(all_o.contains(r#""total_tokens":70"#));
+        assert!(all_o.contains("[DONE]"));
     }
 
     #[test]

@@ -272,6 +272,12 @@ impl Database {
             [],
         );
 
+        // 确保 Gemini / Antigravity 订阅池服务商超时时间至少为 180 秒，避免超大上下文与深度思考模型 60s 临界误杀
+        let _ = conn.execute(
+            "UPDATE providers SET timeout_secs = 180 WHERE (protocol = 'gemini' OR preset_id = 'antigravity' OR auth_type = 'subscription_pool') AND timeout_secs < 180",
+            [],
+        );
+
         // 清洗历史版本可能写入的特定第三方工具名称
         let _ = conn.execute(
             "UPDATE providers SET name = '本地代理 (8317)' WHERE name LIKE '%CC-Switch%';",

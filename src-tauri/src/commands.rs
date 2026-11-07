@@ -365,6 +365,7 @@ pub async fn import_third_party_provider(
             updated
         }
         None => {
+            let is_gemini = third_party.protocol == "gemini";
             let new_provider = Provider {
                 id: format!("tp_{}_{}", id, &uuid::Uuid::new_v4().to_string()[..8]),
                 name: third_party.suggested_name,
@@ -383,7 +384,7 @@ pub async fn import_third_party_provider(
                 enabled: true,
                 priority: 10,
                 weight: 1,
-                timeout_secs: 60,
+                timeout_secs: if is_gemini { 180 } else { 60 },
                 latency_ms: None,
                 created_at: None,
                 updated_at: None,

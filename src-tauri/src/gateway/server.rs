@@ -608,6 +608,18 @@ fn resolve_upstream_endpoint(base_url: &str, suffix: &str) -> String {
     }
 }
 
+fn resolve_dispatch_timeout(cand: &RouteCandidate, estimated_prompt: u32) -> Duration {
+    let configured = cand.provider.timeout_secs.max(10) as u64;
+    // 对 Gemini、Antigravity 订阅池等超大上下文与深度思考模型，动态扩展超时，防止 400k~1M Token 提示词在 60s 临界被强掐
+    if cand.provider.protocol == "gemini" || cand.provider.auth_type.as_deref() == Some("subscription_pool") {
+        let base = configured.max(180);
+        let extra_scale = ((estimated_prompt as u64) / 50_000) * 15;
+        Duration::from_secs((base + extra_scale).min(600))
+    } else {
+        Duration::from_secs(configured)
+    }
+}
+
 async fn dispatch_anthropic_request(
     state: &GatewayState,
     req: &AnthropicMessageRequest,
@@ -619,9 +631,9 @@ async fn dispatch_anthropic_request(
     client_type: &str,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
-    let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
-    let effective_key = cand.api_key.as_deref().or(client_key);
     let estimated_prompt = estimate_anthropic_req_prompt_tokens(req);
+    let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
+    let effective_key = cand.api_key.as_deref().or(client_key);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
 
     match cand.provider.protocol.as_str() {
@@ -996,45 +1008,6 @@ async fn dispatch_anthropic_request(
             let gemini_req = anthropic_to_gemini::convert_anthropic_req_to_gemini(req);
             let is_subscription_pool = cand.provider.auth_type.as_deref() == Some("subscription_pool");
 
-            let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
-                let account = crate::oauth::acquire_subscription_account(
-                    &state.db,
-                    &state.http_client,
-                    &cand.provider.id,
-                )
-                .await?;
-                let ep = if is_stream {
-                    format!("{}/v1internal:streamGenerateContent?alt=sse", base)
-                } else {
-                    format!("{}/v1internal:generateContent", base)
-                };
-                (
-                    Some(account.id),
-                    ep,
-                    Some(format!("Bearer {}", account.access_token)),
-                )
-            } else {
-                let api_key = cand.api_key.as_deref().unwrap_or("");
-                let ep = if is_stream {
-                    format!(
-                        "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-                        base, cand.target_model, api_key
-                    )
-                } else {
-                    format!(
-                        "{}/models/{}:generateContent?key={}",
-                        base, cand.target_model, api_key
-                    )
-                };
-                (None, ep, None)
-            };
-
-            let mut req_builder = client
-                .post(&endpoint)
-                .timeout(timeout)
-                .header("user-agent", &forward_ua)
-                .header("content-type", "application/json");
-
             let req_body_val = if is_subscription_pool {
                 json!({
                     "project": "aicode-consumers",
@@ -1045,37 +1018,132 @@ async fn dispatch_anthropic_request(
                 serde_json::to_value(&gemini_req).unwrap_or(json!({}))
             };
 
-            if let Some(auth) = auth_header {
-                req_builder = req_builder
-                    .header("authorization", auth)
-                    .header(
-                        "user-agent",
-                        "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
-                    );
-            }
+            let max_account_attempts = if is_subscription_pool { 2 } else { 1 };
+            let mut last_upstream_err = None;
+            let mut res_opt = None;
 
-            let res = req_builder
-                .json(&req_body_val)
-                .send()
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!("Gemini connection error: {}", e),
+            for attempt_idx in 0..max_account_attempts {
+                let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
+                    let account = match crate::oauth::acquire_subscription_account(
+                        &state.db,
+                        &state.http_client,
+                        &cand.provider.id,
                     )
-                })?;
+                    .await {
+                        Ok(acc) => acc,
+                        Err(e) => {
+                            if attempt_idx > 0 && last_upstream_err.is_some() {
+                                break;
+                            }
+                            return Err(e);
+                        }
+                    };
+                    let ep = if is_stream {
+                        format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+                    } else {
+                        format!("{}/v1internal:generateContent", base)
+                    };
+                    (
+                        Some(account.id),
+                        ep,
+                        Some(format!("Bearer {}", account.access_token)),
+                    )
+                } else {
+                    let api_key = cand.api_key.as_deref().unwrap_or("");
+                    let ep = if is_stream {
+                        format!(
+                            "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                            base, cand.target_model, api_key
+                        )
+                    } else {
+                        format!(
+                            "{}/models/{}:generateContent?key={}",
+                            base, cand.target_model, api_key
+                        )
+                    };
+                    (None, ep, None)
+                };
 
-            if !res.status().is_success() {
-                if res.status() == StatusCode::TOO_MANY_REQUESTS {
-                    if let Some(ref acc_id) = sub_account_id {
-                        crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
-                    }
+                let mut req_builder = client
+                    .post(&endpoint)
+                    .timeout(timeout)
+                    .header("user-agent", &forward_ua)
+                    .header("content-type", "application/json");
+
+                if let Some(auth) = auth_header {
+                    req_builder = req_builder
+                        .header("authorization", auth)
+                        .header(
+                            "user-agent",
+                            "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
+                        );
                 }
-                let status =
-                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let text = res.text().await.unwrap_or_default();
-                return Err((status, text));
+
+                let send_res = req_builder.json(&req_body_val).send().await;
+                let res = match send_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let is_timeout = e.is_timeout();
+                        let err_msg = format!("Gemini connection error: {}", e);
+                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_timeout {
+                            if let Some(ref acc_id) = sub_account_id {
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 30);
+                            }
+                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", e);
+                            last_upstream_err = Some((StatusCode::BAD_GATEWAY, err_msg));
+                            continue;
+                        }
+                        return Err((StatusCode::BAD_GATEWAY, err_msg));
+                    }
+                };
+
+                if !res.status().is_success() {
+                    let status_code = res.status();
+                    let text = res.text().await.unwrap_or_default();
+                    let is_capacity_or_rate = status_code == StatusCode::TOO_MANY_REQUESTS
+                        || status_code == StatusCode::SERVICE_UNAVAILABLE
+                        || text.contains("MODEL_CAPACITY_EXHAUSTED");
+
+                    if is_subscription_pool {
+                        if let Some(ref acc_id) = sub_account_id {
+                            let cooldown_secs = if status_code == StatusCode::TOO_MANY_REQUESTS {
+                                300
+                            } else if status_code == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
+                                60
+                            } else {
+                                30
+                            };
+                            crate::oauth::mark_account_cooldown(&state.db, acc_id, cooldown_secs);
+                        }
+
+                        if attempt_idx + 1 < max_account_attempts && is_capacity_or_rate {
+                            tracing::warn!(
+                                "Subscription account returned status {} ({}), failing over to next account in pool...",
+                                status_code,
+                                if text.contains("MODEL_CAPACITY_EXHAUSTED") { "MODEL_CAPACITY_EXHAUSTED" } else { "HTTP error" }
+                            );
+                            let status = StatusCode::from_u16(status_code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                            last_upstream_err = Some((status, text));
+                            continue;
+                        }
+                    }
+
+                    let status =
+                        StatusCode::from_u16(status_code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                    return Err((status, text));
+                }
+
+                res_opt = Some(res);
+                break;
             }
+
+            let res = match res_opt {
+                Some(r) => r,
+                None => match last_upstream_err {
+                    Some(err) => return Err(err),
+                    None => return Err((StatusCode::BAD_GATEWAY, "No response from Gemini upstream".to_string())),
+                },
+            };
 
             if is_stream {
                 let req_id_str = req_id.to_string();
@@ -1652,9 +1720,17 @@ async fn handle_responses(
         },
     );
 
+    let friendly_message = if last_error.contains("MODEL_CAPACITY_EXHAUSTED") || last_error.contains("OVERLOADED_TOO_MANY_RETRIES_PER_REQUEST") {
+        "Google 上游服务容量当前耗尽 (MODEL_CAPACITY_EXHAUSTED)。当前会话上下文过大容易触发排队超限，建议稍后重试或执行 /compact 压缩会话。".to_string()
+    } else if last_error.contains("timed out") || (last_status == StatusCode::BAD_GATEWAY && last_error.contains("upstream connection failed")) {
+        format!("请求上游超时或连接失败。当前会话提示词体量较大，建议使用 /compact 压缩上下文后重试 (详细: {})", summarize_error(&last_error))
+    } else {
+        summarize_error(&last_error)
+    };
+
     (
         last_status,
-        Json(json!({ "error": { "message": last_error, "type": "upstream_error" } })),
+        Json(json!({ "error": { "message": friendly_message, "type": "upstream_error" } })),
     )
         .into_response()
 }
@@ -1667,8 +1743,8 @@ async fn dispatch_chatgpt_request(
     is_stream: bool,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
-    let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
     let estimated_prompt = estimate_openai_req_prompt_tokens(req);
+    let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
 
     let account = crate::oauth::acquire_subscription_account(
         &state.db,
@@ -1827,9 +1903,9 @@ async fn dispatch_openai_request(
     client_type: &str,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
-    let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
-    let effective_key = cand.api_key.as_deref().or(client_key);
     let estimated_prompt = estimate_openai_req_prompt_tokens(req);
+    let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
+    let effective_key = cand.api_key.as_deref().or(client_key);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
 
     match cand.provider.protocol.as_str() {
@@ -2122,45 +2198,6 @@ async fn dispatch_openai_request(
                 cand.provider.auth_type.as_deref() == Some("subscription_pool");
             let base = cand.provider.base_url.trim_end_matches('/');
 
-            let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
-                let account = crate::oauth::acquire_subscription_account(
-                    &state.db,
-                    &state.http_client,
-                    &cand.provider.id,
-                )
-                .await?;
-                let ep = if is_stream {
-                    format!("{}/v1internal:streamGenerateContent?alt=sse", base)
-                } else {
-                    format!("{}/v1internal:generateContent", base)
-                };
-                (
-                    Some(account.id),
-                    ep,
-                    Some(format!("Bearer {}", account.access_token)),
-                )
-            } else {
-                let api_key = cand.api_key.as_deref().or(client_key).unwrap_or("");
-                let ep = if is_stream {
-                    format!(
-                        "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-                        base, cand.target_model, api_key
-                    )
-                } else {
-                    format!(
-                        "{}/models/{}:generateContent?key={}",
-                        base, cand.target_model, api_key
-                    )
-                };
-                (None, ep, None)
-            };
-
-            let mut req_builder = client
-                .post(&endpoint)
-                .timeout(timeout)
-                .header("user-agent", &forward_ua)
-                .header("content-type", "application/json");
-
             let req_body_val = if is_subscription_pool {
                 json!({
                     "project": "aicode-consumers",
@@ -2171,37 +2208,132 @@ async fn dispatch_openai_request(
                 serde_json::to_value(&gemini_req).unwrap_or(json!({}))
             };
 
-            if let Some(auth) = auth_header {
-                req_builder = req_builder
-                    .header("authorization", auth)
-                    .header(
-                        "user-agent",
-                        "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
-                    );
-            }
+            let max_account_attempts = if is_subscription_pool { 2 } else { 1 };
+            let mut last_upstream_err = None;
+            let mut res_opt = None;
 
-            let res = req_builder
-                .json(&req_body_val)
-                .send()
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!("Gemini upstream connection failed: {}", e),
+            for attempt_idx in 0..max_account_attempts {
+                let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
+                    let account = match crate::oauth::acquire_subscription_account(
+                        &state.db,
+                        &state.http_client,
+                        &cand.provider.id,
                     )
-                })?;
+                    .await {
+                        Ok(acc) => acc,
+                        Err(e) => {
+                            if attempt_idx > 0 && last_upstream_err.is_some() {
+                                break;
+                            }
+                            return Err(e);
+                        }
+                    };
+                    let ep = if is_stream {
+                        format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+                    } else {
+                        format!("{}/v1internal:generateContent", base)
+                    };
+                    (
+                        Some(account.id),
+                        ep,
+                        Some(format!("Bearer {}", account.access_token)),
+                    )
+                } else {
+                    let api_key = cand.api_key.as_deref().or(client_key).unwrap_or("");
+                    let ep = if is_stream {
+                        format!(
+                            "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                            base, cand.target_model, api_key
+                        )
+                    } else {
+                        format!(
+                            "{}/models/{}:generateContent?key={}",
+                            base, cand.target_model, api_key
+                        )
+                    };
+                    (None, ep, None)
+                };
 
-            if !res.status().is_success() {
-                if res.status() == StatusCode::TOO_MANY_REQUESTS {
-                    if let Some(ref acc_id) = sub_account_id {
-                        crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
-                    }
+                let mut req_builder = client
+                    .post(&endpoint)
+                    .timeout(timeout)
+                    .header("user-agent", &forward_ua)
+                    .header("content-type", "application/json");
+
+                if let Some(auth) = auth_header {
+                    req_builder = req_builder
+                        .header("authorization", auth)
+                        .header(
+                            "user-agent",
+                            "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
+                        );
                 }
-                let status =
-                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let text = res.text().await.unwrap_or_default();
-                return Err((status, text));
+
+                let send_res = req_builder.json(&req_body_val).send().await;
+                let res = match send_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let is_timeout = e.is_timeout();
+                        let err_msg = format!("Gemini upstream connection failed: {}", e);
+                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_timeout {
+                            if let Some(ref acc_id) = sub_account_id {
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 30);
+                            }
+                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", e);
+                            last_upstream_err = Some((StatusCode::BAD_GATEWAY, err_msg));
+                            continue;
+                        }
+                        return Err((StatusCode::BAD_GATEWAY, err_msg));
+                    }
+                };
+
+                if !res.status().is_success() {
+                    let status_code = res.status();
+                    let text = res.text().await.unwrap_or_default();
+                    let is_capacity_or_rate = status_code == StatusCode::TOO_MANY_REQUESTS
+                        || status_code == StatusCode::SERVICE_UNAVAILABLE
+                        || text.contains("MODEL_CAPACITY_EXHAUSTED");
+
+                    if is_subscription_pool {
+                        if let Some(ref acc_id) = sub_account_id {
+                            let cooldown_secs = if status_code == StatusCode::TOO_MANY_REQUESTS {
+                                300
+                            } else if status_code == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
+                                60
+                            } else {
+                                30
+                            };
+                            crate::oauth::mark_account_cooldown(&state.db, acc_id, cooldown_secs);
+                        }
+
+                        if attempt_idx + 1 < max_account_attempts && is_capacity_or_rate {
+                            tracing::warn!(
+                                "Subscription account returned status {} ({}), failing over to next account in pool...",
+                                status_code,
+                                if text.contains("MODEL_CAPACITY_EXHAUSTED") { "MODEL_CAPACITY_EXHAUSTED" } else { "HTTP error" }
+                            );
+                            let status = StatusCode::from_u16(status_code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                            last_upstream_err = Some((status, text));
+                            continue;
+                        }
+                    }
+
+                    let status =
+                        StatusCode::from_u16(status_code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                    return Err((status, text));
+                }
+
+                res_opt = Some(res);
+                break;
             }
+
+            let res = match res_opt {
+                Some(r) => r,
+                None => match last_upstream_err {
+                    Some(err) => return Err(err),
+                    None => return Err((StatusCode::BAD_GATEWAY, "No response from Gemini upstream".to_string())),
+                },
+            };
 
             if is_stream {
                 let req_id_str = req_id.to_string();
@@ -2214,6 +2346,7 @@ async fn dispatch_openai_request(
                 let sse_stream = stream! {
                     let mut buffer = String::new();
                     let mut sse_state = SseState::new();
+                    sse_state.total_input_tokens = estimated_prompt;
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
 
@@ -2283,6 +2416,13 @@ async fn dispatch_openai_request(
                         }
                     }
 
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = sse_state.total_output_tokens.max(1);
+                    }
+                    if final_prompt_tokens == 0 {
+                        final_prompt_tokens = sse_state.total_input_tokens;
+                    }
+
                     let final_stop_reason = if sse_state.current_tool_id.is_some() {
                         "tool_use"
                     } else {
@@ -2297,10 +2437,6 @@ async fn dispatch_openai_request(
                         for o_chunk in oai_chunks {
                             yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
                         }
-                    }
-
-                    if final_completion_tokens == 0 {
-                        final_completion_tokens = sse_state.total_output_tokens.max(1);
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
                     let _ = db_clone.update_request_log_tokens(
@@ -2597,7 +2733,7 @@ async fn dispatch_gemini_request(
     client_type: &str,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
-    let timeout = Duration::from_secs(cand.provider.timeout_secs.max(10) as u64);
+    let timeout = resolve_dispatch_timeout(cand, 0);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
 
     match cand.provider.protocol.as_str() {
@@ -2624,45 +2760,6 @@ async fn dispatch_gemini_request(
                 cand.provider.auth_type.as_deref() == Some("subscription_pool");
             let base = cand.provider.base_url.trim_end_matches('/');
 
-            let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
-                let account = crate::oauth::acquire_subscription_account(
-                    &state.db,
-                    &state.http_client,
-                    &cand.provider.id,
-                )
-                .await?;
-                let ep = if is_stream {
-                    format!("{}/v1internal:streamGenerateContent?alt=sse", base)
-                } else {
-                    format!("{}/v1internal:generateContent", base)
-                };
-                (
-                    Some(account.id),
-                    ep,
-                    Some(format!("Bearer {}", account.access_token)),
-                )
-            } else {
-                let api_key = cand.api_key.as_deref().or(client_key).unwrap_or("");
-                let ep = if is_stream {
-                    format!(
-                        "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-                        base, cand.target_model, api_key
-                    )
-                } else {
-                    format!(
-                        "{}/models/{}:generateContent?key={}",
-                        base, cand.target_model, api_key
-                    )
-                };
-                (None, ep, None)
-            };
-
-            let mut req_builder = client
-                .post(&endpoint)
-                .timeout(timeout)
-                .header("user-agent", &forward_ua)
-                .header("content-type", "application/json");
-
             let req_body_val = if is_subscription_pool {
                 json!({
                     "project": "aicode-consumers",
@@ -2673,37 +2770,132 @@ async fn dispatch_gemini_request(
                 sanitized_req
             };
 
-            if let Some(auth) = auth_header {
-                req_builder = req_builder
-                    .header("authorization", auth)
-                    .header(
-                        "user-agent",
-                        "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
-                    );
-            }
+            let max_account_attempts = if is_subscription_pool { 2 } else { 1 };
+            let mut last_upstream_err = None;
+            let mut res_opt = None;
 
-            let res = req_builder
-                .json(&req_body_val)
-                .send()
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!("Gemini upstream connection failed: {}", e),
+            for attempt_idx in 0..max_account_attempts {
+                let (sub_account_id, endpoint, auth_header) = if is_subscription_pool {
+                    let account = match crate::oauth::acquire_subscription_account(
+                        &state.db,
+                        &state.http_client,
+                        &cand.provider.id,
                     )
-                })?;
+                    .await {
+                        Ok(acc) => acc,
+                        Err(e) => {
+                            if attempt_idx > 0 && last_upstream_err.is_some() {
+                                break;
+                            }
+                            return Err(e);
+                        }
+                    };
+                    let ep = if is_stream {
+                        format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+                    } else {
+                        format!("{}/v1internal:generateContent", base)
+                    };
+                    (
+                        Some(account.id),
+                        ep,
+                        Some(format!("Bearer {}", account.access_token)),
+                    )
+                } else {
+                    let api_key = cand.api_key.as_deref().or(client_key).unwrap_or("");
+                    let ep = if is_stream {
+                        format!(
+                            "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                            base, cand.target_model, api_key
+                        )
+                    } else {
+                        format!(
+                            "{}/models/{}:generateContent?key={}",
+                            base, cand.target_model, api_key
+                        )
+                    };
+                    (None, ep, None)
+                };
 
-            if !res.status().is_success() {
-                if res.status() == StatusCode::TOO_MANY_REQUESTS {
-                    if let Some(ref acc_id) = sub_account_id {
-                        crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
-                    }
+                let mut req_builder = client
+                    .post(&endpoint)
+                    .timeout(timeout)
+                    .header("user-agent", &forward_ua)
+                    .header("content-type", "application/json");
+
+                if let Some(auth) = auth_header {
+                    req_builder = req_builder
+                        .header("authorization", auth)
+                        .header(
+                            "user-agent",
+                            "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
+                        );
                 }
-                let status =
-                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let text = res.text().await.unwrap_or_default();
-                return Err((status, text));
+
+                let send_res = req_builder.json(&req_body_val).send().await;
+                let res = match send_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let is_timeout = e.is_timeout();
+                        let err_msg = format!("Gemini upstream connection failed: {}", e);
+                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_timeout {
+                            if let Some(ref acc_id) = sub_account_id {
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 30);
+                            }
+                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", e);
+                            last_upstream_err = Some((StatusCode::BAD_GATEWAY, err_msg));
+                            continue;
+                        }
+                        return Err((StatusCode::BAD_GATEWAY, err_msg));
+                    }
+                };
+
+                if !res.status().is_success() {
+                    let status_code = res.status();
+                    let text = res.text().await.unwrap_or_default();
+                    let is_capacity_or_rate = status_code == StatusCode::TOO_MANY_REQUESTS
+                        || status_code == StatusCode::SERVICE_UNAVAILABLE
+                        || text.contains("MODEL_CAPACITY_EXHAUSTED");
+
+                    if is_subscription_pool {
+                        if let Some(ref acc_id) = sub_account_id {
+                            let cooldown_secs = if status_code == StatusCode::TOO_MANY_REQUESTS {
+                                300
+                            } else if status_code == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
+                                60
+                            } else {
+                                30
+                            };
+                            crate::oauth::mark_account_cooldown(&state.db, acc_id, cooldown_secs);
+                        }
+
+                        if attempt_idx + 1 < max_account_attempts && is_capacity_or_rate {
+                            tracing::warn!(
+                                "Subscription account returned status {} ({}), failing over to next account in pool...",
+                                status_code,
+                                if text.contains("MODEL_CAPACITY_EXHAUSTED") { "MODEL_CAPACITY_EXHAUSTED" } else { "HTTP error" }
+                            );
+                            let status = StatusCode::from_u16(status_code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                            last_upstream_err = Some((status, text));
+                            continue;
+                        }
+                    }
+
+                    let status =
+                        StatusCode::from_u16(status_code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                    return Err((status, text));
+                }
+
+                res_opt = Some(res);
+                break;
             }
+
+            let res = match res_opt {
+                Some(r) => r,
+                None => match last_upstream_err {
+                    Some(err) => return Err(err),
+                    None => return Err((StatusCode::BAD_GATEWAY, "No response from Gemini upstream".to_string())),
+                },
+            };
 
             if is_stream {
                 let req_id_str = req_id.to_string();
@@ -3005,5 +3197,42 @@ mod tests {
             "gemini-cli/1.0.0"
         );
         assert!(resolve_forward_user_agent(None, "custom").starts_with("Pivot/"));
+    }
+
+    #[test]
+    fn test_resolve_dispatch_timeout() {
+        let mut cand = RouteCandidate {
+            provider: crate::db::Provider {
+                id: "prov_1".to_string(),
+                name: "Standard OpenAI".to_string(),
+                protocol: "openai".to_string(),
+                base_url: "https://api.openai.com".to_string(),
+                api_keys: vec!["k".to_string()],
+                models: vec!["gpt-4o".to_string()],
+                enabled: true,
+                priority: 10,
+                weight: 1,
+                timeout_secs: 60,
+                latency_ms: None,
+                created_at: None,
+                updated_at: None,
+                preset_id: None,
+                default_model: None,
+                is_default: false,
+                auth_type: None,
+            },
+            target_model: "gpt-4o".to_string(),
+            api_key: None,
+        };
+
+        // Standard provider keeps configured timeout
+        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(60));
+
+        // Gemini protocol: base timeout defaults to at least 180s
+        cand.provider.protocol = "gemini".to_string();
+        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(180));
+
+        // Large context (e.g. 500k prompt tokens) scales dynamically: 180 + (500k/50k)*15 = 180 + 150 = 330s
+        assert_eq!(resolve_dispatch_timeout(&cand, 500_000), Duration::from_secs(330));
     }
 }
