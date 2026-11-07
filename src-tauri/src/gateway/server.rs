@@ -1037,6 +1037,7 @@ async fn dispatch_anthropic_request(
 
             let req_body_val = if is_subscription_pool {
                 json!({
+                    "project": "aicode-consumers",
                     "model": cand.target_model,
                     "request": serde_json::to_value(&gemini_req).unwrap_or(json!({}))
                 })
@@ -2162,6 +2163,7 @@ async fn dispatch_openai_request(
 
             let req_body_val = if is_subscription_pool {
                 json!({
+                    "project": "aicode-consumers",
                     "model": cand.target_model,
                     "request": serde_json::to_value(&gemini_req).unwrap_or(json!({}))
                 })
@@ -2663,6 +2665,7 @@ async fn dispatch_gemini_request(
 
             let req_body_val = if is_subscription_pool {
                 json!({
+                    "project": "aicode-consumers",
                     "model": cand.target_model,
                     "request": sanitized_req
                 })

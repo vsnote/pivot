@@ -676,6 +676,35 @@ impl Database {
         Ok(list)
     }
 
+    pub fn get_subscription_account_by_id(&self, account_id: &str) -> Result<Option<SubscriptionAccount>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, created_at, updated_at
+             FROM subscription_accounts WHERE id = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![account_id], |row| {
+            let enabled_int: i32 = row.get(8)?;
+            Ok(SubscriptionAccount {
+                id: row.get(0)?,
+                provider_id: row.get(1)?,
+                account_type: row.get(2)?,
+                email: row.get(3)?,
+                access_token: row.get(4)?,
+                refresh_token: row.get(5)?,
+                expires_at: row.get(6)?,
+                cooldown_until: row.get(7)?,
+                enabled: enabled_int == 1,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn save_subscription_account(&self, account: &SubscriptionAccount) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();

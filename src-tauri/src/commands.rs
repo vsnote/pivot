@@ -490,12 +490,15 @@ pub async fn start_subscription_oauth(
             )
             .map_err(|e| e.to_string())?;
 
+        let _ = state.db.set_account_cooldown(&target.id, 0);
+
         let mut updated = target;
         updated.access_token = token_resp.access_token;
         if let Some(rf) = token_resp.refresh_token {
             updated.refresh_token = Some(rf);
         }
         updated.expires_at = expires_at;
+        updated.cooldown_until = 0;
         updated.updated_at = now_str;
         return Ok(updated);
     }
@@ -547,12 +550,15 @@ pub async fn import_codex_subscription_account(
             )
             .map_err(|e| e.to_string())?;
 
+        let _ = state.db.set_account_cooldown(&target.id, 0);
+
         let mut updated = target;
         updated.access_token = token_resp.access_token;
         if let Some(rf) = token_resp.refresh_token {
             updated.refresh_token = Some(rf);
         }
         updated.expires_at = expires_at;
+        updated.cooldown_until = 0;
         updated.updated_at = now_str;
         return Ok(updated);
     }
@@ -664,16 +670,27 @@ pub async fn get_subscription_account_quota(
             } else {
                 oauth::refresh_antigravity_token(&state.http_client, refresh_token).await
             };
-            if let Ok((new_token, expires_in)) = refresh_res {
-                let new_expires_at = now_sec + expires_in;
-                let _ = state.db.update_account_tokens(
-                    &account.id,
-                    &new_token,
-                    account.refresh_token.as_deref(),
-                    new_expires_at,
-                );
-                account.access_token = new_token;
-                account.expires_at = new_expires_at;
+            match refresh_res {
+                Ok((new_token, expires_in)) => {
+                    let new_expires_at = now_sec + expires_in;
+                    let _ = state.db.update_account_tokens(
+                        &account.id,
+                        &new_token,
+                        account.refresh_token.as_deref(),
+                        new_expires_at,
+                    );
+                    let _ = state.db.set_account_cooldown(&account.id, 0);
+                    account.access_token = new_token;
+                    account.expires_at = new_expires_at;
+                    account.cooldown_until = 0;
+                }
+                Err(ref e) => {
+                    let is_revoked = e.contains("invalid_grant") || e.contains("revoked") || e.contains("expired") || e.contains("unauthorized");
+                    if is_revoked {
+                        let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                        account.cooldown_until = now_sec + 86400;
+                    }
+                }
             }
         }
     }
@@ -681,25 +698,37 @@ pub async fn get_subscription_account_quota(
     let (buckets, reset_credits) = if account.account_type == "chatgpt" {
         match oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await {
             Ok((b, rc)) => (b, Some(rc)),
-            Err(e) => return Ok(oauth::AccountQuota {
-                account_id,
-                updated_at: now_sec,
-                buckets: Vec::new(),
-                reset_credits: None,
-                error: Some(e),
-            }),
+            Err(e) => {
+                let is_auth_err = e.contains("401") || e.contains("UNAUTHENTICATED") || e.contains("invalid_grant");
+                if is_auth_err {
+                    let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                }
+                return Ok(oauth::AccountQuota {
+                    account_id,
+                    updated_at: now_sec,
+                    buckets: Vec::new(),
+                    reset_credits: None,
+                    error: Some(if is_auth_err { "账号授权已失效，请重新授权".to_string() } else { e }),
+                });
+            }
         }
     } else {
         let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
         match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
             Ok(b) => (b, None),
-            Err(e) => return Ok(oauth::AccountQuota {
-                account_id,
-                updated_at: now_sec,
-                buckets: Vec::new(),
-                reset_credits: None,
-                error: Some(e),
-            }),
+            Err(e) => {
+                let is_auth_err = e.contains("401") || e.contains("UNAUTHENTICATED") || e.contains("invalid_grant");
+                if is_auth_err {
+                    let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                }
+                return Ok(oauth::AccountQuota {
+                    account_id,
+                    updated_at: now_sec,
+                    buckets: Vec::new(),
+                    reset_credits: None,
+                    error: Some(if is_auth_err { "账号授权已失效，请重新授权".to_string() } else { e }),
+                });
+            }
         }
     };
 

@@ -6,11 +6,15 @@ pub struct ResponsesSseState {
     pub response_id: String,
     pub model: String,
     pub item_id: String,
+    pub reasoning_id: String,
     pub created_at: i64,
     pub response_created_sent: bool,
     pub text_started: bool,
     pub full_text: String,
     pub reasoning_started: bool,
+    pub reasoning_finished: bool,
+    pub reasoning_text: String,
+    pub reasoning_tokens: u32,
     pub in_tool_call: bool,
     pub tool_calls_buf: BTreeMap<usize, ToolCallBuf>,
     pub finish_reason: String,
@@ -51,11 +55,15 @@ impl ResponsesSseState {
             response_id: response_id.to_string(),
             model: model.to_string(),
             item_id: format!("msg_{}", &item_suffix[..16]),
+            reasoning_id: format!("rs_{}", &item_suffix[..16]),
             created_at: chrono::Utc::now().timestamp(),
             response_created_sent: false,
             text_started: false,
             full_text: String::new(),
             reasoning_started: false,
+            reasoning_finished: false,
+            reasoning_text: String::new(),
+            reasoning_tokens: 0,
             in_tool_call: false,
             tool_calls_buf: BTreeMap::new(),
             finish_reason: "stop".to_string(),
@@ -74,6 +82,36 @@ impl ResponsesSseState {
             event_type,
             serde_json::to_string(data).unwrap_or_default()
         )
+    }
+
+    fn finish_reasoning(&mut self, events: &mut Vec<String>) {
+        if self.reasoning_started && !self.reasoning_finished {
+            self.reasoning_finished = true;
+            events.push(Self::sse(
+                "response.reasoning_summary_part.done",
+                &json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": self.reasoning_id,
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "part": { "type": "summary_text", "text": self.reasoning_text }
+                }),
+            ));
+            events.push(Self::sse(
+                "response.output_item.done",
+                &json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": self.reasoning_id,
+                        "object": "response.output_item",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "summary": [{ "type": "summary_text", "text": self.reasoning_text }]
+                    }
+                }),
+            ));
+        }
     }
 
     pub fn process_line(&mut self, line: &str) -> Vec<String> {
@@ -126,6 +164,14 @@ impl ResponsesSseState {
             if let Some(tt) = usage.get("total_tokens").and_then(Value::as_u64) {
                 self.total_tokens = tt as u32;
             }
+            if let Some(rt) = usage
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .or_else(|| usage.get("output_token_details").and_then(|d| d.get("reasoning_tokens")))
+                .and_then(Value::as_u64)
+            {
+                self.reasoning_tokens = rt as u32;
+            }
         }
 
         let choice = chunk
@@ -139,27 +185,47 @@ impl ResponsesSseState {
             }
 
             if let Some(delta) = choice.get("delta") {
-                // 1. Thinking / reasoning content delta (e.g. DeepSeek-R1)
-                if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                // 1. Thinking / reasoning content delta (e.g. DeepSeek-R1, OpenAI reasoning)
+                let reasoning_opt = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(Value::as_str);
+
+                if let Some(reasoning) = reasoning_opt {
                     if !reasoning.is_empty() {
                         if !self.reasoning_started {
                             self.reasoning_started = true;
                             events.push(Self::sse(
+                                "response.output_item.added",
+                                &json!({
+                                    "type": "response.output_item.added",
+                                    "output_index": 0,
+                                    "item": {
+                                        "id": self.reasoning_id,
+                                        "object": "response.output_item",
+                                        "type": "reasoning",
+                                        "status": "in_progress",
+                                        "summary": []
+                                    }
+                                }),
+                            ));
+                            events.push(Self::sse(
                                 "response.reasoning_summary_part.added",
                                 &json!({
                                     "type": "response.reasoning_summary_part.added",
-                                    "item_id": self.item_id,
+                                    "item_id": self.reasoning_id,
                                     "output_index": 0,
                                     "summary_index": 0,
                                     "part": { "type": "summary_text", "text": "" }
                                 }),
                             ));
                         }
+                        self.reasoning_text.push_str(reasoning);
                         events.push(Self::sse(
                             "response.reasoning_summary_text.delta",
                             &json!({
                                 "type": "response.reasoning_summary_text.delta",
-                                "item_id": self.item_id,
+                                "item_id": self.reasoning_id,
                                 "output_index": 0,
                                 "summary_index": 0,
                                 "delta": reasoning
@@ -170,6 +236,9 @@ impl ResponsesSseState {
 
                 // 2. Tool calls delta
                 if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    if self.reasoning_started && !self.reasoning_finished {
+                        self.finish_reasoning(&mut events);
+                    }
                     self.in_tool_call = true;
                     for tc in tool_calls {
                         let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -191,13 +260,17 @@ impl ResponsesSseState {
                 // 3. Output text delta
                 if let Some(token) = delta.get("content").and_then(Value::as_str) {
                     if !token.is_empty() {
+                        if self.reasoning_started && !self.reasoning_finished {
+                            self.finish_reasoning(&mut events);
+                        }
+                        let msg_output_index = if self.reasoning_started { 1 } else { 0 };
                         if !self.text_started {
                             self.text_started = true;
                             events.push(Self::sse(
                                 "response.output_item.added",
                                 &json!({
                                     "type": "response.output_item.added",
-                                    "output_index": 0,
+                                    "output_index": msg_output_index,
                                     "item": {
                                         "id": self.item_id,
                                         "object": "response.output_item",
@@ -213,7 +286,7 @@ impl ResponsesSseState {
                                 &json!({
                                     "type": "response.content_part.added",
                                     "item_id": self.item_id,
-                                    "output_index": 0,
+                                    "output_index": msg_output_index,
                                     "content_index": 0,
                                     "part": { "type": "output_text", "text": "", "annotations": [] }
                                 }),
@@ -225,7 +298,7 @@ impl ResponsesSseState {
                             &json!({
                                 "type": "response.output_text.delta",
                                 "item_id": self.item_id,
-                                "output_index": 0,
+                                "output_index": msg_output_index,
                                 "content_index": 0,
                                 "delta": token
                             }),
@@ -291,14 +364,30 @@ impl ResponsesSseState {
             ));
             output.push(comp_item);
         } else {
-            let mut next_output_index = 0;
+            if self.reasoning_started {
+                if !self.reasoning_finished {
+                    self.finish_reasoning(&mut events);
+                }
+                output.push(json!({
+                    "id": self.reasoning_id,
+                    "object": "response.output_item",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": self.reasoning_text
+                    }]
+                }));
+            }
+
             if self.text_started && !self.full_text.is_empty() {
+                let msg_output_index = output.len();
                 events.push(Self::sse(
                     "response.output_text.done",
                     &json!({
                         "type": "response.output_text.done",
                         "item_id": self.item_id,
-                        "output_index": next_output_index,
+                        "output_index": msg_output_index,
                         "content_index": 0,
                         "text": self.full_text
                     }),
@@ -319,16 +408,16 @@ impl ResponsesSseState {
                     "response.output_item.done",
                     &json!({
                         "type": "response.output_item.done",
-                        "output_index": next_output_index,
+                        "output_index": msg_output_index,
                         "item": msg_item
                     }),
                 ));
                 output.push(msg_item);
-                next_output_index += 1;
             }
 
             if self.in_tool_call && !self.tool_calls_buf.is_empty() {
                 for (_idx, buf) in &self.tool_calls_buf {
+                    let next_output_index = output.len();
                     let call_id = if buf.id.is_empty() {
                         format!("call_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string())
                     } else {
@@ -376,7 +465,6 @@ impl ResponsesSseState {
                         }),
                     ));
                     output.push(tc_item);
-                    next_output_index += 1;
                 }
             } else if output.is_empty() {
                 let empty_item = json!({
@@ -395,6 +483,25 @@ impl ResponsesSseState {
             }
         }
 
+        let r_tokens = if self.reasoning_tokens > 0 {
+            self.reasoning_tokens
+        } else if !self.reasoning_text.is_empty() {
+            (self.reasoning_text.chars().count() as f64 * 0.4).ceil() as u32
+        } else {
+            0
+        };
+
+        let mut usage_json = json!({
+            "input_tokens": self.prompt_tokens,
+            "output_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens
+        });
+        if r_tokens > 0 {
+            usage_json["output_token_details"] = json!({
+                "reasoning_tokens": r_tokens
+            });
+        }
+
         events.push(Self::sse(
             "response.completed",
             &json!({
@@ -406,11 +513,7 @@ impl ResponsesSseState {
                     "model": self.model,
                     "status": "completed",
                     "output": output,
-                    "usage": {
-                        "input_tokens": self.prompt_tokens,
-                        "output_tokens": self.completion_tokens,
-                        "total_tokens": self.total_tokens
-                    },
+                    "usage": usage_json,
                     "stop_reason": self.finish_reason
                 }
             }),
@@ -942,6 +1045,25 @@ pub fn chat_response_to_responses_full(
             "encrypted_content": text
         }));
     } else {
+        if let Some(reasoning) = message
+            .get("reasoning_content")
+            .or_else(|| message.get("reasoning"))
+            .and_then(Value::as_str)
+        {
+            if !reasoning.is_empty() {
+                output.push(json!({
+                    "id": format!("rs_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
+                    "object": "response.output_item",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": reasoning
+                    }]
+                }));
+            }
+        }
+
         let text = message.get("content").and_then(Value::as_str).unwrap_or("");
         let has_tool_calls = message
             .get("tool_calls")
@@ -998,6 +1120,29 @@ pub fn chat_response_to_responses_full(
         }
     }
 
+    let reasoning_tokens = usage
+        .and_then(|u| {
+            u.get("completion_tokens_details")
+                .or_else(|| u.get("output_token_details"))
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+
+    let mut usage_json = json!({
+        "input_tokens": usage.and_then(|u| u.get("prompt_tokens")).and_then(Value::as_u64).unwrap_or(0),
+        "output_tokens": usage.and_then(|u| u.get("completion_tokens")).and_then(Value::as_u64).unwrap_or(0),
+        "total_tokens": usage.and_then(|u| u.get("total_tokens")).and_then(Value::as_u64).unwrap_or(0),
+    });
+    if reasoning_tokens > 0 {
+        if let Some(obj) = usage_json.as_object_mut() {
+            obj.insert(
+                "output_token_details".to_string(),
+                json!({ "reasoning_tokens": reasoning_tokens }),
+            );
+        }
+    }
+
     json!({
         "id": response_id,
         "object": "response",
@@ -1005,11 +1150,7 @@ pub fn chat_response_to_responses_full(
         "model": model,
         "status": "completed",
         "output": output,
-        "usage": {
-            "input_tokens": usage.and_then(|u| u.get("prompt_tokens")).and_then(Value::as_u64).unwrap_or(0),
-            "output_tokens": usage.and_then(|u| u.get("completion_tokens")).and_then(Value::as_u64).unwrap_or(0),
-            "total_tokens": usage.and_then(|u| u.get("total_tokens")).and_then(Value::as_u64).unwrap_or(0),
-        },
+        "usage": usage_json,
         "stop_reason": finish
     })
 }
@@ -1439,26 +1580,73 @@ mod tests {
         // Chunk 1: reasoning
         let chunk1 = "data: {\"choices\": [{\"delta\": {\"reasoning_content\": \"Thinking step\"}}]}";
         let ev1 = state.process_line(chunk1);
-        assert_eq!(ev1.len(), 3); // response.created + reasoning_summary_part.added + reasoning_summary_text.delta
+        assert_eq!(ev1.len(), 4); // response.created + output_item.added(reasoning) + reasoning_summary_part.added + reasoning_summary_text.delta
         assert!(ev1[0].contains("response.created"));
-        assert!(ev1[1].contains("response.reasoning_summary_part.added"));
-        assert!(ev1[2].contains("Thinking step"));
+        assert!(ev1[1].contains("response.output_item.added"));
+        assert!(ev1[1].contains("\"type\":\"reasoning\""));
+        assert!(ev1[2].contains("response.reasoning_summary_part.added"));
+        assert!(ev1[3].contains("Thinking step"));
 
         // Chunk 2: text content
         let chunk2 = "data: {\"choices\": [{\"delta\": {\"content\": \"Hello world\"}}]}";
         let ev2 = state.process_line(chunk2);
-        assert_eq!(ev2.len(), 3); // output_item.added + content_part.added + output_text.delta
-        assert!(ev2[0].contains("response.output_item.added"));
-        assert!(ev2[1].contains("response.content_part.added"));
-        assert!(ev2[2].contains("Hello world"));
+        assert_eq!(ev2.len(), 5); // reasoning_summary_part.done + output_item.done(reasoning) + output_item.added(msg) + content_part.added + output_text.delta
+        assert!(ev2[0].contains("response.reasoning_summary_part.done"));
+        assert!(ev2[1].contains("response.output_item.done"));
+        assert!(ev2[1].contains("\"type\":\"reasoning\""));
+        assert!(ev2[2].contains("response.output_item.added"));
+        assert!(ev2[2].contains("\"type\":\"message\""));
+        assert!(ev2[3].contains("response.content_part.added"));
+        assert!(ev2[4].contains("Hello world"));
 
-        // Chunk 3: DONE
+        // Chunk 3: usage
+        let chunk3 = "data: {\"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 50, \"total_tokens\": 60, \"completion_tokens_details\": {\"reasoning_tokens\": 35}}}";
+        let ev3 = state.process_line(chunk3);
+        assert_eq!(ev3.len(), 0);
+
+        // Chunk 4: DONE
         let done = "data: [DONE]";
-        let ev3 = state.process_line(done);
-        assert_eq!(ev3.len(), 3); // output_text.done + output_item.done + response.completed
-        assert!(ev3[0].contains("response.output_text.done"));
-        assert!(ev3[1].contains("response.output_item.done"));
-        assert!(ev3[2].contains("response.completed"));
+        let ev4 = state.process_line(done);
+        assert_eq!(ev4.len(), 3); // output_text.done + output_item.done(msg) + response.completed
+        assert!(ev4[0].contains("response.output_text.done"));
+        assert!(ev4[1].contains("response.output_item.done"));
+        assert!(ev4[2].contains("response.completed"));
+        assert!(ev4[2].contains("\"reasoning_tokens\":35"));
+        assert!(ev4[2].contains("\"type\":\"reasoning\""));
+        assert!(ev4[2].contains("\"type\":\"message\""));
+    }
+
+    #[test]
+    fn test_chat_response_to_responses_with_reasoning() {
+        let chat_resp = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!",
+                    "reasoning_content": "Deep thought process"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 60,
+                "total_tokens": 75,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 40
+                }
+            }
+        });
+
+        let resp_val = chat_response_to_responses(&chat_resp, "resp_rs_full", "gpt-6-astra", false);
+        let output = resp_val["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["summary"][0]["text"], "Deep thought process");
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[1]["content"][0]["text"], "Hello!");
+
+        let usage = &resp_val["usage"];
+        assert_eq!(usage["output_token_details"]["reasoning_tokens"], 40);
     }
 
     #[test]

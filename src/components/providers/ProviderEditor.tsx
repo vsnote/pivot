@@ -18,6 +18,7 @@ import {
   Sparkles,
   ChevronDown,
   ChevronUp,
+  KeyRound,
 } from 'lucide-react';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Button } from '@/components/common/Button';
@@ -1051,9 +1052,9 @@ export function ProviderEditor() {
             </div>
           ) : (
             /* 配置表单 */
-            <form id="provider-drawer-form" onSubmit={submit} className="space-y-4">
+            <form id="provider-drawer-form" onSubmit={submit} className="space-y-5">
               {/* 基础连接设置 */}
-              <div className="space-y-3.5">
+              <div className="space-y-3">
                 <h3 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
                   {t('providerEditor.basicSettings')}
                 </h3>
@@ -1074,15 +1075,12 @@ export function ProviderEditor() {
 
                 {/* 协议与 URL：普通 API 服务商在此直接显示；订阅账号服务商收敛为状态说明，接口地址收起在底部高级设置 */}
                 {isSubscriptionPool ? (
-                  <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-500/[0.04] dark:bg-white/[0.04] border border-border text-xs text-foreground">
+                  <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-500/[0.04] dark:bg-white/[0.04] border border-border/80 text-xs text-foreground">
                     <div className="flex items-center gap-2">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
                       <span className="font-medium">{t('providerEditor.categories.official')}</span>
-                      <span className="text-[11px] text-muted-foreground hidden sm:inline">
-                        {locale === 'zh-CN' ? '· 浏览器授权登录，支持多账号自动轮询与限流冷却' : '· Browser authorization, multi-account rotation & cooldown'}
-                      </span>
                     </div>
-                    <Badge variant="secondary" className="font-mono text-[10px]">
+                    <Badge variant="secondary" className="font-mono text-[10px] px-1.5 py-0">
                       OAuth
                     </Badge>
                   </div>
@@ -1195,13 +1193,13 @@ export function ProviderEditor() {
                 {/* 认证方式：官方订阅账号池 vs API 密钥 */}
                 <div>
                   {isSubscriptionPool ? (
-                    <div className="space-y-3">
+                    <div className="space-y-3 pt-1">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <label className="text-xs font-bold text-foreground tracking-wider">
                             {t('providerEditor.accountPool')}
                           </label>
-                          <Badge variant="secondary" className="font-mono text-[10px]">
+                          <Badge variant="secondary" className="font-mono text-[10px] px-1.5 py-0">
                             {subAccounts.length > 0
                               ? t('providerEditor.accountAvailable', {
                                   available: subAccounts.filter((a) => a.enabled).length,
@@ -1360,61 +1358,105 @@ export function ProviderEditor() {
                           )}
                         </div>
                       ) : (
-                        <div className="space-y-2">
+                        <div className="space-y-2.5">
                           {subAccounts.map((acc) => {
                             const nowSec = Math.floor(Date.now() / 1000);
-                            const isCooldown = acc.cooldownUntil > nowSec;
-                            const cooldownRemaining = Math.ceil((acc.cooldownUntil - nowSec) / 60);
                             const quota = accountQuotas[acc.id];
+                            const isCooldown = acc.cooldownUntil > nowSec;
+                            const isAuthError =
+                              acc.cooldownUntil - nowSec > 3600 ||
+                              Boolean(
+                                quota?.error &&
+                                  (quota.error.includes('失效') ||
+                                    quota.error.includes('401') ||
+                                    quota.error.includes('UNAUTHENTICATED') ||
+                                    quota.error.includes('invalid_grant'))
+                              );
+                            const cooldownRemaining = Math.ceil((acc.cooldownUntil - nowSec) / 60);
                             const isRefreshingThis = refreshingQuotaId === acc.id;
                             const isExpanded = !!expandedQuotaAccounts[acc.id];
 
                             return (
                               <div
                                 key={acc.id}
-                                className="p-2.5 rounded-lg border border-border/80 bg-background hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors shadow-2xs"
+                                className="p-2.5 px-3 rounded-xl border border-border/80 bg-zinc-500/[0.02] dark:bg-zinc-900/40 hover:border-zinc-300 dark:hover:border-zinc-700/80 transition-all shadow-2xs"
                               >
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="flex items-center gap-2.5 min-w-0">
-                                    <span className="text-xs font-medium text-foreground truncate">
+                                {/* 单行紧凑展示：状态指示点 + 完整邮箱账号 + 右侧极简操作 */}
+                                <div className="flex items-center justify-between gap-2.5">
+                                  {/* 左侧：指示灯 + 账号邮箱 + (冷却提示) */}
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <span
+                                      className={clsx(
+                                        "w-2 h-2 rounded-full shrink-0",
+                                        !acc.enabled
+                                          ? "bg-zinc-400 dark:bg-zinc-600"
+                                          : isAuthError
+                                          ? "bg-rose-500 ring-2 ring-rose-500/20"
+                                          : isCooldown
+                                          ? "bg-amber-500 ring-2 ring-amber-500/20"
+                                          : "bg-emerald-500 ring-2 ring-emerald-500/20"
+                                      )}
+                                      title={
+                                        !acc.enabled
+                                          ? t('providerEditor.accountDisabled')
+                                          : isAuthError
+                                          ? t('providerEditor.authExpired')
+                                          : isCooldown
+                                          ? t('providerEditor.cooldown', { minutes: cooldownRemaining })
+                                          : t('providerEditor.activeNormal')
+                                      }
+                                    />
+                                    <span
+                                      className={clsx(
+                                        "text-xs font-medium tracking-tight truncate",
+                                        acc.enabled ? "text-foreground" : "text-muted-foreground line-through opacity-75"
+                                      )}
+                                      title={acc.email || acc.id}
+                                    >
                                       {acc.email || (locale === 'zh-CN' ? `账号 ${acc.id.slice(0, 8)}` : `Account ${acc.id.slice(0, 8)}`)}
                                     </span>
-                                    {!acc.enabled ? (
-                                      <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">
-                                        {t('providerEditor.accountDisabled')}
-                                      </span>
-                                    ) : isCooldown ? (
-                                      <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium shrink-0">
+                                    {isCooldown && (
+                                      <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium font-mono shrink-0">
                                         {t('providerEditor.cooldown', { minutes: cooldownRemaining })}
-                                      </span>
-                                    ) : (
-                                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1 shrink-0">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-                                        <span>{t('providerEditor.activeNormal')}</span>
                                       </span>
                                     )}
                                   </div>
 
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleExpandQuota(acc.id)}
-                                      className="h-7 px-2 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 cursor-pointer transition-colors flex items-center gap-1"
-                                      title={isExpanded ? t('providerEditor.collapseQuotaTooltip') : t('providerEditor.viewQuotaTooltip')}
-                                    >
-                                      <span>{isExpanded ? t('providerEditor.collapseQuota') : t('providerEditor.viewQuota')}</span>
-                                      {isExpanded ? (
-                                        <ChevronUp className="w-3 h-3 text-zinc-400" />
-                                      ) : (
-                                        <ChevronDown className="w-3 h-3 text-zinc-400" />
-                                      )}
-                                    </button>
-                                    <div className="w-[1px] h-3.5 bg-border/60 mx-0.5" />
+                                  {/* 右侧：异常时突出重新授权，正常时仅保留查看配额 + 开关 + 删除 */}
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    {isAuthError ? (
+                                      <button
+                                        type="button"
+                                        onClick={isChatGPT ? handleConnectChatGPT : handleConnectGoogle}
+                                        disabled={authorizing}
+                                        className="h-6 px-2 rounded-md text-[11px] font-medium bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60 border border-rose-200 dark:border-rose-900/60 cursor-pointer transition-colors flex items-center gap-1"
+                                        title={t('providerEditor.reauthTooltip')}
+                                      >
+                                        <KeyRound className="w-3 h-3" />
+                                        <span>{t('providerEditor.reauth')}</span>
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleExpandQuota(acc.id)}
+                                        className="h-6 px-2 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 cursor-pointer transition-colors flex items-center gap-1"
+                                        title={isExpanded ? t('providerEditor.collapseQuotaTooltip') : t('providerEditor.viewQuotaTooltip')}
+                                      >
+                                        <span>{isExpanded ? t('providerEditor.collapseQuota') : t('providerEditor.viewQuota')}</span>
+                                        {isExpanded ? (
+                                          <ChevronUp className="w-3 h-3 text-zinc-400" />
+                                        ) : (
+                                          <ChevronDown className="w-3 h-3 text-zinc-400" />
+                                        )}
+                                      </button>
+                                    )}
+
                                     <Switch
                                       checked={acc.enabled}
                                       onCheckedChange={(checked) => handleToggleAccount(acc.id, checked)}
                                       ariaLabel={t('providerEditor.enableAccountAria')}
                                     />
+
                                     <button
                                       type="button"
                                       onClick={() => handleDeleteAccount(acc.id)}
@@ -1541,7 +1583,11 @@ export function ProviderEditor() {
                                       </div>
                                     ) : (
                                       <div className="py-2 text-center text-[10px] text-muted-foreground">
-                                        {t('providerEditor.noQuotaFetched')}
+                                        {quota?.error ? (
+                                          <span className="text-rose-500 dark:text-rose-400 font-medium">{quota.error}</span>
+                                        ) : (
+                                          t('providerEditor.noQuotaFetched')
+                                        )}
                                       </div>
                                     )}
                                   </div>

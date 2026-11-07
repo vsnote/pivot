@@ -237,6 +237,9 @@ export interface TranslationDictionary {
     accountDisabled: string;
     cooldown: string;
     activeNormal: string;
+    authExpired: string;
+    reauth: string;
+    reauthTooltip: string;
     viewQuota: string;
     collapseQuota: string;
     viewQuotaTooltip: string;

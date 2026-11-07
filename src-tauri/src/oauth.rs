@@ -837,7 +837,7 @@ pub async fn consume_chatgpt_reset_credit(
         .map_err(|e| format!("解析重置响应失败: {}", e))
 }
 
-/// 为指定 provider 获取一个可用的订阅账号（自动轮询、检查冷却、自动续期 Token）
+/// 为指定 provider 获取一个可用的订阅账号（自动轮询、检查冷却、自动续期 Token、单账号失败自动转移下一个账号）
 pub async fn acquire_subscription_account(
     db: &crate::db::Database,
     http_client: &reqwest::Client,
@@ -864,43 +864,134 @@ pub async fn acquire_subscription_account(
     }
 
     static SUB_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let idx = SUB_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % available.len();
-    let mut account = available[idx].clone();
+    let start_idx = SUB_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % available.len();
+    let mut last_err = String::new();
 
-    // 检查是否临近过期（剩余不足 5 分钟），自动刷新
-    if account.expires_at - now_sec < 300 {
-        if let Some(ref refresh_token) = account.refresh_token {
-            let refresh_res = if account.account_type == "chatgpt" {
-                refresh_chatgpt_token(http_client, refresh_token).await
-            } else {
-                refresh_antigravity_token(http_client, refresh_token).await
-            };
-            match refresh_res {
-                Ok((new_token, expires_in)) => {
-                    let new_expires_at = now_sec + expires_in;
-                    let _ = db.update_account_tokens(
-                        &account.id,
-                        &new_token,
-                        account.refresh_token.as_deref(),
-                        new_expires_at,
-                    );
-                    account.access_token = new_token;
-                    account.expires_at = new_expires_at;
-                }
-                Err(e) => {
-                    tracing::warn!("刷新订阅账号 {} Token 失败: {}", account.id, e);
-                    if account.expires_at <= now_sec {
-                        return Err((
-                            axum::http::StatusCode::UNAUTHORIZED,
-                            format!("订阅账号 Token 已过期且刷新失败: {}", e),
-                        ));
+    // 循环遍历可用账号，若某个账号刷新失败或已过期，自动尝试池中的下一个账号
+    for i in 0..available.len() {
+        let mut account = available[(start_idx + i) % available.len()].clone();
+        let mut account_valid = true;
+
+        if account.expires_at - now_sec < 300 {
+            if let Some(ref refresh_token) = account.refresh_token {
+                let refresh_res = if account.account_type == "chatgpt" {
+                    refresh_chatgpt_token(http_client, refresh_token).await
+                } else {
+                    refresh_antigravity_token(http_client, refresh_token).await
+                };
+                match refresh_res {
+                    Ok((new_token, expires_in)) => {
+                        let new_expires_at = now_sec + expires_in;
+                        let _ = db.update_account_tokens(
+                            &account.id,
+                            &new_token,
+                            account.refresh_token.as_deref(),
+                            new_expires_at,
+                        );
+                        let _ = db.set_account_cooldown(&account.id, 0);
+                        account.access_token = new_token;
+                        account.expires_at = new_expires_at;
+                        account.cooldown_until = 0;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "刷新订阅账号 {} ({:?}) Token 失败: {}",
+                            account.id,
+                            account.email,
+                            e
+                        );
+                        let is_revoked = e.contains("invalid_grant")
+                            || e.contains("revoked")
+                            || e.contains("expired")
+                            || e.contains("unauthorized");
+                        if is_revoked {
+                            // 授权已被上游撤销或失效，冷却 24 小时避免反复重试
+                            let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
+                        }
+                        if account.expires_at <= now_sec {
+                            account_valid = false;
+                            last_err = format!(
+                                "订阅账号 {} Token 已过期且刷新失败: {}",
+                                account.email.as_deref().unwrap_or(&account.id),
+                                e
+                            );
+                        }
                     }
                 }
+            } else if account.expires_at <= now_sec {
+                account_valid = false;
+                last_err = format!(
+                    "订阅账号 {} Token 已过期且缺少 refresh_token",
+                    account.email.as_deref().unwrap_or(&account.id)
+                );
             }
+        }
+
+        if account_valid {
+            return Ok(account);
         }
     }
 
-    Ok(account)
+    Err((
+        axum::http::StatusCode::UNAUTHORIZED,
+        if last_err.is_empty() {
+            "当前订阅账号池中所有账号 Token 均已过期且无法刷新".to_string()
+        } else {
+            last_err
+        },
+    ))
+}
+
+/// 当上游返回 401 Unauthorized 时，强制尝试使用 refresh_token 刷新账号凭据
+pub async fn try_refresh_subscription_account(
+    db: &crate::db::Database,
+    http_client: &reqwest::Client,
+    account_id: &str,
+) -> Result<crate::db::SubscriptionAccount, String> {
+    let mut account = db
+        .get_subscription_account_by_id(account_id)
+        .map_err(|e| format!("查询账号失败: {}", e))?
+        .ok_or_else(|| "未找到指定账号".to_string())?;
+
+    let refresh_token = account
+        .refresh_token
+        .as_deref()
+        .ok_or_else(|| "该账号无 refresh_token 凭据，无法自动续期".to_string())?;
+
+    let refresh_res = if account.account_type == "chatgpt" {
+        refresh_chatgpt_token(http_client, refresh_token).await
+    } else {
+        refresh_antigravity_token(http_client, refresh_token).await
+    };
+
+    match refresh_res {
+        Ok((new_token, expires_in)) => {
+            let now_sec = chrono::Utc::now().timestamp();
+            let new_expires_at = now_sec + expires_in;
+            let _ = db.update_account_tokens(
+                &account.id,
+                &new_token,
+                account.refresh_token.as_deref(),
+                new_expires_at,
+            );
+            let _ = db.set_account_cooldown(&account.id, 0);
+            account.access_token = new_token;
+            account.expires_at = new_expires_at;
+            account.cooldown_until = 0;
+            Ok(account)
+        }
+        Err(e) => {
+            let is_revoked = e.contains("invalid_grant")
+                || e.contains("revoked")
+                || e.contains("expired")
+                || e.contains("unauthorized");
+            if is_revoked {
+                let now_sec = chrono::Utc::now().timestamp();
+                let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
+            }
+            Err(e)
+        }
+    }
 }
 
 /// 标记账号进入冷却（如遇到 429 速率限制，默认冷却 5 分钟）
