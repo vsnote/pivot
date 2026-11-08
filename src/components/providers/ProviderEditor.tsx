@@ -32,6 +32,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/i18n';
 import type { Preset, Protocol, Provider, SubscriptionAccount, AccountQuota } from '@/types';
 import clsx from 'clsx';
+import { cn } from '@/lib/utils';
 import {
   Select,
   SelectTrigger,
@@ -145,6 +146,88 @@ export function ProviderEditor() {
   const [accountQuotas, setAccountQuotas] = useState<Record<string, AccountQuota>>({});
   const [refreshingQuotaId, setRefreshingQuotaId] = useState<string | null>(null);
   const [expandedQuotaAccounts, setExpandedQuotaAccounts] = useState<Record<string, boolean>>({});
+
+  const [subAccountCounts, setSubAccountCounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchCounts = async () => {
+      const poolProviders = providers.filter(
+        (prov) =>
+          prov.authType === 'subscription_pool' ||
+          prov.presetId === 'antigravity' ||
+          prov.presetId === 'chatgpt_subscription' ||
+          prov.protocol === 'chatgpt',
+      );
+      if (poolProviders.length === 0) return;
+
+      const counts: Record<string, number> = {};
+      await Promise.all(
+        poolProviders.map(async (prov) => {
+          try {
+            const list = await invoke<SubscriptionAccount[]>('get_subscription_accounts', {
+              providerId: prov.id,
+            });
+            counts[prov.id] = list.length;
+          } catch {
+            counts[prov.id] = 1;
+          }
+        }),
+      );
+      if (!cancelled) {
+        setSubAccountCounts(counts);
+      }
+    };
+    fetchCounts();
+    return () => {
+      cancelled = true;
+    };
+  }, [providers]);
+
+  useEffect(() => {
+    if (draft.id && isSubscriptionPool) {
+      setSubAccountCounts((prev) => ({
+        ...prev,
+        [draft.id]: subAccounts.length,
+      }));
+    }
+  }, [draft.id, isSubscriptionPool, subAccounts.length]);
+
+  const getPresetAccountCount = (preset: Preset) => {
+    const matchingProviders = providers.filter(
+      (prov) =>
+        prov.presetId === preset.id ||
+        (prov.authType === 'subscription_pool' &&
+          (prov.presetId === preset.id ||
+            prov.id === preset.id ||
+            prov.name.toLowerCase() === preset.name.toLowerCase())),
+    );
+
+    if (matchingProviders.length === 0) return 0;
+
+    let total = 0;
+    for (const prov of matchingProviders) {
+      const isPool =
+        prov.authType === 'subscription_pool' ||
+        prov.presetId === 'antigravity' ||
+        prov.presetId === 'chatgpt_subscription' ||
+        prov.protocol === 'chatgpt';
+
+      if (isPool) {
+        if (draft.id === prov.id && subAccounts.length > 0) {
+          total += subAccounts.length;
+        } else if (prov.id in subAccountCounts) {
+          total += subAccountCounts[prov.id];
+        } else {
+          total += 1;
+        }
+      } else {
+        const validKeys = (prov.apiKeys || []).filter((k) => k.trim().length > 0).length;
+        total += Math.max(1, validKeys);
+      }
+    }
+    return total;
+  };
 
   const toggleExpandQuota = (accountId: string) => {
     setExpandedQuotaAccounts((prev) => {
@@ -1013,6 +1096,7 @@ export function ProviderEditor() {
                     const cleanName = p.name.replace(/[\(（][^\)）]+[\)）]/g, '').trim();
                     const isSub = p.authType === 'subscription_pool' || p.category === '官方订阅';
                     const existingSub = isSub ? findExistingProviderForPreset(p) : undefined;
+                    const accountCount = existingSub ? getPresetAccountCount(p) : 0;
                     return (
                       <button
                         key={p.id}
@@ -1034,10 +1118,22 @@ export function ProviderEditor() {
                         </div>
                         {existingSub ? (
                           <Badge
-                            variant="secondary"
-                            className="text-[10px] px-1.5 py-0.5 font-normal shrink-0 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20"
+                            variant={accountCount > 0 ? 'success' : 'secondary'}
+                            className={cn(
+                              'h-4.5 min-w-4.5 px-1.5 py-0 text-[10px] font-mono font-medium shrink-0 flex items-center justify-center rounded-full tabular-nums',
+                              accountCount === 0 && 'text-zinc-500 dark:text-zinc-400 bg-zinc-500/10 border-zinc-500/20'
+                            )}
+                            title={
+                              accountCount > 0
+                                ? locale === 'zh-CN'
+                                  ? `已添加 ${accountCount} 个账号`
+                                  : `${accountCount} account${accountCount > 1 ? 's' : ''} added`
+                                : locale === 'zh-CN'
+                                  ? '已添加服务商，尚未绑定账号'
+                                  : 'Provider added, no accounts bound'
+                            }
                           >
-                            {locale === 'zh-CN' ? '已添加' : 'Added'}
+                            {accountCount}
                           </Badge>
                         ) : isSub ? (
                           <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 font-normal shrink-0">
