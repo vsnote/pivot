@@ -10,6 +10,7 @@ import {
   ClaudeLogo,
   GeminiLogo,
   PiLogo,
+  OpenCodeLogo,
 } from '@/components/common/BrandIcons';
 import { estimateCost, formatCurrency, formatTokens } from '@/utils/pricing';
 import type { RequestLog, ClientType } from '@/types';
@@ -27,9 +28,32 @@ import {
   CheckCircle2,
   AlertTriangle,
   Trash2,
+  Coins,
 } from 'lucide-react';
 
 type TimeRange = 'all' | 'today' | '1h';
+type SortMetric = 'count' | 'cost';
+
+const PROVIDER_COLORS = [
+  '#3b82f6', // blue
+  '#8b5cf6', // violet
+  '#10b981', // emerald
+  '#f59e0b', // amber
+  '#06b6d4', // cyan
+  '#ec4899', // pink
+  '#6366f1', // indigo
+];
+
+const CLIENT_COLORS: Record<string, string> = {
+  claude_code: '#8b5cf6', // violet
+  anthropic_api: '#8b5cf6',
+  codex_cli: '#0ea5e9', // sky
+  openai_api: '#10b981', // emerald
+  gemini_cli: '#3b82f6', // blue
+  pi: '#f97316', // orange
+  opencode: '#6366f1', // indigo
+  generic: '#71717a', // zinc
+};
 
 function formatClientType(type: string, t: (k: string) => string): string {
   switch (type) {
@@ -41,6 +65,8 @@ function formatClientType(type: string, t: (k: string) => string): string {
       return t('dashboard.charts.clientTypes.gemini_cli');
     case 'pi':
       return t('dashboard.charts.clientTypes.pi');
+    case 'opencode':
+      return t('dashboard.charts.clientTypes.opencode');
     case 'openai_api':
       return t('dashboard.charts.clientTypes.openai_api');
     case 'anthropic_api':
@@ -64,6 +90,8 @@ function ClientLogo({ type, className = 'w-4 h-4' }: { type: ClientType | string
       return <GeminiLogo className={className} />;
     case 'pi':
       return <PiLogo className={className} />;
+    case 'opencode':
+      return <OpenCodeLogo className={className} />;
     default:
       return <Terminal className={className} />;
   }
@@ -119,10 +147,55 @@ function formatUptime(secs: number, t: (k: string, p?: Record<string, string | n
   return t('dashboard.charts.uptimeFormats.seconds', { seconds: secs });
 }
 
+function formatLatency(ms: number): { value: string; unit: string } {
+  if (!ms || ms <= 0) return { value: '0', unit: 'ms' };
+  if (ms < 1000) return { value: Math.round(ms).toString(), unit: 'ms' };
+  if (ms < 60000) return { value: (ms / 1000).toFixed(1), unit: 's' };
+  return { value: (ms / 60000).toFixed(1), unit: 'min' };
+}
+
+function parseModelDisplay(rawModel: string, targetModel?: string): {
+  displayName: string;
+  namespace?: string;
+  targetDisplay?: string;
+} {
+  const slashIndex = rawModel.indexOf('/');
+  let namespace: string | undefined;
+  let displayName = rawModel;
+  if (slashIndex > 0) {
+    namespace = rawModel.slice(0, slashIndex);
+    displayName = rawModel.slice(slashIndex + 1);
+  }
+  let targetDisplay: string | undefined;
+  if (targetModel && targetModel !== rawModel && targetModel !== displayName) {
+    const tSlash = targetModel.indexOf('/');
+    targetDisplay = tSlash > 0 ? targetModel.slice(tSlash + 1) : targetModel;
+  }
+  return { displayName, namespace, targetDisplay };
+}
+
+function renderSuccessRateBadge(rate: number, count: number, locale: string) {
+  if (count === 0 || rate >= 98) return null;
+  if (rate >= 80) {
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-mono font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 border border-amber-500/25 shrink-0">
+        {rate}% {locale === 'zh-CN' ? '成功' : 'success'}
+      </span>
+    );
+  }
+  return (
+    <Badge variant="destructive" className="text-[10px] py-0 px-1 font-mono shrink-0">
+      {rate}% {locale === 'zh-CN' ? '成功' : 'success'}
+    </Badge>
+  );
+}
+
 export const UsageDashboard: React.FC = () => {
   const { t, locale } = useTranslation();
   const { logs, stats, providers, clearLogs } = useAppStore();
   const [timeRange, setTimeRange] = useState<TimeRange>('all');
+  const [providerSort, setProviderSort] = useState<SortMetric>('count');
+  const [modelSort, setModelSort] = useState<SortMetric>('count');
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [clearingLogs, setClearingLogs] = useState(false);
 
@@ -341,13 +414,8 @@ export const UsageDashboard: React.FC = () => {
     const streamRatio = totalRequests > 0 ? Math.round((streamCount / totalRequests) * 100) : 0;
     const fallbackRatio = totalRequests > 0 ? Math.round((fallbackCount / totalRequests) * 100) : 0;
 
-    // 排序服务商列表 (按调用次数降序)
-    const providerList = Object.values(providerMap).sort((a, b) => b.count - a.count);
-
-    // 排序模型排行 (按调用次数降序)
-    const modelList = Object.values(modelMap).sort((a, b) => b.count - a.count);
-
-    // 排序客户端列表 (按调用次数降序)
+    const providerList = Object.values(providerMap);
+    const modelList = Object.values(modelMap);
     const clientList = Object.values(clientMap).sort((a, b) => b.count - a.count);
 
     // 错误分类诊断列表 (按频次降序)
@@ -379,61 +447,88 @@ export const UsageDashboard: React.FC = () => {
     };
   }, [filteredLogs, timeRange, stats, providers, logs.length, t, locale]);
 
+  // 根据当前排序维度动态对服务商列表排序
+  const sortedProviders = useMemo(() => {
+    return [...metrics.providerList].sort((a, b) =>
+      providerSort === 'cost' ? b.cost - a.cost : b.count - a.count
+    );
+  }, [metrics.providerList, providerSort]);
+
+  // 根据当前排序维度动态对模型列表排序
+  const sortedModels = useMemo(() => {
+    return [...metrics.modelList].sort((a, b) =>
+      modelSort === 'cost' ? b.cost - a.cost : b.count - a.count
+    );
+  }, [metrics.modelList, modelSort]);
+
+  // 服务商全宽分段比例条计算
+  const providerSegments = useMemo(() => {
+    const isCost = providerSort === 'cost';
+    const totalVal = isCost ? metrics.totalCost : metrics.totalRequests;
+
+    return sortedProviders.map((p, index) => {
+      const val = isCost ? p.cost : p.count;
+      const share = totalVal > 0 ? Math.round((val / totalVal) * 100) : 0;
+      return {
+        id: p.id,
+        name: p.name,
+        color: PROVIDER_COLORS[index % PROVIDER_COLORS.length],
+        share,
+        val,
+      };
+    });
+  }, [sortedProviders, providerSort, metrics.totalCost, metrics.totalRequests]);
+
+  // 客户端分段比例条计算
+  const clientSegments = useMemo(() => {
+    const totalReq = metrics.totalRequests;
+    return metrics.clientList.map((c) => {
+      const share = totalReq > 0 ? Math.round((c.count / totalReq) * 100) : 0;
+      const color = CLIENT_COLORS[c.type] || '#71717a';
+      return {
+        ...c,
+        share,
+        color,
+      };
+    });
+  }, [metrics.clientList, metrics.totalRequests]);
+
   const maxHourlyCount = useMemo(() => {
     return Math.max(1, ...metrics.hourlyCounts);
   }, [metrics.hourlyCounts]);
 
+  const latencyFormatted = useMemo(() => {
+    return formatLatency(metrics.avgLatency);
+  }, [metrics.avgLatency]);
+
   return (
-    <div className="w-full pb-10 space-y-4 animate-in fade-in duration-150">
-      {/* 顶部控制栏：标题与状态微徽章、时间跨度切换 */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-2">
-            <span className="text-base font-bold text-zinc-900 dark:text-zinc-100">
-              {t('header.logs')}
-            </span>
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-mono bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-border">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  stats.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'
-                }`}
-              />
-              <span>
-                {stats.isRunning ? `127.0.0.1:${stats.port}` : (locale === 'zh-CN' ? '网关未启动' : 'Gateway Stopped')}
-              </span>
-              {stats.isRunning && stats.uptimeSecs > 0 && (
-                <>
-                  <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                  <span className="text-[10px] text-zinc-400">{formatUptime(stats.uptimeSecs, t)}</span>
-                </>
-              )}
-            </div>
-          </div>
+    <div className="w-full pb-8 space-y-3.5 animate-in fade-in duration-150">
+      {/* 顶部控制栏：微胶囊状态与紧凑筛选器 */}
+      <div className="flex items-center justify-between gap-2 px-0.5">
+        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-mono bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-400 border border-border truncate min-w-0">
+          <span
+            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+              stats.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'
+            }`}
+          />
+          <span className="truncate">
+            {stats.isRunning ? `127.0.0.1:${stats.port}` : (locale === 'zh-CN' ? '网关未启动' : 'Gateway Stopped')}
+          </span>
+          {stats.isRunning && stats.uptimeSecs > 0 && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-600">·</span>
+              <span className="text-[10px] text-zinc-400 shrink-0">{formatUptime(stats.uptimeSecs, t)}</span>
+            </>
+          )}
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* 清空日志按钮 */}
-          {logs.length > 0 && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={clearingLogs}
-              onClick={() => setShowClearConfirm(true)}
-              className="h-7 px-2 text-xs text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
-              title={t('dashboard.metrics.clearLogs')}
-            >
-              <Trash2 className="w-3.5 h-3.5 mr-1" />
-              <span>{t('dashboard.metrics.clearLogs')}</span>
-            </Button>
-          )}
-
-          {/* 时间范围切换 */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* 精简时间范围切换：全部 / 今天 / 1 小时 */}
           <div className="flex items-center rounded-lg bg-zinc-500/[0.07] dark:bg-white/[0.07] p-0.5 border border-border text-xs">
             <button
               type="button"
               onClick={() => setTimeRange('all')}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
+              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border border-transparent transition-all duration-150 cursor-pointer outline-none ${
                 timeRange === 'all'
                   ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                   : 'text-muted-foreground hover:text-foreground'
@@ -444,7 +539,7 @@ export const UsageDashboard: React.FC = () => {
             <button
               type="button"
               onClick={() => setTimeRange('today')}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
+              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border border-transparent transition-all duration-150 cursor-pointer outline-none ${
                 timeRange === 'today'
                   ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                   : 'text-muted-foreground hover:text-foreground'
@@ -455,7 +550,7 @@ export const UsageDashboard: React.FC = () => {
             <button
               type="button"
               onClick={() => setTimeRange('1h')}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
+              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border border-transparent transition-all duration-150 cursor-pointer outline-none ${
                 timeRange === '1h'
                   ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
                   : 'text-muted-foreground hover:text-foreground'
@@ -464,6 +559,21 @@ export const UsageDashboard: React.FC = () => {
               {t('dashboard.timeRange.oneHour')}
             </button>
           </div>
+
+          {/* 清空日志按钮 */}
+          {logs.length > 0 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={clearingLogs}
+              onClick={() => setShowClearConfirm(true)}
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+              title={t('dashboard.metrics.clearLogs')}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -484,266 +594,370 @@ export const UsageDashboard: React.FC = () => {
         </div>
       ) : (
         <>
-          {/* 1. 核心关键指标卡片 (4 列栅格) */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            {/* 卡片 1: 总请求数 */}
-            <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
-              <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">{t('dashboard.metrics.totalRequests')}</span>
-                <Activity className="w-4 h-4 text-primary" />
-              </div>
-              <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-2xl font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
-                  {metrics.totalRequests.toLocaleString()}
-                </span>
-                <span className="text-xs text-zinc-400">{locale === 'zh-CN' ? '次' : 'reqs'}</span>
-              </div>
-              <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60">
-                <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
-                  <CheckCircle2 className="w-3 h-3" />
-                  {metrics.successRate.toFixed(1)}% {locale === 'zh-CN' ? '成功' : 'success'}
-                </span>
-                {metrics.errorCount > 0 ? (
-                  <span className="text-rose-500 font-medium">
-                    {metrics.errorCount} {locale === 'zh-CN' ? '次失败' : 'failed'}
+          {/* 1. 核心关键指标栏 (超紧凑单行 4 列集成条) */}
+          <div className="rounded-lg border border-border bg-card p-2 sm:p-2.5 shadow-2xs">
+            <div className="grid grid-cols-4 divide-x divide-border/60">
+              {/* 单元 1: 请求数 */}
+              <div className="px-1.5 sm:px-2.5 flex flex-col justify-between min-w-0">
+                <div className="flex items-center justify-between text-zinc-400 gap-1">
+                  <span className="text-[10px] font-medium truncate">
+                    {locale === 'zh-CN' ? '总请求' : 'Requests'}
                   </span>
-                ) : (
-                  <span className="text-zinc-400">0 {locale === 'zh-CN' ? '错误' : 'errors'}</span>
-                )}
-              </div>
-            </div>
-
-            {/* 卡片 2: Token 消耗 */}
-            <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
-              <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">{t('dashboard.metrics.totalTokens')}</span>
-                <Layers className="w-4 h-4 text-blue-500" />
-              </div>
-              <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-2xl font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
-                  {formatTokens(metrics.totalTokens)}
-                </span>
-                <span className="text-xs text-zinc-400">tokens</span>
-              </div>
-              <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60 text-zinc-400">
-                <span>{locale === 'zh-CN' ? '入' : 'In'} {formatTokens(metrics.promptTokens)}</span>
-                <span className="text-zinc-300 dark:text-zinc-600">/</span>
-                <span>{locale === 'zh-CN' ? '出' : 'Out'} {formatTokens(metrics.completionTokens)}</span>
-              </div>
-            </div>
-
-            {/* 卡片 3: 预估花费 */}
-            <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
-              <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">{t('dashboard.metrics.estimatedCost')}</span>
-                <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                  USD
-                </span>
-              </div>
-              <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-2xl font-mono font-bold tracking-tight text-emerald-600 dark:text-emerald-400">
-                  {formatCurrency(metrics.totalCost)}
-                </span>
-              </div>
-              <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60 text-zinc-400">
-                <span>{locale === 'zh-CN' ? '均次' : 'Avg'} {formatCurrency(metrics.avgCostPerReq)}</span>
-                <span className="text-[10px] text-zinc-400">{locale === 'zh-CN' ? '官方标准' : 'Official rate'}</span>
-              </div>
-            </div>
-
-            {/* 卡片 4: 性能与流式 */}
-            <div className="rounded-lg border border-border bg-card p-3.5 shadow-2xs flex flex-col justify-between">
-              <div className="flex items-center justify-between text-zinc-400">
-                <span className="text-[11px] font-medium">{t('dashboard.metrics.avgLatency')}</span>
-                <Clock className="w-4 h-4 text-amber-500" />
-              </div>
-              <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-2xl font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
-                  {metrics.avgLatency}
-                </span>
-                <span className="text-xs text-zinc-400">ms</span>
-              </div>
-              <div className="mt-2.5 flex items-center justify-between text-[11px] pt-2 border-t border-border/60 text-zinc-400">
-                <span className="flex items-center gap-1">
-                  <Zap className="w-3 h-3 text-amber-500" />
-                  {metrics.streamRatio}% {locale === 'zh-CN' ? '流式' : 'stream'}
-                </span>
-                {metrics.fallbackRatio > 0 && (
-                  <span className="text-amber-600 dark:text-amber-400">
-                    {metrics.fallbackRatio}% {locale === 'zh-CN' ? '兜底' : 'fallback'}
+                  <Activity className="w-3 h-3 text-primary shrink-0 opacity-80" />
+                </div>
+                <div className="my-0.5 flex items-baseline gap-1 truncate">
+                  <span className="text-sm sm:text-base font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
+                    {metrics.totalRequests.toLocaleString()}
                   </span>
-                )}
+                  <span className="text-[10px] text-zinc-400 font-mono hidden sm:inline">
+                    {locale === 'zh-CN' ? '次' : 'reqs'}
+                  </span>
+                </div>
+                <div className="text-[10px] font-mono truncate">
+                  {metrics.errorCount > 0 ? (
+                    <span className="text-rose-500 font-medium truncate">
+                      {metrics.successRate.toFixed(0)}% · {metrics.errorCount}{locale === 'zh-CN' ? '败' : 'err'}
+                    </span>
+                  ) : (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-0.5 truncate">
+                      <CheckCircle2 className="w-2.5 h-2.5 shrink-0" />
+                      100%
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 单元 2: Token 消耗 */}
+              <div className="px-1.5 sm:px-2.5 flex flex-col justify-between min-w-0">
+                <div className="flex items-center justify-between text-zinc-400 gap-1">
+                  <span className="text-[10px] font-medium truncate">
+                    {locale === 'zh-CN' ? '总 Token' : 'Tokens'}
+                  </span>
+                  <Layers className="w-3 h-3 text-blue-500 shrink-0 opacity-80" />
+                </div>
+                <div className="my-0.5 truncate">
+                  <span className="text-sm sm:text-base font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
+                    {formatTokens(metrics.totalTokens)}
+                  </span>
+                </div>
+                <div className="text-[9px] text-zinc-400 font-mono truncate">
+                  ↑{formatTokens(metrics.promptTokens)} · ↓{formatTokens(metrics.completionTokens)}
+                </div>
+              </div>
+
+              {/* 单元 3: 预估花费 */}
+              <div className="px-1.5 sm:px-2.5 flex flex-col justify-between min-w-0">
+                <div className="flex items-center justify-between text-zinc-400 gap-1">
+                  <span className="text-[10px] font-medium truncate">
+                    {locale === 'zh-CN' ? '预估费用' : 'Cost'}
+                  </span>
+                  <Coins className="w-3 h-3 text-zinc-400 shrink-0 opacity-80" />
+                </div>
+                <div className="my-0.5 truncate">
+                  <span className="text-sm sm:text-base font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
+                    {formatCurrency(metrics.totalCost)}
+                  </span>
+                </div>
+                <div className="text-[10px] text-zinc-400 font-mono truncate">
+                  {locale === 'zh-CN' ? '均' : 'avg'} {formatCurrency(metrics.avgCostPerReq)}
+                </div>
+              </div>
+
+              {/* 单元 4: 平均耗时 */}
+              <div className="px-1.5 sm:px-2.5 flex flex-col justify-between min-w-0">
+                <div className="flex items-center justify-between text-zinc-400 gap-1">
+                  <span className="text-[10px] font-medium truncate">
+                    {locale === 'zh-CN' ? '平均延迟' : 'Latency'}
+                  </span>
+                  <Clock className="w-3 h-3 text-amber-500 shrink-0 opacity-80" />
+                </div>
+                <div className="my-0.5 flex items-baseline gap-0.5 truncate">
+                  <span className="text-sm sm:text-base font-mono font-bold tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
+                    {latencyFormatted.value}
+                  </span>
+                  <span className="text-[10px] text-zinc-400 font-mono">{latencyFormatted.unit}</span>
+                </div>
+                <div className="text-[10px] text-zinc-400 font-mono truncate flex items-center gap-0.5">
+                  <Zap className="w-2.5 h-2.5 text-amber-500 shrink-0" />
+                  <span>{metrics.streamRatio}% {locale === 'zh-CN' ? '流式' : 'stream'}</span>
+                </div>
               </div>
             </div>
           </div>
 
-          {/* 2. 中层：服务商调用分布与模型排行 (双列网格) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* 左列：服务商调用与消耗分布 */}
-            <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden">
-              <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
-                  <Server className="w-3.5 h-3.5 text-zinc-500" />
-                  <span>{t('dashboard.charts.providerDistribution')}</span>
+          {/* 2. 中层：服务商占比 & 热门模型横向条形排行榜 (双列网格) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+            {/* 左列：服务商分发 (全宽分段条 + 紧凑行内数据) */}
+            <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden flex flex-col justify-between">
+              <div>
+                <div className="px-3.5 py-2 bg-muted/20 border-b border-border flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
+                    <Server className="w-3.5 h-3.5 text-zinc-500" />
+                    <span>{t('dashboard.charts.providerDistribution')}</span>
+                  </div>
+                  {/* 维度切换 */}
+                  <div className="flex items-center gap-0.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] p-0.5 rounded-md text-[10px] font-medium border border-border/50">
+                    <button
+                      type="button"
+                      onClick={() => setProviderSort('count')}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
+                        providerSort === 'count'
+                          ? 'bg-background text-foreground shadow-2xs font-semibold'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('dashboard.charts.sortByRequests')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setProviderSort('cost')}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
+                        providerSort === 'cost'
+                          ? 'bg-background text-foreground shadow-2xs font-semibold'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('dashboard.charts.sortByCost')}
+                    </button>
+                  </div>
                 </div>
-                <span className="text-[11px] font-mono text-zinc-400">
-                  {metrics.providerList.length} {locale === 'zh-CN' ? '家服务商' : 'providers'}
-                </span>
-              </div>
 
-              <div className="p-3 divide-y divide-border/60">
-                {metrics.providerList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">{locale === 'zh-CN' ? '暂无服务商调用记录' : 'No provider records'}</div>
-                ) : (
-                  metrics.providerList.map((p) => {
-                    const reqShare =
-                      metrics.totalRequests > 0
-                        ? Math.round((p.count / metrics.totalRequests) * 100)
-                        : 0;
-                    const pSuccessRate =
-                      p.count > 0 ? Math.round((p.successCount / p.count) * 100) : 100;
-                    const pAvgLat = p.count > 0 ? Math.round(p.latencySum / p.count) : 0;
-
-                    return (
-                      <div key={p.id} className="py-2.5 first:pt-1 last:pb-1 space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <ProviderAvatar
-                              name={p.name}
-                              protocol={p.protocol}
-                              sizeClass="w-6 h-6"
-                              dense
-                            />
-                            <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                              {p.name}
-                            </span>
-                            {pSuccessRate < 90 && (
-                              <Badge variant="destructive" className="text-[9px] py-0 px-1">
-                                {pSuccessRate}% {locale === 'zh-CN' ? '成功' : 'success'}
-                              </Badge>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2.5 shrink-0 text-xs font-mono">
-                            <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                              {p.count} {locale === 'zh-CN' ? '次' : 'reqs'}
-                            </span>
-                            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                              ({reqShare}%)
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* 占比进度条 */}
-                        <div className="w-full h-1.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] rounded-full overflow-hidden">
+                <div className="p-3 space-y-2.5">
+                  {sortedProviders.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-zinc-400">
+                      {locale === 'zh-CN' ? '暂无服务商调用记录' : 'No provider records'}
+                    </div>
+                  ) : (
+                    <>
+                      {/* 全宽分段比例条 (Stacked Segment Bar) */}
+                      <div className="w-full h-2 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden gap-[1px]">
+                        {providerSegments.map((seg) => (
                           <div
-                            className="h-full bg-primary rounded-full transition-all duration-300"
-                            style={{ width: `${Math.max(2, reqShare)}%` }}
+                            key={seg.id}
+                            className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
+                            style={{
+                              width: `${Math.max(1.5, seg.share)}%`,
+                              backgroundColor: seg.color,
+                            }}
+                            title={`${seg.name}: ${seg.share}%`}
                           />
-                        </div>
-
-                        {/* 次级指标: Token · 费用 · 延迟 */}
-                        <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-                          <span>
-                            {formatTokens(p.totalTokens)} tok
-                          </span>
-                          <div className="flex items-center gap-2">
-                            <span>{pAvgLat} ms</span>
-                            <span>·</span>
-                            <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                              {formatCurrency(p.cost)}
-                            </span>
-                          </div>
-                        </div>
+                        ))}
                       </div>
-                    );
-                  })
-                )}
+
+                      {/* 服务商列表项 */}
+                      <div className="divide-y divide-border/50">
+                        {sortedProviders.map((p, index) => {
+                          const isCost = providerSort === 'cost';
+                          const share = isCost
+                            ? (metrics.totalCost > 0 ? Math.round((p.cost / metrics.totalCost) * 100) : 0)
+                            : (metrics.totalRequests > 0 ? Math.round((p.count / metrics.totalRequests) * 100) : 0);
+
+                          const pSuccessRate =
+                            p.count > 0 ? Math.round((p.successCount / p.count) * 100) : 100;
+                          const pAvgLat = p.count > 0 ? Math.round(p.latencySum / p.count) : 0;
+                          const latFmt = formatLatency(pAvgLat);
+                          const color = PROVIDER_COLORS[index % PROVIDER_COLORS.length];
+
+                          return (
+                            <div key={p.id} className="py-1.5 first:pt-0 last:pb-0 space-y-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span
+                                    className="w-2 h-2 rounded-full shrink-0"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                  <ProviderAvatar
+                                    name={p.name}
+                                    protocol={p.protocol}
+                                    sizeClass="w-4 h-4"
+                                    dense
+                                  />
+                                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                                    {p.name}
+                                  </span>
+                                  {renderSuccessRateBadge(pSuccessRate, p.count, locale)}
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0 text-xs font-mono">
+                                  <span className="font-bold text-zinc-900 dark:text-zinc-100">
+                                    {isCost ? formatCurrency(p.cost) : `${p.count} ${locale === 'zh-CN' ? '次' : 'reqs'}`}
+                                  </span>
+                                  <span className="text-[11px] text-zinc-400 font-normal">
+                                    ({share}%)
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono pl-3.5">
+                                <span>{formatTokens(p.totalTokens)} tok</span>
+                                <div className="flex items-center gap-1.5">
+                                  <span>{latFmt.value} {latFmt.unit}</span>
+                                  <span>·</span>
+                                  {isCost ? (
+                                    <span className="text-zinc-500 dark:text-zinc-400">
+                                      {p.count} {locale === 'zh-CN' ? '次' : 'reqs'}
+                                    </span>
+                                  ) : (
+                                    <span className="text-zinc-700 dark:text-zinc-300 font-medium">
+                                      {formatCurrency(p.cost)}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
-            {/* 右列：热门模型消耗排行 */}
-            <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden">
-              <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
-                  <Sparkles className="w-3.5 h-3.5 text-zinc-500" />
-                  <span>{t('dashboard.charts.modelDistribution')}</span>
+            {/* 右列：热门模型横向条形排行榜 (Horizontal Bar Chart) */}
+            <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden flex flex-col justify-between">
+              <div>
+                <div className="px-3.5 py-2 bg-muted/20 border-b border-border flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
+                    <Sparkles className="w-3.5 h-3.5 text-zinc-500" />
+                    <span>{t('dashboard.charts.modelDistribution')}</span>
+                    <span className="text-[11px] font-mono text-zinc-400 font-normal">
+                      (Top {Math.min(5, sortedModels.length)})
+                    </span>
+                  </div>
+                  {/* 维度切换 */}
+                  <div className="flex items-center gap-0.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] p-0.5 rounded-md text-[10px] font-medium border border-border/50">
+                    <button
+                      type="button"
+                      onClick={() => setModelSort('count')}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
+                        modelSort === 'count'
+                          ? 'bg-background text-foreground shadow-2xs font-semibold'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('dashboard.charts.sortByRequests')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setModelSort('cost')}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
+                        modelSort === 'cost'
+                          ? 'bg-background text-foreground shadow-2xs font-semibold'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('dashboard.charts.sortByCost')}
+                    </button>
+                  </div>
                 </div>
-                <span className="text-[11px] font-mono text-zinc-400">
-                  Top {Math.min(5, metrics.modelList.length)}
-                </span>
-              </div>
 
-              <div className="p-3 divide-y divide-border/60">
-                {metrics.modelList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">{locale === 'zh-CN' ? '暂无模型调用数据' : 'No model usage data'}</div>
-                ) : (
-                  metrics.modelList.slice(0, 6).map((m, index) => {
-                    const mShare =
-                      metrics.totalRequests > 0
-                        ? Math.round((m.count / metrics.totalRequests) * 100)
-                        : 0;
+                <div className="p-3 space-y-2">
+                  {sortedModels.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-zinc-400">
+                      {locale === 'zh-CN' ? '暂无模型调用数据' : 'No model usage data'}
+                    </div>
+                  ) : (
+                    sortedModels.slice(0, 5).map((m, index) => {
+                      const isCost = modelSort === 'cost';
+                      const mShare = isCost
+                        ? (metrics.totalCost > 0 ? Math.round((m.cost / metrics.totalCost) * 100) : 0)
+                        : (metrics.totalRequests > 0 ? Math.round((m.count / metrics.totalRequests) * 100) : 0);
 
-                    return (
-                      <div key={m.model} className="py-2.5 first:pt-1 last:pb-1 space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="w-4 text-[11px] font-mono font-bold text-zinc-400">
-                              #{index + 1}
-                            </span>
-                            <span
-                              className="text-xs font-mono font-semibold text-zinc-900 dark:text-zinc-100 truncate max-w-[210px]"
-                              title={m.model}
-                            >
-                              {m.model}
-                            </span>
-                            {m.targetModel && m.targetModel !== m.model && (
+                      const parsed = parseModelDisplay(m.model, m.targetModel);
+
+                      // 排名微样式：优雅的纯净质感
+                      const rankBadgeClass =
+                        index === 0
+                          ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                          : index === 1
+                          ? 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-300 border border-zinc-500/30'
+                          : index === 2
+                          ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400 border border-orange-500/30'
+                          : 'bg-zinc-500/10 text-zinc-400';
+
+                      return (
+                        <div key={m.model} className="space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
                               <span
-                                className="text-[10px] font-mono text-zinc-400 truncate max-w-[110px]"
-                                title={`${locale === 'zh-CN' ? '映射至' : 'Mapped to'}: ${m.targetModel}`}
+                                className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-mono font-bold shrink-0 ${rankBadgeClass}`}
                               >
-                                → {m.targetModel}
+                                {index + 1}
                               </span>
-                            )}
+                              {parsed.namespace && (
+                                <span
+                                  className="text-[10px] font-mono px-1 py-0.2 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-500 dark:text-zinc-400 shrink-0"
+                                  title={`${locale === 'zh-CN' ? '命名空间' : 'Namespace'}: ${parsed.namespace}`}
+                                >
+                                  {parsed.namespace}
+                                </span>
+                              )}
+                              <span
+                                className="text-xs font-mono font-semibold text-zinc-900 dark:text-zinc-100 truncate"
+                                title={m.model}
+                              >
+                                {parsed.displayName}
+                              </span>
+                              {parsed.targetDisplay && (
+                                <span
+                                  className="text-[10px] font-mono text-zinc-400 truncate shrink-0"
+                                  title={`${locale === 'zh-CN' ? '目标模型' : 'Target Model'}: ${m.targetModel}`}
+                                >
+                                  → {parsed.targetDisplay}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0 text-xs font-mono">
+                              <span className="font-bold text-zinc-900 dark:text-zinc-100">
+                                {isCost ? formatCurrency(m.cost) : `${m.count} ${locale === 'zh-CN' ? '次' : 'reqs'}`}
+                              </span>
+                              <span className="text-[11px] text-zinc-400 font-normal">({mShare}%)</span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 shrink-0 text-xs font-mono">
-                            <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                              {m.count} {locale === 'zh-CN' ? '次' : 'reqs'}
+
+                          {/* 横向柱形图 (Bar Chart) */}
+                          <div className="w-full h-1.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-300"
+                              style={{ width: `${Math.max(2, mShare)}%` }}
+                            />
+                          </div>
+
+                          {/* 细分指标 */}
+                          <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+                            <span className="truncate mr-2">
+                              {formatTokens(m.totalTokens)} tok
+                              <span className="text-zinc-400 dark:text-zinc-500 ml-1.5">
+                                (↑{formatTokens(m.promptTokens)} · ↓{formatTokens(m.completionTokens)})
+                              </span>
                             </span>
-                            <span className="text-[11px] text-zinc-400">({mShare}%)</span>
+                            <div className="shrink-0">
+                              {isCost ? (
+                                <span className="text-zinc-500 dark:text-zinc-400">
+                                  {m.count} {locale === 'zh-CN' ? '次' : 'reqs'}
+                                </span>
+                              ) : (
+                                <span className="text-zinc-700 dark:text-zinc-300 font-medium">
+                                  {formatCurrency(m.cost)}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
-
-                        {/* 占比条 */}
-                        <div className="w-full h-1.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-blue-500 dark:bg-blue-400 rounded-full transition-all duration-300"
-                            style={{ width: `${Math.max(2, mShare)}%` }}
-                          />
-                        </div>
-
-                        {/* 细分指标 */}
-                        <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-                          <span>
-                            {formatTokens(m.totalTokens)} tok ({formatTokens(m.promptTokens)} {locale === 'zh-CN' ? '入' : 'in'} / {formatTokens(m.completionTokens)} {locale === 'zh-CN' ? '出' : 'out'})
-                          </span>
-                          <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                            {formatCurrency(m.cost)}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
+                      );
+                    })
+                  )}
+                </div>
               </div>
             </div>
           </div>
 
-          {/* 3. 下层：客户端来源分布 & 稳定性与异常诊断 (双列网格) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* 左列：客户端接入统计 */}
+          {/* 3. 下层：客户端调用分段比例图 & 链路稳定性与异常诊断 (双列网格) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+            {/* 左列：客户端接入统计 (带分段比例图) */}
             <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden">
-              <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
+              <div className="px-3.5 py-2 bg-muted/20 border-b border-border flex items-center justify-between text-xs">
+                <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
                   <Terminal className="w-3.5 h-3.5 text-zinc-500" />
                   <span>{t('dashboard.charts.clientDistribution')}</span>
                 </div>
@@ -752,59 +966,71 @@ export const UsageDashboard: React.FC = () => {
                 </span>
               </div>
 
-              <div className="p-3 divide-y divide-border/60">
+              <div className="p-3 space-y-2.5">
                 {metrics.clientList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">{locale === 'zh-CN' ? '暂无客户端请求' : 'No client requests'}</div>
+                  <div className="p-6 text-center text-xs text-zinc-400">
+                    {locale === 'zh-CN' ? '暂无客户端请求' : 'No client requests'}
+                  </div>
                 ) : (
-                  metrics.clientList.map((c) => {
-                    const cShare =
-                      metrics.totalRequests > 0
-                        ? Math.round((c.count / metrics.totalRequests) * 100)
-                        : 0;
+                  <>
+                    {/* 客户端分段比例条 (Stacked Segment Bar) */}
+                    <div className="w-full h-2 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden gap-[1px]">
+                      {clientSegments.map((c) => (
+                        <div
+                          key={c.type}
+                          className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
+                          style={{
+                            width: `${c.share}%`,
+                            backgroundColor: c.color,
+                          }}
+                          title={`${formatClientType(c.type, t)}: ${c.share}%`}
+                        />
+                      ))}
+                    </div>
 
-                    return (
-                      <div key={c.type} className="py-2.5 first:pt-1 last:pb-1 space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <div className="w-5 h-5 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] flex items-center justify-center p-0.5 shrink-0">
-                              <ClientLogo type={c.type} className="w-3.5 h-3.5" />
+                    {/* 客户端条目列表 */}
+                    <div className="divide-y divide-border/50">
+                      {clientSegments.map((c) => (
+                        <div key={c.type} className="py-1.5 first:pt-0 last:pb-0 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className="w-2 h-2 rounded-full shrink-0"
+                                style={{ backgroundColor: c.color }}
+                              />
+                              <div className="w-4 h-4 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] flex items-center justify-center p-0.5 shrink-0">
+                                <ClientLogo type={c.type} className="w-3 h-3" />
+                              </div>
+                              <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                                {formatClientType(c.type, t)}
+                              </span>
                             </div>
-                            <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                              {formatClientType(c.type, t)}
-                            </span>
+                            <div className="flex items-center gap-1.5 text-xs font-mono">
+                              <span className="font-bold text-zinc-900 dark:text-zinc-100">
+                                {c.count} {locale === 'zh-CN' ? '次' : 'reqs'}
+                              </span>
+                              <span className="text-[11px] text-zinc-400 font-normal">({c.share}%)</span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 text-xs font-mono">
-                            <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                              {c.count} {locale === 'zh-CN' ? '次' : 'reqs'}
-                            </span>
-                            <span className="text-[11px] text-zinc-400">({cShare}%)</span>
-                          </div>
-                        </div>
 
-                        <div className="w-full h-1.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-violet-500 dark:bg-violet-400 rounded-full transition-all duration-300"
-                            style={{ width: `${Math.max(2, cShare)}%` }}
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-                          <span>{formatTokens(c.totalTokens)} tok</span>
-                          <div className="flex items-center gap-2">
-                            {c.errorCount > 0 ? (
-                              <span className="text-rose-500">{c.errorCount} {locale === 'zh-CN' ? '失败' : 'failed'}</span>
-                            ) : (
-                              <span className="text-emerald-600 dark:text-emerald-400">{t('common.normal')}</span>
-                            )}
-                            <span>·</span>
-                            <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                              {formatCurrency(c.cost)}
-                            </span>
+                          <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono pl-3.5">
+                            <span>{formatTokens(c.totalTokens)} tok</span>
+                            <div className="flex items-center gap-1.5">
+                              {c.errorCount > 0 && (
+                                <span className="text-rose-500 font-medium font-mono">
+                                  {c.errorCount} {locale === 'zh-CN' ? '失败' : 'failed'}
+                                </span>
+                              )}
+                              {c.errorCount > 0 && <span>·</span>}
+                              <span className="text-zinc-700 dark:text-zinc-300 font-medium">
+                                {formatCurrency(c.cost)}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })
+                      ))}
+                    </div>
+                  </>
                 )}
               </div>
             </div>
@@ -812,8 +1038,8 @@ export const UsageDashboard: React.FC = () => {
             {/* 右列：链路稳定性与异常诊断 */}
             <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden flex flex-col justify-between">
               <div>
-                <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
+                <div className="px-3.5 py-2 bg-muted/20 border-b border-border flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
                     {metrics.errorCount > 0 ? (
                       <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
                     ) : (
@@ -826,16 +1052,16 @@ export const UsageDashboard: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="p-4 space-y-3.5">
+                <div className="p-3 space-y-2.5">
                   {/* 三色状态码分段进度条 */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
                       <span>{t('dashboard.charts.statusDistribution')}</span>
                       <span>
                         2xx: {metrics.status2xx} · 4xx: {metrics.status4xx} · 5xx: {metrics.status5xx}
                       </span>
                     </div>
-                    <div className="w-full h-2 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden">
+                    <div className="w-full h-1.5 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden">
                       {metrics.status2xx > 0 && (
                         <div
                           className="h-full bg-emerald-500 transition-all duration-300"
@@ -867,26 +1093,22 @@ export const UsageDashboard: React.FC = () => {
                   </div>
 
                   {/* 异常原因归因列表 */}
-                  <div className="pt-2 border-t border-border/60">
-                    <div className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 mb-2">
-                      {t('dashboard.charts.recentErrors')}
-                    </div>
-
+                  <div className="pt-1.5 border-t border-border/60">
                     {metrics.errorDiagnostics.length === 0 ? (
-                      <div className="p-3 rounded-md bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-900/40 flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300">
-                        <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-500" />
+                      <div className="p-2.5 rounded-md bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-900/40 flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
                         <span>{t('dashboard.charts.noErrors')}</span>
                       </div>
                     ) : (
-                      <div className="space-y-1.5">
-                        {metrics.errorDiagnostics.slice(0, 4).map(({ reason, count }) => (
+                      <div className="space-y-1">
+                        {metrics.errorDiagnostics.slice(0, 3).map(({ reason, count }) => (
                           <div
                             key={reason}
-                            className="p-2 rounded-md bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200/50 dark:border-rose-900/40 flex items-center justify-between text-xs gap-2"
+                            className="p-1.5 rounded bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200/50 dark:border-rose-900/40 flex items-center justify-between text-xs gap-2"
                           >
                             <div className="flex items-center gap-1.5 min-w-0">
-                              <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-500 dark:text-amber-400" />
-                              <span className="font-mono text-zinc-800 dark:text-zinc-200 truncate text-[11px]">
+                              <AlertTriangle className="w-3 h-3 shrink-0 text-amber-500 dark:text-amber-400" />
+                              <span className="font-mono text-zinc-800 dark:text-zinc-200 truncate text-[10px]">
                                 {reason}
                               </span>
                             </div>
@@ -902,27 +1124,27 @@ export const UsageDashboard: React.FC = () => {
               </div>
 
               {/* 底部微信息 */}
-              <div className="px-4 py-2 bg-muted/20 border-t border-border flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-                <span>{locale === 'zh-CN' ? '兜底策略：触发备用服务商' : 'Fallback triggered:'} {metrics.fallbackRatio}%</span>
-                <span>{locale === 'zh-CN' ? '流式长连接 SSE:' : 'Stream SSE:'} {metrics.streamRatio}%</span>
+              <div className="px-3.5 py-1.5 bg-muted/20 border-t border-border flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+                <span>{locale === 'zh-CN' ? '兜底触发' : 'Fallback:'} {metrics.fallbackRatio}%</span>
+                <span>{locale === 'zh-CN' ? '流式长连接' : 'Stream:'} {metrics.streamRatio}%</span>
               </div>
             </div>
           </div>
 
           {/* 4. 24小时活跃时段节奏条 (柱状微图) */}
-          <div className="rounded-lg border border-border bg-card p-4 shadow-2xs space-y-2.5">
+          <div className="rounded-lg border border-border bg-card p-3 shadow-2xs space-y-2">
             <div className="flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
+              <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
                 <TrendingUp className="w-3.5 h-3.5 text-primary" />
                 <span>{t('dashboard.charts.requestsOverTime')}</span>
               </div>
-              <span className="text-[11px] text-zinc-400 font-mono">
+              <span className="text-[10px] text-zinc-400 font-mono">
                 {locale === 'zh-CN' ? '峰值' : 'Peak'}: {maxHourlyCount > 1 ? `${maxHourlyCount} ${locale === 'zh-CN' ? '次/时' : 'reqs/h'}` : '-'}
               </span>
             </div>
 
             {/* 24 小时柱状条 */}
-            <div className="flex items-end gap-1 h-12 pt-1 pb-1">
+            <div className="flex items-end gap-1 h-10 pt-1 pb-1">
               {metrics.hourlyCounts.map((count, hour) => {
                 const heightPercent =
                   count > 0 ? Math.max(12, Math.round((count / maxHourlyCount) * 100)) : 6;

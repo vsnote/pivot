@@ -316,9 +316,9 @@ export const en: TranslationDictionary = {
   },
   dashboard: {
     timeRange: {
-      all: 'All Time',
+      all: 'All',
       today: 'Today',
-      oneHour: 'Past 1 Hour',
+      oneHour: '1 Hour',
     },
     metrics: {
       totalRequests: 'Total Requests',
@@ -335,6 +335,8 @@ export const en: TranslationDictionary = {
       clearLogsDetail: 'Clearing logs will reset request history and metric counts. This action cannot be undone.',
     },
     charts: {
+      sortByRequests: 'By Requests',
+      sortByCost: 'By Cost',
       requestsOverTime: 'Request Trends',
       statusDistribution: 'Status Code Distribution',
       clientDistribution: 'Agent Distribution',
@@ -361,6 +363,7 @@ export const en: TranslationDictionary = {
         codex_cli: 'Codex CLI',
         gemini_cli: 'Gemini CLI',
         pi: 'Pi Agent',
+        opencode: 'OpenCode',
         openai_api: 'OpenAI API',
         anthropic_api: 'Anthropic API',
         generic: 'Universal Agent',

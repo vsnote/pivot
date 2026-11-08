@@ -29,6 +29,7 @@ import {
   ClaudeLogo,
   GeminiLogo,
   PiLogo,
+  OpenCodeLogo,
 } from '@/components/common/BrandIcons';
 
 const CLIENT_LABEL: Record<InterceptorStatus['id'], string> = {
@@ -36,12 +37,14 @@ const CLIENT_LABEL: Record<InterceptorStatus['id'], string> = {
   codex_cli: 'Codex CLI',
   gemini_cli: 'Gemini CLI',
   pi: 'Pi Agent',
+  opencode: 'OpenCode',
 };
 
 function ClientMark({ id }: { id: InterceptorStatus['id'] }) {
   if (id === 'codex_cli') return <OpenAISpiralIcon className="w-full h-full" />;
   if (id === 'gemini_cli') return <GeminiLogo className="w-full h-full" />;
   if (id === 'pi') return <PiLogo className="w-full h-full" />;
+  if (id === 'opencode') return <OpenCodeLogo className="w-full h-full" />;
   return <ClaudeLogo className="w-full h-full" />;
 }
 

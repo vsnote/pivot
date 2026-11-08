@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
@@ -68,6 +68,42 @@ function formatFullResetTime(resetTimeStr: string | null | undefined, t: (k: str
   return t('contextMenu.resetInDaysHours', { d: days, h: remHours });
 }
 
+const MENU_WIDTH = 288;
+const VIEWPORT_PADDING = 10;
+
+interface MenuPosition {
+  x: number;
+  y: number;
+  originX: 'left' | 'right';
+  originY: 'top' | 'bottom';
+}
+
+function calculateMenuPosition(
+  targetX: number,
+  targetY: number,
+  menuWidth = MENU_WIDTH,
+  menuHeight = 320,
+): MenuPosition {
+  const winWidth = typeof window !== 'undefined' ? window.innerWidth : 415;
+  const winHeight = typeof window !== 'undefined' ? window.innerHeight : 620;
+
+  let nextX = targetX;
+  let nextY = targetY;
+  let originX: 'left' | 'right' = 'left';
+  let originY: 'top' | 'bottom' = 'top';
+
+  if (targetX + menuWidth > winWidth - VIEWPORT_PADDING) {
+    nextX = Math.max(VIEWPORT_PADDING, winWidth - menuWidth - VIEWPORT_PADDING);
+    originX = 'right';
+  }
+  if (targetY + menuHeight > winHeight - VIEWPORT_PADDING) {
+    nextY = Math.max(VIEWPORT_PADDING, winHeight - menuHeight - VIEWPORT_PADDING);
+    originY = 'bottom';
+  }
+
+  return { x: nextX, y: nextY, originX, originY };
+}
+
 export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
   x,
   y,
@@ -86,8 +122,20 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
 
   const provider = currentProvider ?? initialProvider;
 
+  // 订阅账号与配额状态
+  const isSubscription =
+    provider.authType === 'subscription_pool' ||
+    provider.presetId === 'antigravity' ||
+    provider.presetId === 'chatgpt_subscription' ||
+    provider.protocol === 'chatgpt';
+
+  const estimatedHeight = isSubscription ? 380 : 250;
+
   const menuRef = useRef<HTMLDivElement>(null);
-  const [coords, setCoords] = useState({ x, y });
+  // 在首帧渲染前即计算安全位置，杜绝侧边滑入或位置跳变
+  const [position, setPosition] = useState<MenuPosition>(() =>
+    calculateMenuPosition(x, y, MENU_WIDTH, estimatedHeight),
+  );
   const [modelSearch, setModelSearch] = useState('');
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [copiedModel, setCopiedModel] = useState<string | null>(null);
@@ -112,37 +160,35 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
     };
   }, [provider.models]);
 
-  // 订阅账号与配额状态
-  const isSubscription =
-    provider.authType === 'subscription_pool' ||
-    provider.presetId === 'antigravity' ||
-    provider.presetId === 'chatgpt_subscription' ||
-    provider.protocol === 'chatgpt';
-
   const [subAccounts, setSubAccounts] = useState<SubscriptionAccount[]>([]);
   const [accountQuotas, setAccountQuotas] = useState<Record<string, AccountQuota>>({});
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [loadingQuota, setLoadingQuota] = useState(false);
 
-  // 视口边缘自适应贴边与动态尺寸监听（防遮挡防溢出）
-  useEffect(() => {
+  // 视口边缘自适应贴边与动态尺寸监听（在首次绘制前精确定位，无视觉抖动）
+  useLayoutEffect(() => {
     const el = menuRef.current;
     if (!el) return;
 
     const updatePosition = () => {
       const rect = el.getBoundingClientRect();
-      const padding = 12;
-      let nextX = x;
-      let nextY = y;
-
-      if (x + rect.width > window.innerWidth - padding) {
-        nextX = Math.max(padding, window.innerWidth - rect.width - padding);
-      }
-      if (y + rect.height > window.innerHeight - padding) {
-        nextY = Math.max(padding, window.innerHeight - rect.height - padding);
-      }
-
-      setCoords({ x: nextX, y: nextY });
+      const nextPos = calculateMenuPosition(
+        x,
+        y,
+        rect.width || MENU_WIDTH,
+        rect.height || estimatedHeight,
+      );
+      setPosition((prev) => {
+        if (
+          prev.x === nextPos.x &&
+          prev.y === nextPos.y &&
+          prev.originX === nextPos.originX &&
+          prev.originY === nextPos.originY
+        ) {
+          return prev;
+        }
+        return nextPos;
+      });
     };
 
     updatePosition();
@@ -154,7 +200,7 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
     observer.observe(el);
 
     return () => observer.disconnect();
-  }, [x, y]);
+  }, [x, y, estimatedHeight]);
 
   // 监听键盘 Esc 关闭
   useEffect(() => {
@@ -277,8 +323,12 @@ export const ProviderContextMenu: React.FC<ProviderContextMenuProps> = ({
       <div
         ref={menuRef}
         onClick={(e) => e.stopPropagation()}
-        style={{ left: `${coords.x}px`, top: `${coords.y}px` }}
-        className="fixed z-50 w-72 max-w-[92vw] max-h-[calc(100vh-24px)] overflow-y-auto no-scrollbar rounded-lg border border-border bg-popover/95 backdrop-blur-md shadow-xl text-popover-foreground text-xs p-1 select-none animate-in fade-in-0 zoom-in-95 duration-100"
+        style={{
+          left: `${position.x}px`,
+          top: `${position.y}px`,
+          transformOrigin: `${position.originY} ${position.originX}`,
+        }}
+        className="fixed z-50 w-72 max-w-[92vw] max-h-[calc(100vh-24px)] overflow-y-auto no-scrollbar rounded-lg border border-border/80 bg-popover/95 backdrop-blur-md shadow-xl text-popover-foreground text-xs p-1 select-none animate-context-menu"
       >
         {/* 顶部服务商信息标题 */}
         <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/60">

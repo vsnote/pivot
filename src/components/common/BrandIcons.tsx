@@ -46,6 +46,11 @@ export const AntigravityLogo: React.FC<{ className?: string }> = ({ className = 
   return Component ? <Component className={className} /> : null;
 };
 
+export const OpenCodeLogo: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => {
+  const Component = BrandIconRenderers.opencode;
+  return Component ? <Component className={className} /> : null;
+};
+
 export type BrandType =
   | 'openai'
   | 'anthropic'
@@ -57,6 +62,7 @@ export type BrandType =
   | 'openrouter'
   | 'ollama'
   | 'pi'
+  | 'opencode'
   | 'groq'
   | 'mistral'
   | 'siliconflow'
@@ -101,6 +107,8 @@ const ALIAS_MAP: Record<string, string> = {
   baidu_qianfan: 'wenxin',
   cloudflare_ai: 'cloudflare',
   lingyiwanwu: '01ai',
+  opencode_go: 'opencode',
+  opencode_zen: 'opencode',
 };
 
 export function detectProviderBrand(
@@ -122,6 +130,7 @@ export function detectProviderBrand(
 
   // 2. 识别品牌名称与协议
   if (n.includes('antigravity') || n.includes('anti-gravity')) return 'antigravity';
+  if (n.includes('opencode')) return 'opencode';
   if (n.includes('deepseek') || n.includes('深度求索')) return 'deepseek';
   if (n.includes('claudecode') || n.includes('claude code')) return 'claudecode';
   if (n.includes('claude')) return 'claude';

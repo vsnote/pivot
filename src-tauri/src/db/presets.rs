@@ -65,6 +65,25 @@ pub fn get_default_presets() -> Vec<Preset> {
         },
 
         Preset {
+            id: "opencode".to_string(),
+            name: "OpenCode Go / Plus".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://opencode.ai/zen/go/v1".to_string(),
+            default_models: vec![
+                "deepseek-reasoner".to_string(),
+                "deepseek-chat".to_string(),
+                "kimi-k1.5".to_string(),
+                "glm-4-plus".to_string(),
+                "qwen-2.5-coder-32b".to_string(),
+                "minimax-text-01".to_string(),
+            ],
+            description: "OpenCode Go / Go Plus 官方订阅，聚合 DeepSeek、Kimi、GLM、Qwen 等开源与前沿代码模型池".to_string(),
+            category: "官方订阅".to_string(),
+            icon: Some("opencode".to_string()),
+            auth_type: None,
+        },
+
+        Preset {
             id: "anthropic".to_string(),
             name: "Anthropic".to_string(),
             protocol: "anthropic".to_string(),

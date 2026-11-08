@@ -335,6 +335,8 @@ export interface TranslationDictionary {
       clearLogsDetail: string;
     };
     charts: {
+      sortByRequests: string;
+      sortByCost: string;
       requestsOverTime: string;
       statusDistribution: string;
       clientDistribution: string;
@@ -361,6 +363,7 @@ export interface TranslationDictionary {
         codex_cli: string;
         gemini_cli: string;
         pi: string;
+        opencode: string;
         openai_api: string;
         anthropic_api: string;
         generic: string;

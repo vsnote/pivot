@@ -22,7 +22,7 @@ export interface Provider {
   updatedAt?: string;
 }
 
-export type ClientType = 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi' | 'openai_api' | 'anthropic_api' | 'generic';
+export type ClientType = 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi' | 'opencode' | 'openai_api' | 'anthropic_api' | 'generic';
 
 export interface LogAttempt {
   providerId: string;
@@ -103,7 +103,7 @@ export interface ThirdPartyConfig {
 }
 
 export interface InterceptorStatus {
-  id: 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi';
+  id: 'claude_code' | 'codex_cli' | 'gemini_cli' | 'pi' | 'opencode';
   name: string;
   installed: boolean;
   configPath: string;

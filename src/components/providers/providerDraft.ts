@@ -3,7 +3,7 @@ import type { Preset, Provider } from '@/types';
 export const uniqueValues = (values: string[]) => [...new Set(values.map((v) => v.trim()).filter(Boolean))];
 
 export function editablePresetUrl(preset: Preset) {
-  return preset.category === '开源 / 本地部署' || preset.baseUrl.includes('YOUR_ACCOUNT_ID');
+  return preset.category === '开源 / 本地部署' || preset.baseUrl.includes('YOUR_ACCOUNT_ID') || preset.id === 'opencode';
 }
 
 /**

@@ -41,6 +41,7 @@ impl ResponsesSseState {
     pub fn new_with_compaction(response_id: &str, model: &str, is_compaction: bool) -> Self {
         let mut custom_tools = HashSet::new();
         custom_tools.insert("exec".to_string());
+        custom_tools.insert("js".to_string());
         Self::new_full(response_id, model, is_compaction, custom_tools)
     }
 
@@ -424,7 +425,7 @@ impl ResponsesSseState {
                         buf.id.clone()
                     };
 
-                    let is_custom = self.custom_tools.contains(&buf.name) || buf.name == "exec";
+                    let is_custom = self.custom_tools.contains(&buf.name) || buf.name == "exec" || buf.name == "js";
                     let tc_item = if is_custom {
                         let input_val = extract_custom_tool_input(&buf.arguments, &buf.name);
                         json!({
@@ -523,9 +524,9 @@ impl ResponsesSseState {
     }
 }
 
-/// Extract raw custom tool input (e.g. JavaScript code for `exec`) from arguments
+/// Extract raw custom tool input (e.g. JavaScript code for `exec` or `js`) from arguments
 pub fn extract_custom_tool_input(arguments: &str, tool_name: &str) -> String {
-    if tool_name == "exec" {
+    if tool_name == "exec" || tool_name == "js" {
         if let Ok(val) = serde_json::from_str::<Value>(arguments) {
             if let Some(code) = val.get("code").and_then(Value::as_str) {
                 return code.to_string();
@@ -538,10 +539,11 @@ pub fn extract_custom_tool_input(arguments: &str, tool_name: &str) -> String {
     arguments.to_string()
 }
 
-/// Extract names of tools configured as custom tools (e.g. `exec`) from incoming Responses request
+/// Extract names of tools configured as custom tools (e.g. `exec`, `js`) from incoming Responses request
 pub fn extract_custom_tool_names(body: &Value) -> HashSet<String> {
     let mut set = HashSet::new();
     set.insert("exec".to_string());
+    set.insert("js".to_string());
     if let Some(arr) = body.get("input").or_else(|| body.get("messages")).and_then(Value::as_array) {
         for item in arr {
             if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
@@ -598,7 +600,7 @@ fn parse_tools_list(tools_arr: &[Value], chat_tools: &mut Vec<OpenAITool>) {
             let description = t.get("description").and_then(Value::as_str).map(|s| s.to_string());
             let parameters = if let Some(p) = t.get("parameters") {
                 p.clone()
-            } else if t_type == "custom" || name == "exec" {
+            } else if t_type == "custom" || name == "exec" || name == "js" || t_type == "js" {
                 json!({
                     "type": "object",
                     "properties": {
@@ -610,7 +612,10 @@ fn parse_tools_list(tools_arr: &[Value], chat_tools: &mut Vec<OpenAITool>) {
                     "required": ["code"]
                 })
             } else {
-                json!({})
+                json!({
+                    "type": "object",
+                    "properties": {}
+                })
             };
 
             if !chat_tools.iter().any(|existing| existing.function.name == name) {
@@ -867,7 +872,7 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                     let arguments = raw_args
                         .map(|v| {
                             if let Some(s) = v.as_str() {
-                                if itype == "custom_tool_call" && (name == "exec" || !s.trim().starts_with('{')) {
+                                if itype == "custom_tool_call" && (name == "exec" || name == "js" || !s.trim().starts_with('{')) {
                                     json!({"code": s}).to_string()
                                 } else {
                                     s.to_string()
@@ -1009,6 +1014,7 @@ pub fn chat_response_to_responses(
 ) -> Value {
     let mut custom_tools = HashSet::new();
     custom_tools.insert("exec".to_string());
+    custom_tools.insert("js".to_string());
     chat_response_to_responses_full(chat_resp, response_id, model, is_compaction, &custom_tools)
 }
 
@@ -1093,7 +1099,7 @@ pub fn chat_response_to_responses_full(
                 let args = fn_obj.get("arguments").and_then(Value::as_str).unwrap_or("{}");
                 let call_id = tc.get("id").and_then(Value::as_str).unwrap_or("call_default");
 
-                let is_custom = custom_tools.contains(name) || name == "exec";
+                let is_custom = custom_tools.contains(name) || name == "exec" || name == "js";
                 if is_custom {
                     let input_val = extract_custom_tool_input(args, name);
                     output.push(json!({

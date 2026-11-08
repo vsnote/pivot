@@ -50,7 +50,7 @@ pub fn validate_provider(provider: &mut Provider) -> Result<(), String> {
             .find(|p| &p.id == id)
             .ok_or("预设不存在，请改为自定义配置")?;
         let editable_url =
-            preset.category == "开源 / 本地部署" || preset.base_url.contains("YOUR_ACCOUNT_ID");
+            preset.category == "开源 / 本地部署" || preset.base_url.contains("YOUR_ACCOUNT_ID") || preset.id == "opencode";
         if provider.protocol != preset.protocol
             || (!editable_url && provider.base_url != preset.base_url.trim_end_matches('/'))
         {

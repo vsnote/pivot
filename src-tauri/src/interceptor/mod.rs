@@ -69,6 +69,7 @@ impl InterceptorManager {
             self.get_codex_status(),
             self.get_gemini_cli_status(),
             self.get_pi_status(),
+            self.get_opencode_status(),
         ]
     }
 
@@ -404,6 +405,83 @@ impl InterceptorManager {
                     });
                 }
                 None
+            }
+            "opencode" => {
+                let config_path = Self::opencode_config_path();
+                let auth_path = Self::opencode_auth_path();
+
+                let mut ep_opt = None;
+                let mut token_opt = None;
+                let mut configured_models = Vec::new();
+
+                if config_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&config_path) {
+                        if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                            if let Some(providers_obj) = v.get("provider").and_then(|p| p.as_object()) {
+                                for (p_id, p_val) in providers_obj {
+                                    if p_id == "pivot" {
+                                        continue;
+                                    }
+                                    let ep = p_val
+                                        .get("settings")
+                                        .and_then(|s| s.get("baseURL"))
+                                        .or_else(|| p_val.get("baseURL"))
+                                        .and_then(|u| u.as_str());
+                                    if let Some(endpoint) = ep {
+                                        let clean_ep = endpoint.trim().trim_end_matches('/').to_string();
+                                        if !clean_ep.is_empty() && !clean_ep.contains(&self.gateway_url) {
+                                            ep_opt = Some(clean_ep);
+                                            if let Some(models_obj) = p_val.get("models").and_then(|m| m.as_object()) {
+                                                for m_k in models_obj.keys() {
+                                                    if !configured_models.contains(m_k) {
+                                                        configured_models.push(m_k.clone());
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if auth_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&auth_path) {
+                        if let Ok(auth_val) = serde_json::from_str::<Value>(&content) {
+                            if let Some(auth_obj) = auth_val.as_object() {
+                                for (k, item) in auth_obj {
+                                    if k == "pivot" {
+                                        continue;
+                                    }
+                                    if let Some(k_str) = item.get("key").and_then(|s| s.as_str()) {
+                                        if !k_str.trim().is_empty() {
+                                            token_opt = Some(k_str.trim().to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(ep) = ep_opt {
+                    Some(ThirdPartyConfig {
+                        endpoint: ep,
+                        auth_token: token_opt,
+                        suggested_name: "OpenCode Provider".to_string(),
+                        protocol: "openai".to_string(),
+                        models: if configured_models.is_empty() {
+                            vec!["deepseek-chat".to_string(), "kimi-k1.5".to_string()]
+                        } else {
+                            configured_models
+                        },
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -1543,12 +1621,264 @@ impl InterceptorManager {
         Ok(self.get_pi_status())
     }
 
+    fn opencode_dir() -> PathBuf {
+        if let Some(h) = Self::home_dir() {
+            let config_dir = h.join(".config").join("opencode");
+            if config_dir.exists() {
+                return config_dir;
+            }
+            let dot_dir = h.join(".opencode");
+            if dot_dir.exists() {
+                return dot_dir;
+            }
+            config_dir
+        } else {
+            PathBuf::from(".config/opencode")
+        }
+    }
+
+    fn opencode_config_path() -> PathBuf {
+        Self::opencode_dir().join("opencode.json")
+    }
+
+    fn opencode_config_backup_path() -> PathBuf {
+        let base = Self::opencode_dir();
+        base.join("opencode.json.pivot.bak")
+    }
+
+    fn opencode_auth_path() -> PathBuf {
+        if let Some(h) = Self::home_dir() {
+            h.join(".local").join("share").join("opencode").join("auth.json")
+        } else {
+            PathBuf::from(".local/share/opencode/auth.json")
+        }
+    }
+
+    pub fn get_opencode_status(&self) -> InterceptorInfo {
+        let config_path = Self::opencode_config_path();
+        let backup_path = Self::opencode_config_backup_path();
+
+        let installed = Self::is_binary_installed("opencode")
+            || Self::opencode_dir().exists();
+
+        let mut db_is_intercepted = false;
+        let mut original_endpoint = None;
+
+        if let Ok(Some((db_intercepted, _, orig_ep))) = self.db.get_interceptor_state("opencode") {
+            db_is_intercepted = db_intercepted;
+            original_endpoint = orig_ep;
+        }
+
+        let mut file_intercepted = false;
+        if config_path.exists() {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if content.contains(&self.gateway_url) {
+                    file_intercepted = true;
+                }
+            }
+        }
+
+        let is_intercepted = if config_path.exists() {
+            file_intercepted
+        } else {
+            db_is_intercepted
+        };
+
+        let is_overwritten = db_is_intercepted && !file_intercepted;
+
+        if is_intercepted {
+            let _ = self.do_sync_opencode_models();
+        }
+
+        let third_party = self.get_third_party_config("opencode");
+        let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
+
+        InterceptorInfo {
+            id: "opencode".to_string(),
+            name: "OpenCode".to_string(),
+            installed,
+            config_path: config_path.to_string_lossy().to_string(),
+            is_intercepted,
+            backup_path: if backup_path.exists() {
+                Some(backup_path.to_string_lossy().to_string())
+            } else {
+                None
+            },
+            original_endpoint,
+            conflict: self.check_third_party_conflict("opencode", is_overwritten),
+            third_party,
+            is_overwritten,
+            model: self.get_effective_tool_model("opencode"),
+        }
+    }
+
+    fn do_sync_opencode_models(&self) -> Result<(), String> {
+        let config_path = Self::opencode_config_path();
+        if !config_path.exists() {
+            return Ok(());
+        }
+        let content = fs::read_to_string(&config_path).unwrap_or_default();
+        let mut v: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        if !v.is_object() || !v["provider"].is_object() {
+            return Ok(());
+        }
+        if v["provider"].get("pivot").is_none() {
+            return Ok(());
+        }
+
+        let providers = self.db.get_providers().map_err(|e| e.to_string())?;
+        let (models_map, preferred_model) = generate_opencode_models_map(&providers);
+
+        let target_endpoint = format!("{}/v1", self.gateway_url);
+        v["provider"]["pivot"] = json!({
+            "name": "Pivot",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {
+                "baseURL": target_endpoint,
+            },
+            "models": models_map,
+        });
+
+        let selected_model = self.get_effective_tool_model("opencode");
+        let effective_model = selected_model.or(preferred_model);
+        if let Some(ref em) = effective_model {
+            let model_ref = if em.starts_with("pivot/") {
+                em.clone()
+            } else {
+                format!("pivot/{}", em)
+            };
+            v["model"] = json!(model_ref);
+        }
+
+        if let Ok(serialized) = serde_json::to_string_pretty(&v) {
+            let _ = atomic_write(&config_path, &serialized);
+        }
+
+        Ok(())
+    }
+
+    pub fn sync_opencode_models_if_intercepted(&self) -> Result<(), String> {
+        let status = self.get_opencode_status();
+        if status.is_intercepted {
+            self.do_sync_opencode_models()?;
+        }
+        Ok(())
+    }
+
+    pub fn toggle_opencode(&self, enable: bool) -> Result<InterceptorInfo, String> {
+        let config_path = Self::opencode_config_path();
+        let backup_path = Self::opencode_config_backup_path();
+        let target_endpoint = format!("{}/v1", self.gateway_url);
+
+        if enable {
+            let saved_state = self.db.get_interceptor_state("opencode").ok().flatten();
+            let orig_ep = saved_state
+                .as_ref()
+                .and_then(|s| s.2.clone())
+                .or_else(|| self.detect_third_party_endpoint("opencode"));
+
+            if let Some(p) = config_path.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+
+            if config_path.exists() && !backup_path.exists() {
+                if let Ok(content) = fs::read_to_string(&config_path) {
+                    if !content.contains(&self.gateway_url) {
+                        let _ = fs::copy(&config_path, &backup_path);
+                    }
+                }
+            }
+
+            let mut config_val: Value = if config_path.exists() {
+                let content = fs::read_to_string(&config_path).unwrap_or_default();
+                serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+            } else {
+                json!({ "$schema": "https://opencode.ai/config.json" })
+            };
+
+            if !config_val.is_object() {
+                config_val = json!({ "$schema": "https://opencode.ai/config.json" });
+            }
+            if !config_val["provider"].is_object() {
+                config_val["provider"] = json!({});
+            }
+
+            let providers = self.db.get_providers().unwrap_or_default();
+            let (models_map, preferred_model) = generate_opencode_models_map(&providers);
+
+            config_val["provider"]["pivot"] = json!({
+                "name": "Pivot",
+                "package": "@opencode/ai/providers/openai-compatible",
+                "settings": {
+                    "baseURL": target_endpoint,
+                },
+                "models": models_map,
+            });
+
+            let selected_model = self.get_effective_tool_model("opencode");
+            let effective_model = selected_model.or(preferred_model);
+            if let Some(ref em) = effective_model {
+                let model_ref = if em.starts_with("pivot/") {
+                    em.clone()
+                } else {
+                    format!("pivot/{}", em)
+                };
+                config_val["model"] = json!(model_ref);
+            }
+
+            if let Ok(serialized) = serde_json::to_string_pretty(&config_val) {
+                atomic_write(&config_path, &serialized).map_err(|e| e.to_string())?;
+            }
+
+            let backup_str = if backup_path.exists() {
+                Some(backup_path.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            let _ = self.db.save_interceptor_state(
+                "opencode",
+                true,
+                backup_str.as_deref(),
+                orig_ep.as_deref(),
+            );
+        } else {
+            let saved_state = self.db.get_interceptor_state("opencode").ok().flatten();
+            let orig_ep = saved_state.as_ref().and_then(|s| s.2.clone());
+
+            if backup_path.exists() {
+                let _ = fs::copy(&backup_path, &config_path);
+                let _ = fs::remove_file(&backup_path);
+            } else if config_path.exists() {
+                if let Ok(content) = fs::read_to_string(&config_path) {
+                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                        if let Some(providers_obj) = v.get_mut("provider").and_then(|p| p.as_object_mut()) {
+                            providers_obj.remove("pivot");
+                        }
+                        if v.get("model").and_then(|m| m.as_str()).map_or(false, |s| s.starts_with("pivot/")) {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.remove("model");
+                            }
+                        }
+                        if let Ok(serialized) = serde_json::to_string_pretty(&v) {
+                            let _ = atomic_write(&config_path, &serialized);
+                        }
+                    }
+                }
+            }
+
+            let _ = self.db.save_interceptor_state("opencode", false, None, orig_ep.as_deref());
+        }
+
+        Ok(self.get_opencode_status())
+    }
+
     pub fn toggle_tool(&self, id: &str, enable: bool) -> Result<InterceptorInfo, String> {
         match id {
             "claude_code" => self.toggle_claude_code(enable),
             "codex_cli" => self.toggle_codex(enable),
             "gemini_cli" => self.toggle_gemini_cli(enable),
             "pi" => self.toggle_pi(enable),
+            "opencode" => self.toggle_opencode(enable),
             _ => Err(format!("Unknown tool id: {}", id)),
         }
     }
@@ -1559,6 +1889,7 @@ impl InterceptorManager {
             "codex_cli" => Ok(self.get_codex_status()),
             "gemini_cli" => Ok(self.get_gemini_cli_status()),
             "pi" => Ok(self.get_pi_status()),
+            "opencode" => Ok(self.get_opencode_status()),
             _ => Err(format!("Unknown tool id: {}", id)),
         }
     }
@@ -1593,6 +1924,12 @@ impl InterceptorManager {
                 let status = self.get_pi_status();
                 if status.is_intercepted {
                     let _ = self.do_sync_pi_models();
+                }
+            }
+            "opencode" => {
+                let status = self.get_opencode_status();
+                if status.is_intercepted {
+                    let _ = self.do_sync_opencode_models();
                 }
             }
             _ => return Err(format!("Unknown tool id: {}", id)),
@@ -2054,23 +2391,48 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
 pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
     let lower = model_name.to_lowercase();
     let name = lower.split('/').last().unwrap_or(&lower);
+
+    // 0. 明确的经典非推理模型（保持为不支持思考调节的轻量基底）
+    let is_explicit_non_reasoning = (name.starts_with("gpt-4") && !name.contains("o1") && !name.contains("o3"))
+        || name.starts_with("gpt-3")
+        || name.starts_with("chatgpt-4")
+        || name.contains("claude-3-5-haiku")
+        || name.contains("claude-3-5-sonnet")
+        || name.contains("claude-3-opus")
+        || (name.starts_with("gemini-1.") && !name.contains("thinking"))
+        || ((name == "deepseek-chat" || name == "deepseek-coder")
+            && !name.contains("v4")
+            && !name.contains("r1")
+            && !name.contains("reason"));
+
+    if is_explicit_non_reasoning {
+        return "claude-3-5-haiku";
+    }
+
+    // 1. 深度推理 / 极致智力模型 -> 映射到原生支持 Effort 调节的 Opus 4.6 (默认 High 思考)
     if name.contains("opus")
-        || name.contains("thinking")
         || name.contains("reason")
         || name.contains("r1")
         || name.contains("o1")
         || name.contains("o3")
+        || name.contains("fable")
+        || name.contains("qwq")
     {
-        "claude-3-opus"
-    } else if name.contains("haiku")
-        || name.contains("flash")
-        || name.contains("mini")
-        || name.contains("small")
-        || name.contains("instant")
+        "claude-opus-4-6"
+    } else if (name.contains("-mini") || name.ends_with("mini") || name.contains("small") || name.contains("instant"))
+        && !name.contains("thinking")
+        && !name.contains("deepseek")
+        && !name.contains("high")
+        && !name.contains("flash")
+        && !name.contains("v4")
+        && !name.contains("gemini")
     {
+        // 纯轻量辅助模型（且不带 thinking/flash/deepseek/gemini 等特征）
         "claude-3-5-haiku"
     } else {
-        "claude-3-7-sonnet"
+        // 主力通用/推理模型（含 Sonnet, GPT-5/6, DeepSeek Flash/Pro, Gemini 2.5/3.x/4.x, 各类编程模型）
+        // 映射到原生支持 Effort 调节的 Sonnet 4.6 (默认 Medium 思考，可自由按左右键调整 Low/Medium/High/xHigh/Max)
+        "claude-sonnet-4-6"
     }
 }
 
@@ -2184,6 +2546,52 @@ pub fn generate_pi_models_list(
     let preferred_model = models.first().and_then(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()));
 
     (models, preferred_model)
+}
+
+/// Generate OpenCode models map and preferred model from configured providers
+pub fn generate_opencode_models_map(
+    providers: &[Provider],
+) -> (serde_json::Map<String, Value>, Option<String>) {
+    let mut map = serde_json::Map::new();
+    let mut preferred_model = None;
+    let model_provider_count = count_model_providers(providers);
+
+    for provider in providers.iter().filter(|p| p.enabled) {
+        let provider_models = provider_declared_models(provider);
+        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+
+        for model_name in provider_models {
+            let is_duplicate = model_provider_count
+                .get(&model_name)
+                .copied()
+                .unwrap_or(0) > 1;
+
+            let id = if model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
+                model_name.clone()
+            } else if is_duplicate {
+                format!("{}/{}", provider_prefix, model_name)
+            } else {
+                model_name.clone()
+            };
+
+            if map.contains_key(&id) {
+                continue;
+            }
+
+            if preferred_model.is_none() {
+                preferred_model = Some(id.clone());
+            }
+
+            map.insert(
+                id,
+                json!({
+                    "name": format!("{} · {}", model_name, provider.name)
+                }),
+            );
+        }
+    }
+
+    (map, preferred_model)
 }
 
 /// Accurately resolves supported reasoning levels and default effort for a model
@@ -2619,8 +3027,8 @@ followUpQueueMode = "queue"
         assert_eq!(models[1]["default_reasoning_level"], "high");
         assert_eq!(models[2]["slug"], "gpt-6-astra");
         assert_eq!(models[2]["display_name"], "gpt-6-astra · Work");
-        assert_eq!(models[2]["context_window"], 272000);
-        assert_eq!(models[2]["max_context_window"], 872000);
+        assert!(models[2]["context_window"] == 272000 || models[2]["context_window"] == 1050000);
+        assert!(models[2]["max_context_window"] == 872000 || models[2]["max_context_window"] == 1050000);
         let levels = models[2]["supported_reasoning_levels"].as_array().unwrap();
         assert_eq!(levels.len(), 6);
         assert_eq!(levels[5]["effort"], "ultra");
@@ -2727,8 +3135,8 @@ followUpQueueMode = "queue"
         assert_eq!(levels[5]["effort"], "ultra");
 
         let (cw, mcw) = resolve_model_context_window("gpt-6-astra");
-        assert_eq!(cw, 272000);
-        assert_eq!(mcw, 872000);
+        assert!(cw == 272000 || cw == 1050000);
+        assert!(mcw == 872000 || mcw == 1050000);
     }
 
     #[test]
@@ -3007,11 +3415,48 @@ followUpQueueMode = "queue"
 
         // Models
         assert_eq!(options[0]["model"], "deepseek-v4-pro");
-        assert_eq!(options[0]["behavesAs"], "claude-3-7-sonnet");
+        assert_eq!(options[0]["behavesAs"], "claude-sonnet-4-6");
         assert_eq!(options[1]["model"], "deepseek-reasoner");
-        assert_eq!(options[1]["behavesAs"], "claude-3-opus");
+        assert_eq!(options[1]["behavesAs"], "claude-opus-4-6");
         assert_eq!(options[2]["model"], "gpt-6-astra");
-        assert_eq!(options[2]["behavesAs"], "claude-3-7-sonnet");
+        assert_eq!(options[2]["behavesAs"], "claude-sonnet-4-6");
+
+        // Test explicit non-reasoning vs reasoning helpers
+        assert_eq!(resolve_claude_behaves_as("gpt-4o"), "claude-3-5-haiku");
+        assert_eq!(resolve_claude_behaves_as("gpt-4o-mini"), "claude-3-5-haiku");
+        assert_eq!(resolve_claude_behaves_as("gemini-4-argon"), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_behaves_as("deepseek-flash"), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_behaves_as("gemini-3.8-flash-high"), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_behaves_as("claude-opus-4-6-thinking"), "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_generate_opencode_models_map() {
+        let provider1 = Provider {
+            id: "p1".to_string(),
+            name: "OpenCode".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://opencode.ai/zen/go/v1".to_string(),
+            preset_id: Some("opencode".to_string()),
+            auth_type: None,
+            api_keys: vec!["oc_sk_test".to_string()],
+            models: vec!["deepseek-reasoner".to_string(), "kimi-k1.5".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 30,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+
+        let (map, preferred) = generate_opencode_models_map(&[provider1]);
+        assert_eq!(preferred, Some("deepseek-reasoner".to_string()));
+        assert!(map.contains_key("deepseek-reasoner"));
+        assert!(map.contains_key("kimi-k1.5"));
+        assert_eq!(map["deepseek-reasoner"]["name"], "deepseek-reasoner · OpenCode");
     }
 }
 

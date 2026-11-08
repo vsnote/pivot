@@ -98,6 +98,7 @@ pub fn run() {
             let _ = interceptor_mgr.sync_codex_catalog_if_intercepted();
             let _ = interceptor_mgr.sync_claude_settings_if_intercepted();
             let _ = interceptor_mgr.sync_pi_models_if_intercepted();
+            let _ = interceptor_mgr.sync_opencode_models_if_intercepted();
 
             // 后台刷新模型目录：缓存仍在 TTL 内则跳过；刷新成功后重写依赖模型能力的客户端配置
             if !model_catalog::is_fresh(24 * 60 * 60) {
@@ -112,6 +113,7 @@ pub fn run() {
                                 interceptor::InterceptorManager::new(db_for_catalog, DEFAULT_PORT);
                             let _ = mgr.sync_codex_catalog_if_intercepted();
                             let _ = mgr.sync_pi_models_if_intercepted();
+                            let _ = mgr.sync_opencode_models_if_intercepted();
                         }
                         Err(e) => tracing::warn!("Model catalog refresh failed: {}", e),
                     }

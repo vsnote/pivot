@@ -316,9 +316,9 @@ export const zhCN: TranslationDictionary = {
   },
   dashboard: {
     timeRange: {
-      all: '全部时间',
+      all: '全部',
       today: '今天',
-      oneHour: '过去 1 小时',
+      oneHour: '1 小时',
     },
     metrics: {
       totalRequests: '总请求数',
@@ -335,6 +335,8 @@ export const zhCN: TranslationDictionary = {
       clearLogsDetail: '清空后将重置请求历史记录与统计计数，此操作不可撤销。',
     },
     charts: {
+      sortByRequests: '按调用量',
+      sortByCost: '按预估成本',
       requestsOverTime: '请求量趋势',
       statusDistribution: '状态码分布',
       clientDistribution: '客户端调用占比',
@@ -361,6 +363,7 @@ export const zhCN: TranslationDictionary = {
         codex_cli: 'Codex CLI',
         gemini_cli: 'Gemini CLI',
         pi: 'Pi Agent',
+        opencode: 'OpenCode',
         openai_api: 'OpenAI API',
         anthropic_api: 'Anthropic API',
         generic: '通用客户端',

@@ -1,4 +1,4 @@
-use crate::db::{Database, LogAttempt, RequestLog};
+use crate::db::{Database, LogAttempt, Provider, RequestLog};
 use crate::gateway::adapters::{
     anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, finish_openai_stream,
     openai_to_anthropic, parse_anthropic_event_to_openai_chunks,
@@ -17,6 +17,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -130,6 +131,118 @@ fn estimate_openai_req_prompt_tokens(req: &OpenAIChatRequest) -> u32 {
     total
 }
 
+fn sanitize_openai_tool_parameters(parameters: &mut Value, function_name: &str) {
+    if !parameters.is_object() {
+        if function_name == "exec" || function_name == "js" {
+            *parameters = json!({
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "JavaScript code to execute in isolate"
+                    }
+                },
+                "required": ["code"]
+            });
+        } else {
+            *parameters = json!({ "type": "object", "properties": {} });
+        }
+        return;
+    }
+
+    let map = match parameters.as_object_mut() {
+        Some(m) => m,
+        None => return,
+    };
+
+    // 1. Remove $schema
+    map.remove("$schema");
+
+    // 2. Remove top-level logical combinators forbidden by OpenAI
+    // ("schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at the top level")
+    let combinator_variants = map
+        .remove("anyOf")
+        .or_else(|| map.remove("oneOf"))
+        .or_else(|| map.remove("allOf"));
+    map.remove("anyOf");
+    map.remove("oneOf");
+    map.remove("allOf");
+    map.remove("enum");
+    map.remove("const");
+    map.remove("not");
+
+    // If properties is missing, try recovering properties and required from the first object variant in anyOf/oneOf/allOf
+    if !map.contains_key("properties") {
+        if let Some(variants) = combinator_variants {
+            if let Some(first_obj) = variants.as_array().and_then(|arr| arr.iter().find(|v| v.is_object())) {
+                if let Some(props) = first_obj.get("properties") {
+                    map.insert("properties".to_string(), props.clone());
+                }
+                if let Some(req) = first_obj.get("required") {
+                    map.insert("required".to_string(), req.clone());
+                }
+            }
+        }
+    }
+
+    // 3. Ensure "type" is strictly "object"
+    let has_type_object = map.get("type").and_then(Value::as_str) == Some("object");
+    if !has_type_object {
+        map.insert("type".to_string(), json!("object"));
+    }
+
+    // 4. Ensure "properties" is present and is an object
+    let has_properties_object = map.get("properties").map(|p| p.is_object()).unwrap_or(false);
+    if !has_properties_object {
+        if function_name == "exec" || function_name == "js" {
+            map.insert("properties".to_string(), json!({
+                "code": {
+                    "type": "string",
+                    "description": "JavaScript code to execute in isolate"
+                }
+            }));
+            if !map.contains_key("required") {
+                map.insert("required".to_string(), json!(["code"]));
+            }
+        } else {
+            map.insert("properties".to_string(), json!({}));
+        }
+    } else if (function_name == "exec" || function_name == "js")
+        && map["properties"].as_object().map(|p| p.is_empty()).unwrap_or(false)
+    {
+        // For exec / js, if properties is empty {}, populate code parameter
+        map.insert("properties".to_string(), json!({
+            "code": {
+                "type": "string",
+                "description": "JavaScript code to execute in isolate"
+            }
+        }));
+        if !map.contains_key("required") {
+            map.insert("required".to_string(), json!(["code"]));
+        }
+    }
+
+    // 5. Ensure "required" only lists property names that exist in "properties"
+    let valid_prop_keys: Option<std::collections::HashSet<String>> = map
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|p| p.keys().cloned().collect());
+
+    if let Some(req_val) = map.get_mut("required") {
+        if let Some(req_arr) = req_val.as_array_mut() {
+            if let Some(ref valid_keys) = valid_prop_keys {
+                req_arr.retain(|item| {
+                    item.as_str().map(|s| valid_keys.contains(s)).unwrap_or(false)
+                });
+            } else {
+                *req_val = json!([]);
+            }
+        } else {
+            map.remove("required");
+        }
+    }
+}
+
 /// Normalize OpenAIChatRequest before sending to upstream OpenAI-compatible endpoints.
 /// 1. Roles: translates "developer" -> "system", "model" -> "assistant", "human" -> "user"
 ///    (e.g. DeepSeek, Ollama, Groq, Mistral, Moonshot reject "developer" with 422).
@@ -147,11 +260,122 @@ fn normalize_openai_req_for_upstream(req: &mut OpenAIChatRequest) {
         req.stream_options = None;
     }
 
-    if req.tools.as_ref().map(|t| t.is_empty()).unwrap_or(false) {
-        req.tools = None;
-    }
-    if req.tools.is_none() {
+    const MAX_OPENAI_TOOLS: usize = 128;
+
+    if let Some(ref mut tools) = req.tools {
+        // 1. Sanitize tool schemas ($schema removal, ensure type=object, properties, and strip top-level combinators)
+        for t in tools.iter_mut() {
+            sanitize_openai_tool_parameters(&mut t.function.parameters, &t.function.name);
+        }
+
+        // 2. Deduplicate tools by function name and drop tools with empty function names
+        let mut seen = std::collections::HashSet::new();
+        tools.retain(|t| {
+            let name = t.function.name.trim();
+            !name.is_empty() && seen.insert(name.to_string())
+        });
+
+        // 3. Limit tools to OpenAI's strict maximum of 128 items
+        if tools.len() > MAX_OPENAI_TOOLS {
+            let original_count = tools.len();
+            tracing::warn!(
+                "Tools count ({}) exceeds OpenAI maximum limit of {}; prioritizing active/chosen tools and capping at 128",
+                original_count,
+                MAX_OPENAI_TOOLS
+            );
+
+            // Extract required tool name from tool_choice if present
+            let required_tool_name = req.tool_choice.as_ref().and_then(|tc| {
+                if let Some(s) = tc.as_str() {
+                    if s != "auto" && s != "none" && s != "required" {
+                        Some(s.to_string())
+                    } else {
+                        None
+                    }
+                } else if let Some(obj) = tc.as_object() {
+                    obj.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
+
+            // Collect names of tools referenced in recent message history (e.g. tool_calls in assistant messages or tool results)
+            let mut priority_names = std::collections::HashSet::new();
+            if let Some(ref name) = required_tool_name {
+                priority_names.insert(name.clone());
+            }
+
+            for msg in req.messages.iter().rev().take(10) {
+                if let Some(ref tcs) = msg.tool_calls {
+                    for tc in tcs {
+                        if !tc.function.name.is_empty() {
+                            priority_names.insert(tc.function.name.clone());
+                        }
+                    }
+                }
+                if let Some(ref name) = msg.name {
+                    if !name.is_empty() {
+                        priority_names.insert(name.clone());
+                    }
+                }
+            }
+
+            // Partition into priority tools and remaining tools
+            let mut prioritized = Vec::with_capacity(MAX_OPENAI_TOOLS);
+            let mut remaining = Vec::with_capacity(tools.len());
+
+            for t in tools.drain(..) {
+                if priority_names.contains(&t.function.name) && prioritized.len() < MAX_OPENAI_TOOLS {
+                    prioritized.push(t);
+                } else {
+                    remaining.push(t);
+                }
+            }
+
+            let needed = MAX_OPENAI_TOOLS.saturating_sub(prioritized.len());
+            prioritized.extend(remaining.into_iter().take(needed));
+
+            *tools = prioritized;
+        }
+
+        if tools.is_empty() {
+            req.tools = None;
+            req.tool_choice = None;
+        }
+    } else {
         req.tool_choice = None;
+    }
+
+    // 4. Validate tool_choice integrity against available tools
+    if let Some(ref tc) = req.tool_choice {
+        let specified_tool = if let Some(s) = tc.as_str() {
+            if s != "auto" && s != "none" && s != "required" {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        } else if let Some(obj) = tc.as_object() {
+            obj.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        if let Some(name) = specified_tool {
+            let exists = req
+                .tools
+                .as_ref()
+                .map(|ts| ts.iter().any(|t| t.function.name == name))
+                .unwrap_or(false);
+            if !exists {
+                req.tool_choice = Some(Value::String("auto".to_string()));
+            }
+        }
     }
 
     if let Some(ref mut effort) = req.reasoning_effort {
@@ -345,11 +569,14 @@ async fn handle_gemini_get_model(
 
 fn extract_session_id(headers: &HeaderMap) -> Option<String> {
     for key in &[
+        "x-opencode-session",
         "x-session-id",
         "session-id",
         "anthropic-session-id",
         "x-claude-session-id",
         "x-codex-session-id",
+        "conversation-id",
+        "x-conversation-id",
         "authorization",
     ] {
         if let Some(val) = headers.get(*key).and_then(|v| v.to_str().ok()) {
@@ -359,6 +586,85 @@ fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
+}
+
+fn is_opencode_provider(provider: &Provider) -> bool {
+    provider.preset_id.as_deref() == Some("opencode")
+        || provider.base_url.contains("opencode.ai")
+        || provider.name.to_lowercase().contains("opencode")
+}
+
+fn stable_uuid_from_seed(seed: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    let hash = hasher.finalize();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        hash[0], hash[1], hash[2], hash[3],
+        hash[4], hash[5],
+        (hash[6] & 0x0f) | 0x40, // RFC 4122 v4 marker
+        hash[7],
+        (hash[8] & 0x3f) | 0x80, // RFC 4122 variant marker
+        hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]
+    )
+}
+
+fn derive_opencode_session_id(
+    headers: &HeaderMap,
+    session_hint: Option<&str>,
+    req_id: &str,
+) -> String {
+    // 1. 优先从请求头携带的会话 ID 获取
+    for key in &[
+        "x-opencode-session",
+        "x-session-id",
+        "session-id",
+        "anthropic-session-id",
+        "x-claude-session-id",
+        "x-codex-session-id",
+        "conversation-id",
+        "x-conversation-id",
+    ] {
+        if let Some(val) = headers.get(*key).and_then(|v| v.to_str().ok()) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with("Bearer ")
+                && !trimmed.starts_with("sk-")
+                && !trimmed.starts_with("oc_sk_")
+            {
+                if uuid::Uuid::parse_str(trimmed).is_ok() {
+                    return trimmed.to_string();
+                }
+                return stable_uuid_from_seed(trimmed);
+            }
+        }
+    }
+
+    // 2. 基于首条消息/上下文提示生成稳定会话 UUID，保证同会话多轮对话复用同一个 Prompt Cache
+    if let Some(hint) = session_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        return stable_uuid_from_seed(hint);
+    }
+
+    // 3. 兜底回落为本次请求的合法 UUID
+    if uuid::Uuid::parse_str(req_id).is_ok() {
+        req_id.to_string()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    }
+}
+
+fn apply_upstream_headers(
+    mut builder: reqwest::RequestBuilder,
+    provider: &Provider,
+    headers: &HeaderMap,
+    session_hint: Option<&str>,
+    req_id: &str,
+) -> reqwest::RequestBuilder {
+    if is_opencode_provider(provider) || headers.contains_key("x-opencode-session") {
+        let session_str = derive_opencode_session_id(headers, session_hint, req_id);
+        builder = builder.header("x-opencode-session", session_str);
+    }
+    builder
 }
 
 fn extract_client_api_key(headers: &HeaderMap) -> Option<String> {
@@ -391,6 +697,9 @@ fn detect_client_type(headers: &HeaderMap, default_type: &str) -> String {
         if ua_lower.contains("gemini") {
             return "gemini_cli".to_string();
         }
+        if ua_lower.contains("opencode") {
+            return "opencode".to_string();
+        }
     }
     default_type.to_string()
 }
@@ -404,6 +713,7 @@ fn resolve_forward_user_agent(client_ua: Option<&str>, client_type: &str) -> Str
         "claude_code" => "Claude-Code/0.2.29".to_string(),
         "gemini_cli" => "gemini-cli/1.0.0".to_string(),
         "pi" => "pi/1.0.0".to_string(),
+        "opencode" => "opencode/1.0.0".to_string(),
         _ => format!("Pivot/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS),
     }
 }
@@ -495,6 +805,7 @@ async fn handle_messages(
             client_key.as_deref(),
             client_ua,
             &client_type,
+            &headers,
         )
         .await;
 
@@ -629,12 +940,14 @@ async fn dispatch_anthropic_request(
     client_key: Option<&str>,
     client_ua: Option<&str>,
     client_type: &str,
+    headers: &HeaderMap,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
     let estimated_prompt = estimate_anthropic_req_prompt_tokens(req);
     let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
     let effective_key = cand.api_key.as_deref().or(client_key);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
+    let session_hint = req.messages.first().map(|m| format!("{:?}", m.content));
 
     match cand.provider.protocol.as_str() {
         "anthropic" => {
@@ -650,6 +963,22 @@ async fn dispatch_anthropic_request(
                 .header("user-agent", &forward_ua)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
+
+            req_builder = apply_upstream_headers(
+                req_builder,
+                &cand.provider,
+                headers,
+                session_hint.as_deref(),
+                req_id,
+            );
+
+            req_builder = apply_upstream_headers(
+                req_builder,
+                &cand.provider,
+                headers,
+                session_hint.as_deref(),
+                req_id,
+            );
 
             if let Some(key) = effective_key {
                 req_builder = req_builder
@@ -791,6 +1120,14 @@ async fn dispatch_anthropic_request(
                 .timeout(timeout)
                 .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
+
+            req_builder = apply_upstream_headers(
+                req_builder,
+                &cand.provider,
+                headers,
+                session_hint.as_deref(),
+                req_id,
+            );
 
             if let Some(key) = effective_key {
                 req_builder = req_builder.header("authorization", format!("Bearer {}", key));
@@ -1069,6 +1406,14 @@ async fn dispatch_anthropic_request(
                     .timeout(timeout)
                     .header("user-agent", &forward_ua)
                     .header("content-type", "application/json");
+
+                req_builder = apply_upstream_headers(
+                    req_builder,
+                    &cand.provider,
+                    headers,
+                    session_hint.as_deref(),
+                    req_id,
+                );
 
                 if let Some(auth) = auth_header {
                     req_builder = req_builder
@@ -1368,6 +1713,7 @@ async fn handle_chat_completions(
             client_key.as_deref(),
             client_ua,
             &client_type,
+            &headers,
         )
         .await;
 
@@ -1583,6 +1929,7 @@ async fn handle_responses(
             client_key.as_deref(),
             client_ua,
             &client_type,
+            &headers,
         )
         .await
         {
@@ -1901,29 +2248,39 @@ async fn dispatch_openai_request(
     client_key: Option<&str>,
     client_ua: Option<&str>,
     client_type: &str,
+    headers: &HeaderMap,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
-    let estimated_prompt = estimate_openai_req_prompt_tokens(req);
+    let mut req_body = req.clone();
+    req_body.model = cand.target_model.clone();
+    normalize_openai_req_for_upstream(&mut req_body);
+
+    let estimated_prompt = estimate_openai_req_prompt_tokens(&req_body);
     let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
     let effective_key = cand.api_key.as_deref().or(client_key);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
+    let session_hint = req_body.messages.first().map(|m| format!("{:?}", m.content));
 
     match cand.provider.protocol.as_str() {
         "chatgpt" => {
-            dispatch_chatgpt_request(state, req, cand, req_id, is_stream).await
+            dispatch_chatgpt_request(state, &req_body, cand, req_id, is_stream).await
         }
         "openai" | "openrouter" | "ollama" => {
             let url = resolve_upstream_endpoint(&cand.provider.base_url, "/chat/completions");
-
-            let mut req_body = req.clone();
-            req_body.model = cand.target_model.clone();
-            normalize_openai_req_for_upstream(&mut req_body);
 
             let mut req_builder = client
                 .post(&url)
                 .timeout(timeout)
                 .header("user-agent", &forward_ua)
                 .header("content-type", "application/json");
+
+            req_builder = apply_upstream_headers(
+                req_builder,
+                &cand.provider,
+                headers,
+                session_hint.as_deref(),
+                req_id,
+            );
 
             if let Some(key) = effective_key {
                 req_builder = req_builder.header("authorization", format!("Bearer {}", key));
@@ -2052,7 +2409,7 @@ async fn dispatch_openai_request(
         "anthropic" => {
             // Client called OpenAI endpoint, but upstream is Anthropic!
             let anthropic_req =
-                openai_to_anthropic::convert_openai_req_to_anthropic(req, &cand.target_model);
+                openai_to_anthropic::convert_openai_req_to_anthropic(&req_body, &cand.target_model);
             let url = resolve_upstream_endpoint(&cand.provider.base_url, "/messages");
 
             let mut req_builder = client
@@ -2061,6 +2418,14 @@ async fn dispatch_openai_request(
                 .header("user-agent", &forward_ua)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
+
+            req_builder = apply_upstream_headers(
+                req_builder,
+                &cand.provider,
+                headers,
+                session_hint.as_deref(),
+                req_id,
+            );
 
             if let Some(key) = effective_key {
                 req_builder = req_builder
@@ -2259,6 +2624,14 @@ async fn dispatch_openai_request(
                     .timeout(timeout)
                     .header("user-agent", &forward_ua)
                     .header("content-type", "application/json");
+
+                req_builder = apply_upstream_headers(
+                    req_builder,
+                    &cand.provider,
+                    headers,
+                    session_hint.as_deref(),
+                    req_id,
+                );
 
                 if let Some(auth) = auth_header {
                     req_builder = req_builder
@@ -2622,6 +2995,7 @@ async fn handle_gemini_generate_content(
             client_key,
             client_ua,
             &client_type,
+            &headers,
         )
         .await;
 
@@ -2731,10 +3105,16 @@ async fn dispatch_gemini_request(
     client_key: Option<&str>,
     client_ua: Option<&str>,
     client_type: &str,
+    headers: &HeaderMap,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
     let timeout = resolve_dispatch_timeout(cand, 0);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
+    let session_hint = req_body
+        .get("contents")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .map(|v| v.to_string());
 
     match cand.provider.protocol.as_str() {
         "gemini" => {
@@ -2821,6 +3201,14 @@ async fn dispatch_gemini_request(
                     .timeout(timeout)
                     .header("user-agent", &forward_ua)
                     .header("content-type", "application/json");
+
+                req_builder = apply_upstream_headers(
+                    req_builder,
+                    &cand.provider,
+                    headers,
+                    session_hint.as_deref(),
+                    req_id,
+                );
 
                 if let Some(auth) = auth_header {
                     req_builder = req_builder
@@ -3234,5 +3622,212 @@ mod tests {
 
         // Large context (e.g. 500k prompt tokens) scales dynamically: 180 + (500k/50k)*15 = 180 + 150 = 330s
         assert_eq!(resolve_dispatch_timeout(&cand, 500_000), Duration::from_secs(330));
+    }
+
+    #[test]
+    fn test_is_opencode_provider() {
+        let mut p = crate::db::Provider {
+            id: "prov_1".to_string(),
+            name: "My Custom".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://api.openai.com".to_string(),
+            api_keys: vec!["k".to_string()],
+            models: vec!["gpt-4o".to_string()],
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+            preset_id: None,
+            default_model: None,
+            is_default: false,
+            auth_type: None,
+        };
+        assert!(!is_opencode_provider(&p));
+
+        p.preset_id = Some("opencode".to_string());
+        assert!(is_opencode_provider(&p));
+
+        p.preset_id = None;
+        p.base_url = "https://opencode.ai/zen/go/v1".to_string();
+        assert!(is_opencode_provider(&p));
+
+        p.base_url = "https://api.openai.com".to_string();
+        p.name = "OpenCode Go".to_string();
+        assert!(is_opencode_provider(&p));
+    }
+
+    #[test]
+    fn test_derive_opencode_session_id() {
+        use axum::http::HeaderMap;
+
+        // 1. Direct valid UUID in header
+        let mut headers = HeaderMap::new();
+        let valid_uuid = "123e4567-e89b-12d3-a456-426614174000";
+        headers.insert("x-opencode-session", valid_uuid.parse().unwrap());
+        assert_eq!(derive_opencode_session_id(&headers, None, "req-1"), valid_uuid);
+
+        // 2. Arbitrary string session header converted to stable valid UUID
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("x-session-id", "my-custom-session-string".parse().unwrap());
+        let derived = derive_opencode_session_id(&headers2, None, "req-1");
+        assert!(uuid::Uuid::parse_str(&derived).is_ok());
+        // Stable across calls with same seed
+        assert_eq!(derived, derive_opencode_session_id(&headers2, None, "req-2"));
+
+        // 3. Fallback to session_hint when header is missing
+        let empty_headers = HeaderMap::new();
+        let derived_from_hint = derive_opencode_session_id(&empty_headers, Some("Hello AI"), "req-1");
+        assert!(uuid::Uuid::parse_str(&derived_from_hint).is_ok());
+        assert_eq!(derived_from_hint, derive_opencode_session_id(&empty_headers, Some("Hello AI"), "req-2"));
+
+        // 4. Fallback to valid req_id or random UUID
+        let derived_from_req = derive_opencode_session_id(&empty_headers, None, valid_uuid);
+        assert_eq!(derived_from_req, valid_uuid);
+    }
+
+    #[test]
+    fn test_normalize_openai_req_tools_clamping_and_prioritization() {
+        use crate::gateway::types::{OpenAIFunction, OpenAITool, OpenAIToolCall, OpenAIFunctionCall};
+
+        // Construct 150 tools
+        let mut tools = Vec::new();
+        for i in 0..150 {
+            tools.push(OpenAITool {
+                tool_type: "function".to_string(),
+                function: OpenAIFunction {
+                    name: format!("tool_{}", i),
+                    description: Some(format!("Description for tool {}", i)),
+                    parameters: json!({
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {
+                            "arg": { "type": "string" }
+                        }
+                    }),
+                },
+            });
+        }
+
+        // Add a duplicate tool to test deduplication
+        tools.push(OpenAITool {
+            tool_type: "function".to_string(),
+            function: OpenAIFunction {
+                name: "tool_0".to_string(),
+                description: Some("duplicate tool_0".to_string()),
+                parameters: json!({ "type": "object" }),
+            },
+        });
+
+        // tool_145 is deep in the list (> 128) and specified as tool_choice
+        // tool_140 was called in recent message tool_calls
+        let mut req = OpenAIChatRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![
+                OpenAIMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![OpenAIToolCall {
+                        index: Some(0),
+                        id: "call_1".to_string(),
+                        call_type: "function".to_string(),
+                        function: OpenAIFunctionCall {
+                            name: "tool_140".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    name: None,
+                },
+                OpenAIMessage {
+                    role: "tool".to_string(),
+                    content: Some(json!("result")),
+                    tool_calls: None,
+                    tool_call_id: Some("call_1".to_string()),
+                    reasoning_content: None,
+                    name: Some("tool_140".to_string()),
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            reasoning_effort: None,
+            tools: Some(tools),
+            tool_choice: Some(json!({
+                "type": "function",
+                "function": { "name": "tool_145" }
+            })),
+            stream: None,
+            stream_options: None,
+        };
+
+        normalize_openai_req_for_upstream(&mut req);
+
+        let final_tools = req.tools.as_ref().unwrap();
+        // Capped at exactly 128 items
+        assert_eq!(final_tools.len(), 128);
+
+        // tool_145 (required by tool_choice) MUST be preserved in the 128 items!
+        assert!(final_tools.iter().any(|t| t.function.name == "tool_145"));
+
+        // tool_140 (referenced in messages) MUST be preserved in the 128 items!
+        assert!(final_tools.iter().any(|t| t.function.name == "tool_140"));
+
+        // $schema stripped from parameters
+        assert!(final_tools[0].function.parameters.get("$schema").is_none());
+
+        // tool_choice remains valid because tool_145 is present
+        assert_eq!(
+            req.tool_choice.as_ref().unwrap()["function"]["name"],
+            "tool_145"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_openai_tool_parameters_for_js_and_combinators() {
+        // 1. js tool with empty schema {}
+        let mut js_empty = json!({});
+        sanitize_openai_tool_parameters(&mut js_empty, "js");
+        assert_eq!(js_empty["type"], "object");
+        assert!(js_empty["properties"].get("code").is_some());
+        assert_eq!(js_empty["required"], json!(["code"]));
+
+        // 2. tool with top-level anyOf, enum, const, not
+        let mut tool_with_anyof = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }
+            ],
+            "enum": ["some_value"],
+            "const": "test",
+            "not": { "type": "null" }
+        });
+        sanitize_openai_tool_parameters(&mut tool_with_anyof, "search");
+        assert_eq!(tool_with_anyof["type"], "object");
+        assert!(tool_with_anyof["properties"].get("query").is_some());
+        assert_eq!(tool_with_anyof["required"], json!(["query"]));
+        assert!(tool_with_anyof.get("anyOf").is_none());
+        assert!(tool_with_anyof.get("enum").is_none());
+        assert!(tool_with_anyof.get("const").is_none());
+        assert!(tool_with_anyof.get("not").is_none());
+
+        // 3. tool with invalid required keys (keys that don't exist in properties)
+        let mut tool_invalid_req = json!({
+            "type": "object",
+            "properties": {
+                "foo": { "type": "string" }
+            },
+            "required": ["foo", "non_existent_key"]
+        });
+        sanitize_openai_tool_parameters(&mut tool_invalid_req, "foo_tool");
+        assert_eq!(tool_invalid_req["required"], json!(["foo"]));
     }
 }

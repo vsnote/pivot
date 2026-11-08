@@ -369,7 +369,12 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
         if declarations.is_empty() {
             None
         } else {
-            Some(vec![json!({ "functionDeclarations": declarations })])
+            let decls = if declarations.len() > 128 {
+                declarations.into_iter().take(128).collect()
+            } else {
+                declarations
+            };
+            Some(vec![json!({ "functionDeclarations": decls })])
         }
     });
 
