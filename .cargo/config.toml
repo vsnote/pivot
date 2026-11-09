@@ -1,0 +1,11 @@
+[env]
+RUSTC_BOOTSTRAP = "1"
+
+[build]
+rustflags = [
+    "-Zcrate-attr=feature(slice_as_array)",
+    "-Zcrate-attr=feature(cold_path)",
+    "-Zcrate-attr=feature(result_option_map_or_default)",
+    "-Zcrate-attr=feature(atomic_try_update)",
+    "-Zcrate-attr=feature(cfg_select)",
+]

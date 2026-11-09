@@ -1,0 +1,22 @@
+[package]
+name = "pivot-desktop"
+version = "0.2.11"
+description = "Pivot High-Performance Native Desktop Client with GPUI"
+authors = ["Pivot"]
+edition = "2021"
+
+[[bin]]
+name = "pivot"
+path = "src/main.rs"
+
+[dependencies]
+pivot-core = { path = "../pivot-core" }
+gpui-kit = "0.9.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+uuid = "1.10"
+dirs = "5.0"
