@@ -13,137 +13,274 @@ pub fn render_settings_view(
         .flex()
         .flex_col()
         .w_full()
-        .max_w(px(720.0))
+        .max_w(px(960.0))
         .mx_auto()
-        .gap(px(16.0))
+        .gap(px(14.0))
+        // 卡片 1：通用偏好
         .child(
-            // 网关配置卡片
             div()
                 .flex()
                 .flex_col()
-                .p(px(20.0))
-                .rounded(px(10.0))
-                .bg(rgb(0x202023))
+                .w_full()
+                .rounded(px(8.0))
                 .border_1()
-                .border_color(rgba(0xffffff10))
-                .gap(px(12.0))
+                .border_color(rgb(0x2e2e32))
+                .bg(rgb(0x1c1c1f))
+                .overflow_hidden()
                 .child(
                     div()
-                        .text_size(px(15.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xffffff))
-                        .child("网关与服务配置"),
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .bg(rgb(0x222226))
+                        .border_b_1()
+                        .border_color(rgb(0x2e2e32))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0xededee))
+                        .child("通用偏好设置"),
                 )
+                // 外观模式
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .py(px(8.0))
+                        .px(px(16.0))
+                        .py(px(12.0))
                         .border_b_1()
-                        .border_color(rgba(0xffffff08))
+                        .border_color(rgb(0x2e2e32))
                         .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(0xd4d4d8))
-                                        .child("本地监听端口"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(0x71717a))
-                                        .child("提供 OpenAI & Anthropic 格式的代理服务"),
-                                ),
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0xededee))
+                                .child("界面外观"),
                         )
                         .child(
                             div()
-                                .px(px(10.0))
-                                .py(px(4.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .p(px(2.0))
                                 .rounded(px(6.0))
-                                .bg(rgba(0xffffff0a))
-                                .border_1()
-                                .border_color(rgba(0xffffff10))
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x60a5fa))
-                                .child(format!("http://127.0.0.1:{}", port)),
+                                .bg(rgb(0x27272a))
+                                .child(render_setting_chip("深色", true))
+                                .child(render_setting_chip("浅色", false))
+                                .child(render_setting_chip("跟随系统", false)),
                         ),
                 )
+                // 语言
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .py(px(8.0))
+                        .px(px(16.0))
+                        .py(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0xededee))
+                                .child("界面语言"),
+                        )
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(0xd4d4d8))
-                                        .child("数据存储路径"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(0x71717a))
-                                        .child(db_path.to_string_lossy().to_string()),
-                                ),
+                                .items_center()
+                                .gap(px(4.0))
+                                .p(px(2.0))
+                                .rounded(px(6.0))
+                                .bg(rgb(0x27272a))
+                                .child(render_setting_chip("简体中文", true))
+                                .child(render_setting_chip("English", false)),
                         ),
                 ),
         )
+        // 卡片 2：常用快捷键速查
         .child(
-            // 关于与架构说明卡片
             div()
                 .flex()
                 .flex_col()
-                .p(px(20.0))
-                .rounded(px(10.0))
-                .bg(rgb(0x202023))
+                .w_full()
+                .rounded(px(8.0))
                 .border_1()
-                .border_color(rgba(0xffffff10))
+                .border_color(rgb(0x2e2e32))
+                .bg(rgb(0x1c1c1f))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .bg(rgb(0x222226))
+                        .border_b_1()
+                        .border_color(rgb(0x2e2e32))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0xededee))
+                        .child("常用快捷键"),
+                )
+                .child(render_shortcut_row("切换主要视图页面", "⌘ 1 ~ 4"))
+                .child(render_shortcut_row("快速打开新增服务商", "⌘ N"))
+                .child(render_shortcut_row("关闭抽屉或取消返回", "Esc")),
+        )
+        // 卡片 3：关于 Pivot 与网关信息
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(0x2e2e32))
+                .bg(rgb(0x1c1c1f))
+                .p(px(16.0))
                 .gap(px(12.0))
                 .child(
                     div()
-                        .text_size(px(15.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xffffff))
-                        .child("关于 Pivot"),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(rgb(0xa1a1aa))
-                        .child("Pivot 是新一代纯 Rust + GPUI GPU 硬件加速的高性能 AI 网关与模型调度工具。"),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(36.0))
+                                        .rounded(px(8.0))
+                                        .bg(rgb(0x2563eb))
+                                        .text_size(px(18.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xffffff))
+                                        .child("P"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(14.0))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(rgb(0xededee))
+                                                        .child("Pivot Native (GPUI)"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .px(px(6.0))
+                                                        .py(px(1.0))
+                                                        .rounded(px(4.0))
+                                                        .bg(rgb(0x27272a))
+                                                        .text_size(px(10.0))
+                                                        .text_color(rgb(0xa1a1aa))
+                                                        .child("v0.2.11"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(0x71717a))
+                                                .child("高性能、零内存泄漏的本地 AI 网关与模型调度中枢"),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(div().size(px(6.0)).rounded_full().bg(rgb(0x10b981)))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(0x34d399))
+                                        .child("已是最新版本"),
+                                ),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(16.0))
-                        .pt(px(6.0))
+                        .justify_between()
+                        .pt(px(10.0))
+                        .border_t_1()
+                        .border_color(rgb(0x2e2e32))
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x71717a))
+                        .child(format!("本地网关: http://127.0.0.1:{} · 数据库: {}", port, db_path.to_string_lossy()))
                         .child(
                             div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(0x71717a))
-                                .child("版本: v0.2.11 (GPUI Native Edition)"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(0x71717a))
-                                .child("渲染引擎: GPUI (Metal / Vulkan / DirectX)"),
+                                .text_color(rgb(0x60a5fa))
+                                .cursor_pointer()
+                                .child("github.com/vsnote/pivot ↗"),
                         ),
                 ),
+        )
+}
+
+fn render_setting_chip(label: &'static str, is_active: bool) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .text_size(px(11.0))
+        .font_weight(if is_active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .bg(if is_active {
+            rgb(0x3f3f46)
+        } else {
+            rgba(0x00000000)
+        })
+        .text_color(if is_active {
+            rgb(0xffffff)
+        } else {
+            rgb(0xa1a1aa)
+        })
+        .cursor_pointer()
+        .child(label)
+}
+
+fn render_shortcut_row(label: &'static str, shortcut: &'static str) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .px(px(16.0))
+        .py(px(10.0))
+        .border_b_1()
+        .border_color(rgb(0x2e2e32))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0xededee))
+                .child(label),
+        )
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(rgb(0x3f3f46))
+                .bg(rgb(0x27272a))
+                .text_size(px(11.0))
+                .text_color(rgb(0xd4d4d8))
+                .child(shortcut),
         )
 }

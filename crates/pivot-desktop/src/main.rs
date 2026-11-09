@@ -3,14 +3,15 @@ mod views;
 
 use components::header::render_header;
 use gpui_kit::component::input::InputState;
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use pivot_core::db::{Provider, RequestLog};
 use pivot_core::interceptor::InterceptorInfo;
 use pivot_core::service;
 use pivot_core::state::AppState;
 use std::collections::HashMap;
+use std::sync::Arc;
 use views::clients::render_clients_view;
 use views::dashboard::render_dashboard_view;
 use views::providers::{render_provider_editor, render_provider_list};
@@ -26,6 +27,7 @@ pub enum ActiveTab {
 
 pub struct PivotApp {
     pub core_state: AppState,
+    pub tokio_handle: tokio::runtime::Handle,
     pub active_tab: ActiveTab,
     pub port: u16,
     pub providers: Vec<Provider>,
@@ -49,10 +51,15 @@ pub struct PivotApp {
 }
 
 impl PivotApp {
-    pub fn new(core_state: AppState, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        core_state: AppState,
+        tokio_handle: tokio::runtime::Handle,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let port = core_state.port;
         let mut app = Self {
             core_state,
+            tokio_handle,
             active_tab: ActiveTab::Providers,
             port,
             providers: Vec::new(),
@@ -79,10 +86,18 @@ impl PivotApp {
 
     pub fn refresh_all(&mut self, cx: &mut Context<Self>) {
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let providers_res = service::get_providers(&state).await;
-            let interceptors_res = service::get_interceptor_status(&state).await;
-            let logs_res = service::get_logs(&state, Some(100), None).await;
+            let (providers_res, interceptors_res, logs_res) = handle
+                .spawn(async move {
+                    let p = service::get_providers(&state).await;
+                    let i = service::get_interceptor_status(&state).await;
+                    let l = service::get_logs(&state, Some(100), None).await;
+                    (p, i, l)
+                })
+                .await
+                .unwrap();
 
             let _ = this.update(cx, |app: &mut PivotApp, cx: &mut Context<PivotApp>| {
                 if let Ok(providers) = providers_res {
@@ -213,8 +228,14 @@ impl PivotApp {
         };
 
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::save_provider(&state, provider).await;
+            let res = handle
+                .spawn(async move { service::save_provider(&state, provider).await })
+                .await
+                .unwrap();
+
             let _ = this.update(cx, |app: &mut PivotApp, cx: &mut Context<PivotApp>| {
                 match res {
                     Ok(_) => {
@@ -233,8 +254,14 @@ impl PivotApp {
 
     pub fn delete_provider(&mut self, id: String, cx: &mut Context<Self>) {
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::delete_provider(&state, id).await;
+            let res = handle
+                .spawn(async move { service::delete_provider(&state, id).await })
+                .await
+                .unwrap();
+
             let _ = this.update(
                 cx,
                 |app: &mut PivotApp, cx: &mut Context<PivotApp>| match res {
@@ -251,8 +278,14 @@ impl PivotApp {
 
     pub fn toggle_provider(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::set_provider_enabled(&state, id, enabled).await;
+            let res = handle
+                .spawn(async move { service::set_provider_enabled(&state, id, enabled).await })
+                .await
+                .unwrap();
+
             let _ = this.update(
                 cx,
                 |app: &mut PivotApp, cx: &mut Context<PivotApp>| match res {
@@ -272,13 +305,19 @@ impl PivotApp {
         cx.notify();
 
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
         let target_id = id.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::test_provider_latency(&state, target_id.clone()).await;
+            let res = handle
+                .spawn(async move { service::test_provider_latency(&state, target_id.clone()).await })
+                .await
+                .unwrap();
+
             let _ = this.update(cx, |app: &mut PivotApp, cx: &mut Context<PivotApp>| {
-                app.testing_latencies.remove(&target_id);
+                app.testing_latencies.remove(&id);
                 if let Ok(latency) = res {
-                    app.latencies.insert(target_id, latency);
+                    app.latencies.insert(id, latency);
                 }
                 cx.notify();
             });
@@ -288,8 +327,14 @@ impl PivotApp {
 
     pub fn toggle_interceptor(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::toggle_interceptor(&state, id, enabled).await;
+            let res = handle
+                .spawn(async move { service::toggle_interceptor(&state, id, enabled).await })
+                .await
+                .unwrap();
+
             let _ = this.update(
                 cx,
                 |app: &mut PivotApp, cx: &mut Context<PivotApp>| match res {
@@ -311,8 +356,14 @@ impl PivotApp {
         cx: &mut Context<Self>,
     ) {
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::set_interceptor_model(&state, id, model).await;
+            let res = handle
+                .spawn(async move { service::set_interceptor_model(&state, id, model).await })
+                .await
+                .unwrap();
+
             let _ = this.update(
                 cx,
                 |app: &mut PivotApp, cx: &mut Context<PivotApp>| match res {
@@ -329,8 +380,14 @@ impl PivotApp {
 
     pub fn clear_logs(&mut self, cx: &mut Context<Self>) {
         let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+
         cx.spawn(async move |this, cx| {
-            let res = service::clear_logs(&state).await;
+            let res = handle
+                .spawn(async move { service::clear_logs(&state).await })
+                .await
+                .unwrap();
+
             let _ = this.update(cx, |app: &mut PivotApp, cx: &mut Context<PivotApp>| {
                 if res.is_ok() {
                     app.logs.clear();
@@ -355,8 +412,8 @@ impl Render for PivotApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x18181b))
-            .text_color(rgb(0xffffff))
+            .bg(rgb(0x141416)) // 原版石墨曜石深色背景
+            .text_color(rgb(0xededee))
             .child(render_header(active_tab, self.port, window, cx))
             // 错误提示条
             .when_some(error_opt, |el, err| {
@@ -365,9 +422,12 @@ impl Render for PivotApp {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .mx(px(16.0))
-                        .mt(px(10.0))
-                        .p(px(10.0))
+                        .max_w(px(960.0))
+                        .w_full()
+                        .mx_auto()
+                        .mt(px(12.0))
+                        .px(px(16.0))
+                        .py(px(10.0))
                         .rounded(px(8.0))
                         .bg(rgba(0xef444415))
                         .border_1()
@@ -393,12 +453,13 @@ impl Render for PivotApp {
                         ),
                 )
             })
-            // 主视图内容区域
+            // 主视图内容区域：原版 max-w 居中流式卡片，自然滚动
             .child(
                 div()
                     .flex_1()
                     .w_full()
-                    .p(px(20.0))
+                    .px(px(16.0))
+                    .py(px(16.0))
                     .overflow_y_scrollbar()
                     .child(match active_tab {
                         ActiveTab::Providers => {
@@ -427,19 +488,32 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // 1. 初始化 Tokio 多线程 Runtime 并取得其 Handle
+    let tokio_rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .build()
+            .expect("Failed to build Tokio runtime"),
+    );
+    let tokio_handle = tokio_rt.handle().clone();
+
     let custom_port = std::env::var("PIVOT_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok());
 
-    // 1. 初始化核心业务状态
+    // 2. 初始化核心业务状态
     let app_state = pivot_core::init_core(custom_port).expect("Failed to initialize pivot core");
 
-    // 2. 启动后台 Tokio Axum Gateway 网关服务器
+    // 3. 启动后台 Tokio Axum Gateway 网关服务器
     pivot_core::start_gateway(app_state.clone(), None);
 
-    // 3. 启动 GPUI 桌面渲染事件循环
+    // 4. 启动 GPUI 桌面渲染事件循环
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+
+        let handle_clone = tokio_handle.clone();
+        let state_clone = app_state.clone();
 
         gpui_kit::open_window(
             WindowOptions {
@@ -455,7 +529,7 @@ fn main() {
                 ..Default::default()
             },
             cx,
-            |_, cx| cx.new(|cx| PivotApp::new(app_state, cx)),
+            move |_, cx| cx.new(|cx| PivotApp::new(state_clone, handle_clone, cx)),
         )
         .expect("Failed to open GPUI window");
     });

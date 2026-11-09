@@ -3,116 +3,56 @@ use gpui_kit::*;
 
 pub fn render_header(
     active_tab: ActiveTab,
-    port: u16,
+    _port: u16,
     _window: &mut Window,
     cx: &mut Context<crate::PivotApp>,
 ) -> impl IntoElement {
-    let is_running = true;
-
     div()
         .flex()
         .items_center()
-        .justify_between()
         .w_full()
-        .h(px(52.0))
-        .pl(px(80.0)) // 为 macOS 交通灯留出优雅空间
+        .h(px(48.0))
+        .pl(px(96.0)) // 避让 macOS 原生红绿灯 (96px 安全区)
         .pr(px(16.0))
         .border_b_1()
-        .border_color(rgba(0xffffff15))
+        .border_color(rgb(0x2e2e32))
         .bg(rgb(0x18181b))
         .child(
-            // 左侧：品牌 Logo + 网关运行状态指示
+            // 原版风格：纯净幽灵浮动 Tab 组
             div()
                 .flex()
                 .items_center()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xffffff))
-                                .child("Pivot"),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(8.0))
-                        .py(px(2.0))
-                        .rounded(px(12.0))
-                        .bg(if is_running {
-                            rgba(0x22c55e1a)
-                        } else {
-                            rgba(0xef44441a)
-                        })
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(if is_running {
-                                    rgb(0x22c55e)
-                                } else {
-                                    rgb(0xef4444)
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(if is_running {
-                                    rgb(0x4ade80)
-                                } else {
-                                    rgb(0xf87171)
-                                })
-                                .child(format!(":{}", port)),
-                        ),
-                ),
-        )
-        .child(
-            // 中间：Tab 导航栏
-            div()
-                .flex()
-                .items_center()
-                .p(px(3.0))
-                .rounded(px(8.0))
-                .bg(rgba(0xffffff0a))
-                .gap(px(2.0))
-                .child(render_tab_item(
+                .gap(px(4.0))
+                .child(render_ghost_tab(
                     "服务商",
-                    "⌘1",
                     active_tab == ActiveTab::Providers,
                     cx.listener(|this, _, _, cx| {
-                        this.active_tab = ActiveTab::Providers;
+                        if this.active_tab == ActiveTab::Providers && this.is_provider_editor_open {
+                            this.close_editor(cx);
+                        } else {
+                            this.active_tab = ActiveTab::Providers;
+                        }
                         cx.notify();
                     }),
                 ))
-                .child(render_tab_item(
+                .child(render_ghost_tab(
                     "客户端",
-                    "⌘2",
                     active_tab == ActiveTab::Clients,
                     cx.listener(|this, _, _, cx| {
                         this.active_tab = ActiveTab::Clients;
                         cx.notify();
                     }),
                 ))
-                .child(render_tab_item(
-                    "看板与日志",
-                    "⌘3",
+                .child(render_ghost_tab(
+                    "仪表盘",
                     active_tab == ActiveTab::Logs,
                     cx.listener(|this, _, _, cx| {
                         this.active_tab = ActiveTab::Logs;
                         cx.notify();
                     }),
                 ))
-                .child(render_tab_item(
+                .child(render_ghost_tab(
                     "设置",
-                    "⌘4",
                     active_tab == ActiveTab::Settings,
                     cx.listener(|this, _, _, cx| {
                         this.active_tab = ActiveTab::Settings;
@@ -120,90 +60,54 @@ pub fn render_header(
                     }),
                 )),
         )
-        .child(
-            // 右侧：+ 新增服务商按钮
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(rgb(0x2563eb))
-                        .text_color(rgb(0xffffff))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0x1d4ed8)))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                            this.open_editor(None, window, cx);
-                        }))
-                        .child("+ 新增服务商")
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgba(0xffffff99))
-                                .child("⌘N"),
-                        ),
-                ),
-        )
+        // 剩余全部区域为窗口原生拖拽区，保持通透
+        .child(div().flex_1().h_full())
 }
 
-fn render_tab_item(
+fn render_ghost_tab(
     label: &'static str,
-    shortcut: &'static str,
     is_active: bool,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_click: impl Fn(&gpui_kit::MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
         .flex()
         .items_center()
-        .gap(px(6.0))
-        .px(px(12.0))
-        .py(px(5.0))
+        .justify_center()
+        .h(px(28.0))
+        .px(px(10.0))
         .rounded(px(6.0))
         .cursor_pointer()
+        .text_size(px(12.0))
+        .font_weight(if is_active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(if is_active {
+            rgb(0xededee)
+        } else {
+            rgb(0xa1a1aa)
+        })
         .bg(if is_active {
-            rgba(0xffffff1f)
+            rgb(0x27272a)
         } else {
             rgba(0x00000000)
         })
-        .hover(|s| {
+        .border_1()
+        .border_color(if is_active {
+            rgb(0x3f3f46)
+        } else {
+            rgba(0x00000000)
+        })
+        .hover(|style| {
             if !is_active {
-                s.bg(rgba(0xffffff0f))
+                style
+                    .bg(rgb(0x222226))
+                    .text_color(rgb(0xffffff))
             } else {
-                s
+                style
             }
         })
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(if is_active {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(if is_active {
-                    rgb(0xffffff)
-                } else {
-                    rgb(0xa1a1aa)
-                })
-                .child(label),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(if is_active {
-                    rgb(0xd4d4d8)
-                } else {
-                    rgb(0x71717a)
-                })
-                .child(shortcut),
-        )
+        .child(label)
 }
