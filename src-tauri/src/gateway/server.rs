@@ -118,6 +118,21 @@ fn estimate_openai_req_prompt_tokens(req: &OpenAIChatRequest) -> u32 {
         if let Some(ref content) = m.content {
             match content {
                 Value::String(s) => total += estimate_text_tokens(s),
+                Value::Array(arr) => {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            total += estimate_text_tokens(s);
+                        } else if let Some(t) = item.get("text").and_then(Value::as_str) {
+                            total += estimate_text_tokens(t);
+                        } else if let Some(content_str) = item.get("content").and_then(Value::as_str) {
+                            total += estimate_text_tokens(content_str);
+                        } else if let Some(p_type) = item.get("type").and_then(Value::as_str) {
+                            if p_type == "image_url" || p_type == "input_image" || p_type == "image" {
+                                total += 1000;
+                            }
+                        }
+                    }
+                }
                 _ => total += estimate_text_tokens(&content.to_string()),
             }
         }

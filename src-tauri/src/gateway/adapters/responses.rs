@@ -823,31 +823,108 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
                         .and_then(Value::as_str)
                         .unwrap_or("call_default")
                         .to_string();
-                    let output = item
-                        .get("output")
-                        .map(|v| {
-                            if let Some(s) = v.as_str() {
-                                s.to_string()
-                            } else if let Some(arr) = v.as_array() {
-                                let mut text_buf = String::new();
-                                for part in arr {
-                                    if let Some(s) = part.as_str() {
-                                        text_buf.push_str(s);
-                                    } else if let Some(t) = part.get("text").and_then(Value::as_str) {
-                                        text_buf.push_str(t);
-                                    } else {
-                                        text_buf.push_str(&part.to_string());
+                    let output_val = if let Some(arr) = item.get("output").and_then(Value::as_array) {
+                        let mut clean_parts = Vec::new();
+                        let mut has_img = false;
+                        for part in arr {
+                            if let Some(s) = part.as_str() {
+                                clean_parts.push(json!({ "type": "text", "text": s }));
+                            } else if let Some(obj) = part.as_object() {
+                                let p_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+                                if p_type == "input_image" {
+                                    has_img = true;
+                                    let url_str = obj.get("image_url").and_then(Value::as_str).unwrap_or("");
+                                    let mut img_obj = json!({ "url": url_str });
+                                    if let Some(detail) = obj.get("detail").and_then(Value::as_str) {
+                                        img_obj["detail"] = json!(detail);
                                     }
+                                    clean_parts.push(json!({
+                                        "type": "image_url",
+                                        "image_url": img_obj
+                                    }));
+                                } else if p_type == "image_url" {
+                                    has_img = true;
+                                    let mut new_obj = obj.clone();
+                                    if let Some(url_str) = new_obj.get("image_url").and_then(Value::as_str) {
+                                        let mut img_obj = json!({ "url": url_str });
+                                        if let Some(detail) = new_obj.get("detail").and_then(Value::as_str) {
+                                            img_obj["detail"] = json!(detail);
+                                        }
+                                        new_obj.insert("image_url".to_string(), img_obj);
+                                    }
+                                    clean_parts.push(Value::Object(new_obj));
+                                } else if p_type == "image" {
+                                    has_img = true;
+                                    if let Some(source) = obj.get("source").and_then(Value::as_object) {
+                                        let media_type = source
+                                            .get("media_type")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("image/jpeg");
+                                        let data = source.get("data").and_then(Value::as_str).unwrap_or("");
+                                        clean_parts.push(json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": format!("data:{};base64,{}", media_type, data)
+                                            }
+                                        }));
+                                    } else {
+                                        clean_parts.push(part.clone());
+                                    }
+                                } else if p_type == "input_text" {
+                                    let text = obj.get("text").and_then(Value::as_str).unwrap_or("");
+                                    clean_parts.push(json!({ "type": "text", "text": text }));
+                                } else if p_type == "text" {
+                                    clean_parts.push(part.clone());
+                                } else if let Some(text) = obj.get("text").and_then(Value::as_str) {
+                                    clean_parts.push(json!({ "type": "text", "text": text }));
+                                } else {
+                                    clean_parts.push(json!({ "type": "text", "text": part.to_string() }));
                                 }
-                                text_buf
                             } else {
-                                v.to_string()
+                                clean_parts.push(json!({ "type": "text", "text": part.to_string() }));
                             }
-                        })
-                        .unwrap_or_default();
+                        }
+                        if has_img {
+                            Value::Array(clean_parts)
+                        } else {
+                            let mut text_buf = String::new();
+                            for p in &clean_parts {
+                                if let Some(t) = p.get("text").and_then(Value::as_str) {
+                                    text_buf.push_str(t);
+                                }
+                            }
+                            Value::String(text_buf)
+                        }
+                    } else if let Some(obj) = item.get("output").and_then(Value::as_object) {
+                        let p_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+                        if p_type == "input_image" {
+                            let url_str = obj.get("image_url").and_then(Value::as_str).unwrap_or("");
+                            let mut img_obj = json!({ "url": url_str });
+                            if let Some(detail) = obj.get("detail").and_then(Value::as_str) {
+                                img_obj["detail"] = json!(detail);
+                            }
+                            Value::Array(vec![json!({
+                                "type": "image_url",
+                                "image_url": img_obj
+                            })])
+                        } else if p_type == "image_url" {
+                            Value::Array(vec![json!({
+                                "type": "image_url",
+                                "image_url": obj.get("image_url").cloned().unwrap_or(json!({}))
+                            })])
+                        } else {
+                            Value::String(Value::Object(obj.clone()).to_string())
+                        }
+                    } else if let Some(s) = item.get("output").and_then(Value::as_str) {
+                        Value::String(s.to_string())
+                    } else if let Some(other) = item.get("output") {
+                        Value::String(other.to_string())
+                    } else {
+                        Value::String(String::new())
+                    };
                     messages.push(OpenAIMessage {
                         role: "tool".to_string(),
-                        content: Some(json!(output)),
+                        content: Some(output_val),
                         tool_call_id: Some(call_id),
                         tool_calls: None,
                         reasoning_content: None,
@@ -1304,20 +1381,34 @@ pub fn convert_chat_req_to_responses(req: &OpenAIChatRequest, target_model: &str
                 }
             }
         } else if role == "tool" {
-            let output_str = if let Some(ref c) = msg.content {
+            let output_val = if let Some(ref c) = msg.content {
                 if let Some(s) = c.as_str() {
-                    s.to_string()
+                    json!(s)
+                } else if let Some(arr) = c.as_array() {
+                    let has_multimodal = arr.iter().any(|item| {
+                        if let Some(obj) = item.as_object() {
+                            let t = obj.get("type").and_then(Value::as_str).unwrap_or("");
+                            t == "image_url" || t == "input_image" || t == "image"
+                        } else {
+                            false
+                        }
+                    });
+                    if has_multimodal {
+                        convert_content_to_responses_input(c)
+                    } else {
+                        json!(extract_text_from_value(c))
+                    }
                 } else {
-                    extract_text_from_value(c)
+                    json!(extract_text_from_value(c))
                 }
             } else {
-                String::new()
+                json!("")
             };
             let call_id = msg.tool_call_id.as_deref().unwrap_or("call_default");
             input_items.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": output_str
+                "output": output_val
             }));
         } else {
             let content_val = msg.content.clone().unwrap_or(Value::Null);
@@ -2032,5 +2123,60 @@ mod tests {
         });
         let chat_req_str = convert_responses_req_to_chat(&body_str);
         assert_eq!(chat_req_str.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn test_convert_responses_req_to_chat_with_image_in_tool_output() {
+        let body = json!({
+            "model": "deepseek-v4.1-flash",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_img_123",
+                    "name": "view_image",
+                    "arguments": "{\"path\":\"screenshot.png\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_img_123",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                            "detail": "high"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let chat_req = convert_responses_req_to_chat(&body);
+        assert_eq!(chat_req.messages.len(), 2);
+        assert_eq!(chat_req.messages[0].role, "assistant");
+        assert_eq!(chat_req.messages[1].role, "tool");
+        assert_eq!(chat_req.messages[1].tool_call_id.as_deref(), Some("call_img_123"));
+
+        let content = chat_req.messages[1].content.as_ref().unwrap();
+        assert!(content.is_array());
+        let parts = content.as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(
+            parts[0]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        );
+        assert_eq!(parts[0]["image_url"]["detail"], "high");
+
+        // Round trip test
+        let responses_val = convert_chat_req_to_responses(&chat_req, "deepseek-v4.1-flash");
+        let inputs = responses_val["input"].as_array().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[1]["type"], "function_call_output");
+        let output_parts = inputs[1]["output"].as_array().unwrap();
+        assert_eq!(output_parts[0]["type"], "input_image");
+        assert_eq!(
+            output_parts[0]["image_url"],
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        );
     }
 }

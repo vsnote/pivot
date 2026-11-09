@@ -2345,6 +2345,11 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
                     resolve_model_reasoning_spec(&model_name);
                 let (context_window, max_context_window) =
                     resolve_model_context_window(&model_name);
+                let effective_context_window_percent = if context_window >= 1_000_000 {
+                    90
+                } else {
+                    95
+                };
 
                 json!({
                     "slug": slug,
@@ -2355,7 +2360,7 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
                     "supported_in_api": true,
                     "context_window": context_window,
                     "max_context_window": max_context_window,
-                    "effective_context_window_percent": 95,
+                    "effective_context_window_percent": effective_context_window_percent,
                     "input_modalities": resolve_model_input_modalities(&model_name),
                     "shell_type": "shell_command",
                     "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
