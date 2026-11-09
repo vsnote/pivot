@@ -1466,14 +1466,11 @@ async fn dispatch_anthropic_request(
 
                     if is_subscription_pool {
                         if let Some(ref acc_id) = sub_account_id {
-                            let cooldown_secs = if status_code == StatusCode::TOO_MANY_REQUESTS {
-                                300
+                            if status_code == StatusCode::TOO_MANY_REQUESTS {
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
                             } else if status_code == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
-                                60
-                            } else {
-                                30
-                            };
-                            crate::oauth::mark_account_cooldown(&state.db, acc_id, cooldown_secs);
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 60);
+                            }
                         }
 
                         if attempt_idx + 1 < max_account_attempts && is_capacity_or_rate {
@@ -2684,14 +2681,11 @@ async fn dispatch_openai_request(
 
                     if is_subscription_pool {
                         if let Some(ref acc_id) = sub_account_id {
-                            let cooldown_secs = if status_code == StatusCode::TOO_MANY_REQUESTS {
-                                300
+                            if status_code == StatusCode::TOO_MANY_REQUESTS {
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
                             } else if status_code == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
-                                60
-                            } else {
-                                30
-                            };
-                            crate::oauth::mark_account_cooldown(&state.db, acc_id, cooldown_secs);
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 60);
+                            }
                         }
 
                         if attempt_idx + 1 < max_account_attempts && is_capacity_or_rate {
@@ -3261,14 +3255,11 @@ async fn dispatch_gemini_request(
 
                     if is_subscription_pool {
                         if let Some(ref acc_id) = sub_account_id {
-                            let cooldown_secs = if status_code == StatusCode::TOO_MANY_REQUESTS {
-                                300
+                            if status_code == StatusCode::TOO_MANY_REQUESTS {
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 300);
                             } else if status_code == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
-                                60
-                            } else {
-                                30
-                            };
-                            crate::oauth::mark_account_cooldown(&state.db, acc_id, cooldown_secs);
+                                crate::oauth::mark_account_cooldown(&state.db, acc_id, 60);
+                            }
                         }
 
                         if attempt_idx + 1 < max_account_attempts && is_capacity_or_rate {

@@ -264,6 +264,11 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                                 .get("id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            let final_id = if tool_id.is_empty() {
+                                format!("call_{}", uuid::Uuid::new_v4().simple())
+                            } else {
+                                tool_id.to_string()
+                            };
 
                             // 优先从 block 中读取，其次从本地缓存按 ID 或名称查找，若无则使用 Google 官方 bypass 哨兵值
                             let sig = block
@@ -278,7 +283,8 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                                 text: None,
                                 function_call: Some(json!({
                                     "name": name,
-                                    "args": args
+                                    "args": args,
+                                    "id": final_id
                                 })),
                                 function_response: None,
                                 thought_signature: Some(sig),
@@ -298,13 +304,18 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                                 .or_else(|| block.get("name").and_then(|v| v.as_str()))
                                 .unwrap_or(if tool_id.is_empty() { "tool" } else { tool_id });
 
+                            let mut fr_val = json!({
+                                "name": tool_name,
+                                "response": { "result": res_text }
+                            });
+                            if !tool_id.is_empty() {
+                                fr_val["id"] = json!(tool_id);
+                            }
+
                             parts.push(GeminiPart {
                                 text: None,
                                 function_call: None,
-                                function_response: Some(json!({
-                                    "name": tool_name,
-                                    "response": { "result": res_text }
-                                })),
+                                function_response: Some(fr_val),
                                 thought_signature: None,
                             });
                         }
@@ -684,17 +695,23 @@ mod tests {
         assert_eq!(func_decl["name"], "Bash");
         assert!(func_decl["parameters"].get("$schema").is_none());
 
-        // 验证 tool_result 正确将 name 映射为函数名 Bash，而不是 toolu_01_bash_call
+        // 验证 tool_result 正确将 name 映射为函数名 Bash，而不是 toolu_01_bash_call，且保留 id
         let last_content = gemini_req.contents.last().expect("should have user content");
         let func_resp = last_content.parts[0]
             .function_response
             .as_ref()
             .expect("should have function_response");
         assert_eq!(func_resp["name"], "Bash");
+        assert_eq!(func_resp["id"], "toolu_01_bash_call");
 
-        // 验证 model 消息中的 functionCall part 带有 thought_signature（无缓存时使用 skip_thought_signature_validator 兜底）
+        // 验证 model 消息中的 functionCall part 带有 thought_signature 与 id
         let model_content = &gemini_req.contents[0];
         assert_eq!(model_content.role, "model");
+        let model_fc = model_content.parts[0]
+            .function_call
+            .as_ref()
+            .expect("should have function_call");
+        assert_eq!(model_fc["id"], "toolu_01_bash_call");
         assert_eq!(
             model_content.parts[0].thought_signature.as_deref(),
             Some("skip_thought_signature_validator")

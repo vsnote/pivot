@@ -183,42 +183,46 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                     }
 
                     if let Some(function_call) = part.get("functionCall") {
-                        if state.in_text_block || state.in_thinking_block {
+                        if state.in_text_block || state.in_thinking_block || state.in_tool_block {
                             close_active_anthropic_blocks(&mut events, state);
                         }
-                        if !state.in_tool_block {
-                            let name = function_call
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("tool")
-                                .to_string();
-                            let id = format!("{}_tool_{}", msg_id, state.current_block_index);
-                            state.in_tool_block = true;
-                            state.current_tool_id = Some(id.clone());
-                            state.current_tool_name = Some(name.clone());
+                        let name = function_call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
+                            .to_string();
+                        let id = function_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("{}_tool_{}", msg_id, state.current_block_index));
+                        state.in_tool_block = true;
+                        state.current_tool_id = Some(id.clone());
+                        state.current_tool_name = Some(name.clone());
 
-                            let sig = part
-                                .get("thoughtSignature")
-                                .or_else(|| part.get("thought_signature"))
-                                .or_else(|| function_call.get("thoughtSignature"))
-                                .or_else(|| function_call.get("thought_signature"))
-                                .and_then(Value::as_str)
-                                .map(|s| s.to_string())
-                                .or_else(|| state.last_thought_signature.clone());
+                        let sig = part
+                            .get("thoughtSignature")
+                            .or_else(|| part.get("thought_signature"))
+                            .or_else(|| function_call.get("thoughtSignature"))
+                            .or_else(|| function_call.get("thought_signature"))
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_string())
+                            .or_else(|| state.last_thought_signature.clone());
 
-                            if let Some(ref s) = sig {
-                                anthropic_to_gemini::store_thought_signature(&id, &name, s);
-                            }
-
-                            events.push(format!(
-                                "event: content_block_start\ndata: {}\n\n",
-                                json!({
-                                    "type": "content_block_start",
-                                    "index": state.current_block_index,
-                                    "content_block": { "type": "tool_use", "id": id, "name": name }
-                                })
-                            ));
+                        if let Some(ref s) = sig {
+                            anthropic_to_gemini::store_thought_signature(&id, &name, s);
                         }
+
+                        events.push(format!(
+                            "event: content_block_start\ndata: {}\n\n",
+                            json!({
+                                "type": "content_block_start",
+                                "index": state.current_block_index,
+                                "content_block": { "type": "tool_use", "id": id, "name": name }
+                            })
+                        ));
+
                         if let Some(args) = function_call.get("args") {
                             let partial_json =
                                 serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
@@ -234,6 +238,8 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                                 })
                             ));
                         }
+
+                        close_active_anthropic_blocks(&mut events, state);
                     }
                 }
             }
@@ -768,6 +774,53 @@ mod tests {
         let evts4 = parse_gemini_chunk_to_anthropic_events(chunk4, &mut state, "req-t", "gemini-2.5-pro");
         let out4 = evts4.concat();
         assert!(out4.contains(r#""stop_reason":"tool_use""#));
+    }
+
+    #[test]
+    fn test_gemini_stream_parallel_function_calls() {
+        let mut state = SseState::new();
+
+        // 1. Text chunk
+        let c1 = r#"data: {"candidates":[{"content":{"parts":[{"text":"Analyzing project structure..."}]}}]}"#;
+        let evts1 = parse_gemini_chunk_to_anthropic_events(c1, &mut state, "req-p", "claude-opus-4-6-thinking");
+        let out1 = evts1.concat();
+        assert!(out1.contains(r#""type":"text""#));
+
+        // 2. Single chunk containing two parallel function calls (Bash ls, Bash find)
+        let c2 = r#"data: {"candidates":[{"content":{"parts":[
+            {"functionCall":{"name":"Bash","args":{"command":"ls /Users/votan/projects/pivot"}}},
+            {"functionCall":{"name":"Bash","args":{"command":"find /Users/votan/projects/pivot -name package.json"}}}
+        ]}}]}"#;
+        let evts2 = parse_gemini_chunk_to_anthropic_events(c2, &mut state, "req-p", "claude-opus-4-6-thinking");
+
+        // Verify tool_use starts and stops
+        let starts: Vec<_> = evts2.iter().filter(|e| e.contains("content_block_start")).collect();
+        let stops: Vec<_> = evts2.iter().filter(|e| e.contains("content_block_stop")).collect();
+        let deltas: Vec<_> = evts2.iter().filter(|e| e.contains("input_json_delta")).collect();
+
+        assert_eq!(starts.len(), 2, "Must start 2 tool_use content blocks");
+        assert_eq!(deltas.len(), 2, "Must emit 2 input_json_deltas");
+        // 3 stops in total: 1 for preceding text block (index 0), 2 for the 2 tool_use blocks (indices 1 & 2)
+        assert_eq!(stops.len(), 3, "Must stop text block (index 0) and the 2 tool blocks (indices 1 & 2)");
+
+        // First stop closes text block (index 0)
+        assert!(stops[0].contains(r#""index":0"#));
+
+        // First tool block: index 1
+        assert!(starts[0].contains(r#""index":1"#));
+        assert!(deltas[0].contains(r#""partial_json":"{\"command\":\"ls /Users/votan/projects/pivot\"}""#));
+        assert!(stops[1].contains(r#""index":1"#));
+
+        // Second tool block: index 2 (must not contaminate or concatenate with the first!)
+        assert!(starts[1].contains(r#""index":2"#));
+        assert!(deltas[1].contains(r#""partial_json":"{\"command\":\"find /Users/votan/projects/pivot -name package.json\"}""#));
+        assert!(stops[2].contains(r#""index":2"#));
+
+        // 3. Finish reason FUNCTION_CALL
+        let c3 = r#"data: {"candidates":[{"finishReason":"FUNCTION_CALL"}],"usageMetadata":{"candidatesTokenCount":50}}"#;
+        let evts3 = parse_gemini_chunk_to_anthropic_events(c3, &mut state, "req-p", "claude-opus-4-6-thinking");
+        let out3 = evts3.concat();
+        assert!(out3.contains(r#""stop_reason":"tool_use""#));
     }
 
     #[test]
