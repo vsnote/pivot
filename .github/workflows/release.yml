@@ -269,6 +269,119 @@ jobs:
     needs: [create-release, build-macos]
     runs-on: ubuntu-latest
     steps:
+      - name: Normalize latest.json updater manifest
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
+        with:
+          script: |
+            const releaseId = parseInt(process.env.RELEASE_ID, 10);
+            const tagName = process.env.TAG_NAME;
+
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
+
+            console.log(`Found ${assets.length} assets in release ${releaseId}`);
+            const latestAsset = assets.find((a) => a.name === 'latest.json');
+
+            const aarch64Tar = assets.find((a) => a.name.includes('aarch64') && a.name.endsWith('.app.tar.gz'));
+            const aarch64Sig = assets.find((a) => a.name.includes('aarch64') && a.name.endsWith('.app.tar.gz.sig'));
+            const x64Tar = assets.find((a) => (a.name.includes('x64') || a.name.includes('x86_64')) && a.name.endsWith('.app.tar.gz'));
+            const x64Sig = assets.find((a) => (a.name.includes('x64') || a.name.includes('x86_64')) && a.name.endsWith('.app.tar.gz.sig'));
+
+            async function fetchAssetText(asset) {
+              const res = await github.rest.repos.getReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id,
+                headers: { accept: 'application/octet-stream' },
+              });
+              return Buffer.from(res.data).toString('utf8').trim();
+            }
+
+            let manifest = {
+              version: tagName.replace(/^v/, ''),
+              notes: `Release ${tagName}`,
+              pub_date: new Date().toISOString(),
+              platforms: {},
+            };
+
+            if (latestAsset) {
+              try {
+                const text = await fetchAssetText(latestAsset);
+                manifest = JSON.parse(text);
+              } catch (e) {
+                console.log('Failed to parse existing latest.json, recreating:', e.message);
+              }
+            }
+
+            if (!manifest.platforms) manifest.platforms = {};
+
+            if (aarch64Tar) {
+              let sig = manifest.platforms['darwin-aarch64']?.signature;
+              if (!sig && aarch64Sig) {
+                sig = await fetchAssetText(aarch64Sig);
+              }
+              if (sig) {
+                manifest.platforms['darwin-aarch64'] = {
+                  signature: sig,
+                  url: aarch64Tar.browser_download_url,
+                };
+                manifest.platforms['darwin-aarch64-app'] = {
+                  signature: sig,
+                  url: aarch64Tar.browser_download_url,
+                };
+              }
+            }
+
+            if (x64Tar) {
+              let sig = manifest.platforms['darwin-x86_64']?.signature;
+              if (!sig && x64Sig) {
+                sig = await fetchAssetText(x64Sig);
+              }
+              if (sig) {
+                manifest.platforms['darwin-x86_64'] = {
+                  signature: sig,
+                  url: x64Tar.browser_download_url,
+                };
+                manifest.platforms['darwin-x86_64-app'] = {
+                  signature: sig,
+                  url: x64Tar.browser_download_url,
+                };
+              }
+            }
+
+            if (latestAsset) {
+              console.log(`Deleting old latest.json (asset ID: ${latestAsset.id})...`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: latestAsset.id,
+              });
+            }
+
+            const updatedBody = JSON.stringify(manifest, null, 2);
+            console.log('Uploading corrected latest.json with browser_download_url:');
+            console.log(updatedBody);
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              name: 'latest.json',
+              data: Buffer.from(updatedBody, 'utf8'),
+              headers: {
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(updatedBody),
+              },
+            });
+            console.log('latest.json normalized and uploaded successfully.');
+
       - name: Publish Release if not requested as Draft
         uses: actions/github-script@v7
         env:

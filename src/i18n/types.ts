@@ -422,6 +422,10 @@ export interface TranslationDictionary {
     downloadingUpdate: string;
     releaseNotesSummary: string;
     ignoreError: string;
+    retryUpdate: string;
+    downloadManually: string;
+    manualDownloadHint: string;
+    newBadge: string;
     localDatabaseNotice: string;
     githubRepo: string;
     shortcutsSection: string;

@@ -1,11 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useUpdateStore } from '@/store/useUpdateStore';
 import { useTranslation, type Locale } from '@/i18n';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Button } from '@/components/common/Button';
 import { PivotLogo } from '@/components/common/PivotLogo';
-import { check, type Update } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
@@ -49,103 +48,19 @@ export const SettingsView: React.FC = () => {
       });
   }, []);
 
-  // 自动更新状态管理
-  const [updateState, setUpdateState] = useState<
-    'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'ready' | 'error'
-  >('idle');
-  const [updateInstance, setUpdateInstance] = useState<Update | null>(null);
-  const [downloadProgress, setDownloadProgress] = useState(0);
-  const [updateError, setUpdateError] = useState('');
-
-  const formatUpdateError = (err: unknown): string => {
-    const msg = err instanceof Error ? err.message : String(err);
-    const lower = msg.toLowerCase();
-
-    if (lower.includes('could not fetch a valid release json') || lower.includes('404')) {
-      return locale === 'zh-CN'
-        ? '获取更新信息失败（未找到有效发布版本或网络无法访问）'
-        : 'Failed to fetch update info (No release found or network unreachable)';
-    }
-    if (lower.includes('timed out') || lower.includes('timeout') || lower.includes('connect')) {
-      return locale === 'zh-CN'
-        ? '连接 GitHub 更新服务器超时，请检查网络'
-        : 'Connection to GitHub update server timed out, please check your network';
-    }
-    if (lower.includes('signature')) {
-      return locale === 'zh-CN'
-        ? '升级包签名校验失败，安全终止'
-        : 'Update signature verification failed, aborted for security';
-    }
-    if (lower.includes('failed to send request') || lower.includes('network')) {
-      return locale === 'zh-CN'
-        ? '网络请求失败，请检查网络连接或代理'
-        : 'Network request failed, please check network connection or proxy';
-    }
-    return msg || (locale === 'zh-CN' ? '检查更新失败，请稍后重试' : 'Check for updates failed, please try again later');
-  };
-
-  // 检查更新
-  const handleCheckUpdate = async (isManual = true) => {
-    try {
-      setUpdateState('checking');
-      setUpdateError('');
-      const update = await check();
-      if (update && update.available) {
-        setUpdateInstance(update);
-        setUpdateState('available');
-      } else {
-        setUpdateState('up-to-date');
-        setTimeout(() => {
-          setUpdateState((prev) => (prev === 'up-to-date' ? 'idle' : prev));
-        }, 3500);
-      }
-    } catch (err: unknown) {
-      if (isManual) {
-        setUpdateState('error');
-        setUpdateError(formatUpdateError(err));
-      } else {
-        setUpdateState('idle');
-      }
-    }
-  };
-
-  // 下载并安装更新
-  const handleDownloadAndInstall = async () => {
-    if (!updateInstance) return;
-    try {
-      setUpdateState('downloading');
-      setDownloadProgress(0);
-      let downloaded = 0;
-      let total = 0;
-
-      await updateInstance.downloadAndInstall((event) => {
-        if (event.event === 'Started') {
-          total = event.data.contentLength || 0;
-        } else if (event.event === 'Progress') {
-          downloaded += event.data.chunkLength;
-          if (total > 0) {
-            setDownloadProgress(Math.round((downloaded / total) * 100));
-          }
-        } else if (event.event === 'Finished') {
-          setDownloadProgress(100);
-        }
-      });
-
-      setUpdateState('ready');
-    } catch (err: unknown) {
-      setUpdateState('error');
-      setUpdateError(formatUpdateError(err));
-    }
-  };
-
-  // 重启应用
-  const handleRelaunch = async () => {
-    try {
-      await relaunch();
-    } catch (err) {
-      console.error('重启应用失败:', err);
-    }
-  };
+  // 全局自动更新状态管理
+  const {
+    updateState,
+    updateVersion,
+    updateBody,
+    downloadProgress,
+    updateError,
+    checkUpdate,
+    downloadAndInstall,
+    relaunch,
+    openReleasePage,
+    clearError: clearUpdateError,
+  } = useUpdateStore();
 
   // 打开 GitHub 仓库
   const handleOpenRepo = async () => {
@@ -155,14 +70,6 @@ export const SettingsView: React.FC = () => {
       window.open('https://github.com/vsnote/pivot', '_blank');
     }
   };
-
-  // 启动时在后台静默检测一次是否有新版本
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      handleCheckUpdate(false);
-    }, 2000);
-    return () => clearTimeout(timer);
-  }, []);
 
   const handleExportBackup = () => {
     try {
@@ -432,7 +339,7 @@ export const SettingsView: React.FC = () => {
                 {updateState === 'available' && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
                     <Sparkles className="w-2.5 h-2.5" />
-                    {t('settings.newVersionFound', { version: updateInstance?.version ?? '' })}
+                    {t('settings.newVersionFound', { version: updateVersion })}
                   </span>
                 )}
                 {updateState === 'up-to-date' && (
@@ -449,7 +356,7 @@ export const SettingsView: React.FC = () => {
                 <Button
                   type="button"
                   size="sm"
-                  onClick={handleRelaunch}
+                  onClick={relaunch}
                   className="bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
@@ -459,18 +366,18 @@ export const SettingsView: React.FC = () => {
                 <Button
                   type="button"
                   size="sm"
-                  onClick={handleDownloadAndInstall}
+                  onClick={downloadAndInstall}
                   className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
                 >
                   <ArrowUpCircle className="w-3.5 h-3.5" />
-                  <span>{t('settings.updateToVersion', { version: updateInstance?.version ?? '' })}</span>
+                  <span>{t('settings.updateToVersion', { version: updateVersion })}</span>
                 </Button>
               ) : (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => handleCheckUpdate(true)}
+                  onClick={() => checkUpdate(true)}
                   disabled={updateState === 'checking' || updateState === 'downloading'}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${updateState === 'checking' ? 'animate-spin' : ''}`} />
@@ -497,29 +404,57 @@ export const SettingsView: React.FC = () => {
           )}
 
           {/* 发现新版本时的更新日志摘要 */}
-          {updateState === 'available' && updateInstance?.body && (
+          {updateState === 'available' && updateBody && (
             <div className="p-3 rounded-md bg-muted/40 border border-border text-[11px] space-y-1 animate-in fade-in max-h-36 overflow-y-auto">
               <div className="font-medium text-zinc-700 dark:text-zinc-300">{t('settings.releaseNotesSummary')}</div>
               <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap leading-relaxed">
-                {updateInstance.body}
+                {updateBody}
               </div>
             </div>
           )}
 
-          {/* 错误提示 */}
+          {/* 错误提示与降级通道 */}
           {updateState === 'error' && updateError && (
-            <div className="px-3 py-2 rounded-md bg-rose-500/10 text-rose-700 dark:text-rose-300 text-[11px] flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-500" />
-                <span className="truncate">{updateError}</span>
+            <div className="p-3 rounded-md bg-rose-500/10 border border-rose-500/20 text-rose-700 dark:text-rose-300 text-[11px] space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-500" />
+                  <span className="font-medium">{updateError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearUpdateError}
+                  className="opacity-70 hover:opacity-100 text-[10px] shrink-0 cursor-pointer"
+                >
+                  {t('settings.ignoreError')}
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setUpdateState('idle')}
-                className="opacity-70 hover:opacity-100 text-[10px] shrink-0"
-              >
-                {t('settings.ignoreError')}
-              </button>
+
+              <p className="text-[10px] text-rose-600/80 dark:text-rose-300/80 leading-relaxed">
+                {t('settings.manualDownloadHint')}
+              </p>
+
+              <div className="flex items-center gap-2 pt-0.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => checkUpdate(true)}
+                  className="h-6 px-2 text-[10px] border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-300 hover:bg-rose-500/10"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>{t('settings.retryUpdate')}</span>
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={openReleasePage}
+                  className="h-6 px-2 text-[10px] bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>{t('settings.downloadManually')}</span>
+                </Button>
+              </div>
             </div>
           )}
 

@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAppStore } from '@/store/useAppStore';
+import { useUpdateStore } from '@/store/useUpdateStore';
 import { useTranslation } from '@/i18n';
 import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 
@@ -15,6 +16,7 @@ export const Header: React.FC = () => {
     setSettingsSection,
     isProviderEditorOpen,
   } = useAppStore();
+  const hasUpdate = useUpdateStore((state) => state.hasUpdate);
 
   const current: TabId =
     activeTab === 'clients'
@@ -76,7 +78,15 @@ export const Header: React.FC = () => {
                 onMouseDown={handlePointerDown}
                 onClick={() => handleTabClick(id)}
               >
-                {t(`header.${id}`)}
+                <span className="inline-flex items-center">
+                  <span>{t(`header.${id}`)}</span>
+                  {id === 'settings' && hasUpdate && (
+                    <span className="ml-1.5 flex h-2 w-2 relative" title={t('settings.newVersionFound', { version: '' })}>
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                    </span>
+                  )}
+                </span>
               </TabsTrigger>
             ))}
           </TabsList>

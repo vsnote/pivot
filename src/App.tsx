@@ -6,6 +6,7 @@ import { ClientsView, ProviderList } from '@/components/providers/ProviderList';
 import { ProviderEditor } from '@/components/providers/ProviderEditor';
 import { UsageDashboard } from '@/components/dashboard/UsageDashboard';
 import { SettingsView } from '@/components/settings/SettingsView';
+import { useUpdateStore } from '@/store/useUpdateStore';
 import { X, AlertCircle } from 'lucide-react';
 import { loadModelRates } from '@/utils/pricing';
 import './App.css';
@@ -56,6 +57,14 @@ export const App: React.FC = () => {
   useEffect(() => {
     fetchInitialData();
     loadModelRates();
+  }, []);
+
+  // 应用启动后延迟 3 秒后台静默检查更新一次
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      useUpdateStore.getState().checkUpdate(false);
+    }, 3000);
+    return () => clearTimeout(timer);
   }, []);
 
   // 全局快捷键：⌘1-4 切换主要页面，⌘N 快速打开新增服务商
