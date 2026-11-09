@@ -151,7 +151,7 @@ export const App: React.FC = () => {
             {isProviderEditorOpen ? <ProviderEditor /> : <ProviderList />}
           </div>
           <div className={activeTab === 'clients' ? 'block' : 'hidden'}>
-            <ClientsView />
+            {activeTab === 'clients' && <ClientsView />}
           </div>
           <div
             className={
