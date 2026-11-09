@@ -33,6 +33,7 @@ export const zhCN: TranslationDictionary = {
     title: '服务商',
     emptyTitle: '尚未配置任何服务商渠道',
     addProvider: '添加服务商',
+    addProviderShortcut: '添加服务商 (⌘N)',
     subscription: '订阅',
     subscriptionTitle: '官方账号订阅池（多账号轮询与配额调度）',
     copyBaseUrl: '复制 Base URL',

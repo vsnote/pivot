@@ -33,6 +33,7 @@ export interface TranslationDictionary {
     title: string;
     emptyTitle: string;
     addProvider: string;
+    addProviderShortcut: string;
     subscription: string;
     subscriptionTitle: string;
     copyBaseUrl: string;

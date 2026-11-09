@@ -33,6 +33,7 @@ export const en: TranslationDictionary = {
     title: 'Providers',
     emptyTitle: 'No providers configured yet',
     addProvider: 'Add Provider',
+    addProviderShortcut: 'Add Provider (⌘N)',
     subscription: 'Subscription',
     subscriptionTitle: 'Official account subscription pool (Multi-account rotation & quota scheduling)',
     copyBaseUrl: 'Copy Base URL',
