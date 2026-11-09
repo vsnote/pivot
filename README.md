@@ -16,20 +16,20 @@
 
 ---
 
-Pivot 是一个专为 **Claude Code**、**Codex CLI**、**Gemini CLI** 和 **Pi Agent** 等现代 AI 开发终端工具打造的本地桌面网关应用。它在本地启动一个兼容 OpenAI 与 Anthropic 标准的高性能路由网关，自动完成客户端配置无感接管、模型智能分发、协议双向转换以及多服务商容灾切换。
+Pivot 是面向现代主流 AI Coding Agent 与终端命令行工具打造的本地轻量路由网关与客户端接管中心。它在本地启动一个兼容 OpenAI 与 Anthropic 标准的高性能网关服务，提供多 Agent 配置无感接管、启动模型独立设定、请求精确透明分发、协议双向无损转换以及官方订阅账号池负载均衡。
 
 ---
 
 ## ✨ 核心特性
 
-- **⚡ 统一本地网关**：在本机启动接口服务（默认 `http://127.0.0.1:16888`），同时提供 Anthropic (`POST /v1/messages`) 与 OpenAI (`POST /v1/chat/completions`) 双标准端点。
-- **🔄 协议双向转换**：支持 Anthropic ⇋ OpenAI ⇋ Gemini 多协议即时无损转换，包含流式 (SSE) 与工具调用 (Tool Call)。
-- **🎯 自适应智能分发**：根据服务商模型池自动精确匹配分发与前缀路由（`provider/model`），全局唯一「默认模型」兜底承接，无需手动维护繁琐规则。
-- **🛡️ 智能容灾与备用链**：请求失败时自动尝试具备同名模型的可用备用节点，日志中完整保留多跳重试链路。
-- **🔌 客户端一键接管**：一键接管 Claude Code、Codex CLI、Gemini CLI 与 Pi Agent 的本地配置文件，关闭时自动恢复初始状态并备份。
-- **🔑 双轨凭据与账号支持**：支持各类第三方标准 API 密钥，还原生支持 ChatGPT 订阅账号 (Codex OAuth) 接入与官方额度看板。
-- **🔒 纯本地优先与隐私安全**：所有密钥凭证、配置与请求日志均保存在本机 SQLite 数据库，无任何数据上传云端，零网络遥测。
-- **📊 实时调用日志与监控**：记录每次请求的完整尝试链、响应时延、Token 计费统计与订阅额度看板。
+- **⚡ 统一本地网关**：在本机启动高性能接口服务（默认 `http://127.0.0.1:16888`），同时提供 Anthropic (`POST /v1/messages`) 与 OpenAI (`POST /v1/chat/completions`) 双标准端点。
+- **🔄 协议双向无损转换**：支持 Anthropic ⇋ OpenAI ⇋ Gemini 多协议即时无损互转，完整保留流式传输 (SSE)、工具调用 (Tool Call) 与思维链 (Reasoning/Thinking)。
+- **🎯 精确透明路由，绝无静默篡改**：网关严格按照请求模型精确分发、归一化智能匹配（自动兼容版本日期与上下文标记）与前缀路由（`provider/model`）；若无任何服务商支持该模型，直接明确报错，绝不进行静默跨模型降级或篡改。
+- **🔌 多 Agent 一键无感接管**：一键接管主流 AI Coding 终端工具的本地配置；支持在界面中为各 Agent 独立指定启动模型，关闭接管时自动无损恢复原始配置。
+- **👥 官方订阅账号池 (免 API Key)**：原生支持主流 AI 官方订阅账号接入与多账号池管理，具备并发轮换、Token 自动刷新、故障自愈与官方配额看板。
+- **🔑 多 Key 负载均衡与会话亲和**：单服务商支持配置多个 API Key，采用 Round-Robin 轮询或 Session Affinity（按会话亲和锁定 Key）进行分发。
+- **📊 高密度使用统计看板**：提供全宽比例图与聚合分析，支持按客户端、服务商、模型等多维度统计请求次数、Token 消耗、响应时延与多维排序。
+- **🌐 国际化与纯本地优先**：原生支持中英文界面无缝切换；所有密钥凭证、配置与请求日志均保存在本机 SQLite 数据库，无任何数据上传云端，零网络遥测。
 
 ---
 
@@ -54,37 +54,53 @@ Pivot 是一个专为 **Claude Code**、**Codex CLI**、**Gemini CLI** 和 **Pi 
 
 ## 🚀 快速上手
 
-1. **添加服务商或账号**：在「服务商」页面选择预设（如 Anthropic、OpenAI、DeepSeek、Gemini、OpenRouter 等）填入 API 密钥，或直接接入 ChatGPT 订阅账号。
-2. **设置默认模型**：为某家主力服务商设置「默认模型」，未显式匹配的未知模型请求将由该模型及其所属服务商承接。
-3. **开启客户端接管**：在「客户端」页面点击对应 CLI 工具的开关，Pivot 会自动备份原有配置并将其流量指向本地网关。
-4. **尽情编码**：在终端正常使用 `claude` 或其他 CLI 工具，所有流量将在本机通过 Pivot 智能路由并记录。
+1. **添加服务商或订阅账号**：在「服务商」页面选择预设（如 Antigravity、ChatGPT、Anthropic、DeepSeek、OpenAI、Gemini、OpenRouter 等）填入 API 密钥，或直接接入官方订阅账号池。
+2. **配置 Agent 启动模型**：在「客户端」页面为各个 Agent 独立选择专属的服务商和启动模型。
+3. **开启 Agent 接管**：点击对应 Agent 的开关，Pivot 会自动备份原有配置并将流量无感代理至本地网关。
+4. **尽情编码**：在终端正常使用开发命令（如 `claude`、`codex` 等），所有请求将在本机通过 Pivot 智能路由并实时记录。
 
 ---
 
 ## 🧭 模型路由逻辑
 
-Pivot 会按以下优先级推导并路由每个请求：
+Pivot 遵循透明、明确、无静默篡改的路由准则，按以下优先级推导并路由每个请求：
 
-1. **`provider/model` 前缀路由**：显式指定了服务商名称时（如 `deepseek/deepseek-chat`），直接转发至目标服务商。
-2. **精确模型匹配**：若请求的模型名称已在某个启用服务商的模型池列表中，自动路由至该服务商；多服务商具有同名模型时按列表顺序优先承接。
-3. **默认模型兜底**：当请求的模型未在任何服务商处显式声明时，自动改写为全局指定的「默认模型」进行兜底承接。
+1. **`provider/model` 前缀路由**：显式指定服务商名称或 ID 时（如 `deepseek/deepseek-chat` 或 `anthropic/claude-3-7-sonnet`），直接转发至目标服务商。
+2. **精确模型匹配**：若请求的模型名称已在某个启用服务商的模型池列表中，自动路由至该服务商；多服务商具有同名模型时按服务商列表优先级排序承接。
+3. **智能归一化匹配**：自动兼容剥离日期后缀（如 `-20250219`）、`-latest` 后缀或方括号上下文标记（如 `[1M]`、`[thinking]`）后的模型名称。
+4. **厂商家族启发匹配**：针对厂商特定前缀模型（如 `deepseek-*`），自动由已启用的同家族服务商承接。
+5. **明确报错（无静默降级）**：当请求的模型未在任何启用的服务商中声明时，网关直接返回清晰明确的错误信息，绝不静默改写或跨模型降级。
 
-**容灾备用机制**：当请求失败时，备用链会自动尝试具备同名模型的备用服务商，避免无效重试。
+### 负载均衡与容灾自愈
+
+- **多 API Key 调度**：同一服务商配置多个 API Key 时，支持 Round-Robin 轮询或基于 Session Affinity 的会话亲和绑定。
+- **订阅账号池容灾**：官方订阅账号池支持健康检测与故障自愈，遇限流或认证异常时自动隔离并无缝重试可用账号。
 
 ---
 
-## 🌐 支持的服务商与生态
+## 🌐 支持的 Agent 与生态兼容
 
-### 客户端工具
-- **Claude Code**
-- **Codex CLI**
-- **Gemini CLI**
-- **Pi Agent**
+### 主流 AI Coding Agent 支持
 
-### 支持的服务商
-- **国际主流平台**：ChatGPT 订阅账号 (Codex OAuth)、Anthropic、OpenAI、Google Gemini、OpenRouter、Ollama、Groq、Mistral AI、Perplexity、Cerebras 等。
-- **国内服务商**：DeepSeek、SiliconFlow (硅基流动)、Moonshot AI (月之暗面)、智谱 AI、通义千问、MiniMax、StepFun (阶跃星辰)、百川智能、零一万物等。
-- **自定义兼容节点**：任意兼容 OpenAI / Anthropic 格式的第三方反向代理或自建端点。
+| Agent / 客户端 | 接管机制 | 独立启动模型 | 协议与特性 |
+| :--- | :--- | :---: | :--- |
+| **Claude Code** | 全局与本地设置重定向 (`settings.json`) | ✅ | 原生 Anthropic 协议、流式输出与 Tool Call |
+| **Codex CLI** | 配置重定向与模型映射 (`config.toml`) | ✅ | 原生 OpenAI 协议、Thinking 等级映射 |
+| **Gemini CLI** | 环境变量与端点代理接管 | ✅ | 双向协议实时转换与流式 SSE |
+| **Pi Agent** | 本地开发配置无感代理 | ✅ | 轻量代码助手无缝接管 |
+| **OpenCode** | 运行配置与模型池同步 (`opencode.json`) | ✅ | 官方模型池与端点智能映射 |
+
+### 官方订阅账号池 (免 API Key)
+
+- **Antigravity**：支持多账号 Google 官方订阅池接入，聚合调用 Claude 3.7 / 3.5、Sonnet 4.6 与 Gemini 2.5。
+- **ChatGPT Plus / Pro**：通过 Codex OAuth 接入，直接消耗个人订阅配额，支持多账号轮换与额度看板。
+- **OpenCode Go / Plus**：官方订阅聚合模型池，支持 DeepSeek、Kimi、GLM、Qwen 等开源及前沿代码模型。
+
+### 支持的模型服务商
+
+- **主流商业模型**：Anthropic、OpenAI、Google Gemini、DeepSeek、xAI (Grok)、Mistral AI、Perplexity、Moonshot AI、智谱 AI、通义千问、MiniMax、StepFun 等。
+- **聚合平台与推理加速**：OpenRouter、Groq、SiliconFlow (硅基流动)、Cerebras、Together AI、Fireworks AI、GitHub Models、Cloudflare Workers AI 等。
+- **本地部署与自建端点**：Ollama、LM Studio、vLLM 及任意兼容 OpenAI / Anthropic 标准规范的反代端点。
 
 ---
 
@@ -132,7 +148,7 @@ pnpm tauri build
   ~/.pivot/pivot.db
   ```
 - 网关服务默认监听：`127.0.0.1:16888`
-- 客户端接管配置时，原有配置文件会自动在同目录下生成 `.pivot.backup` 备份，关闭开关即可一键无损还原。
+- 客户端接管配置时，原有配置文件会自动备份，关闭开关即可一键无损还原。
 
 ---
 
