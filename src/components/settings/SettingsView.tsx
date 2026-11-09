@@ -303,61 +303,47 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
 
-      {/* 卡片 3：关于 Pivot 与更新 */}
+      {/* 卡片 3：关于 Pivot 与版本管理 */}
       <div className="rounded-lg border border-border bg-card text-card-foreground shadow-2xs overflow-hidden">
         <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
           <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 tracking-wide">
             {t('settings.aboutPivot')}
           </span>
-          <span className="text-[10px] font-mono text-zinc-400">
-            {appVersion ? `v${appVersion}` : ''}
-          </span>
         </div>
 
         <div className="p-4 space-y-3.5">
-          {/* Logo 与主定位 */}
-          <div className="flex items-start gap-3">
-            <PivotLogo variant="icon" className="w-9 h-9 rounded-lg shadow-xs shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                Pivot
-              </div>
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-relaxed">
-                {t('settings.pivotDesc')}
-              </p>
-            </div>
-          </div>
-
-          {/* 分隔线 */}
-          <div className="border-t border-border/60" />
-
-          {/* 软件更新状态与操作行 */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5 flex-wrap">
-                <span>{t('settings.softwareUpdate')}</span>
-                {updateState === 'available' && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-                    <Sparkles className="w-2.5 h-2.5" />
-                    {t('settings.newVersionFound', { version: updateVersion })}
+          {/* Logo、主定位与版本操作区 */}
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <PivotLogo variant="icon" className="w-10 h-10 rounded-xl shadow-xs shrink-0" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    Pivot
                   </span>
-                )}
-                {updateState === 'up-to-date' && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-                    <CheckCircle2 className="w-2.5 h-2.5" />
-                    {t('settings.upToDate')}
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-zinc-700/80">
+                    {appVersion ? `v${appVersion}` : 'v0.2.10'}
                   </span>
-                )}
+                  {updateState === 'up-to-date' && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-medium animate-in fade-in">
+                      <CheckCircle2 className="w-2.5 h-2.5" />
+                      {t('settings.upToDate')}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-relaxed">
+                  {t('settings.pivotDesc')}
+                </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="shrink-0 flex items-center pt-0.5">
               {updateState === 'ready' ? (
                 <Button
                   type="button"
                   size="sm"
                   onClick={relaunch}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer h-7 text-xs"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>{t('settings.restartToApply')}</span>
@@ -367,7 +353,7 @@ export const SettingsView: React.FC = () => {
                   type="button"
                   size="sm"
                   onClick={downloadAndInstall}
-                  className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer h-7 text-xs"
                 >
                   <ArrowUpCircle className="w-3.5 h-3.5" />
                   <span>{t('settings.updateToVersion', { version: updateVersion })}</span>
@@ -379,13 +365,29 @@ export const SettingsView: React.FC = () => {
                   size="sm"
                   onClick={() => checkUpdate(true)}
                   disabled={updateState === 'checking' || updateState === 'downloading'}
+                  className="h-7 text-xs text-zinc-600 dark:text-zinc-300 cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${updateState === 'checking' ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-3 h-3 ${updateState === 'checking' ? 'animate-spin' : ''}`} />
                   <span>{updateState === 'checking' ? t('settings.checkingUpdate') : t('settings.checkUpdate')}</span>
                 </Button>
               )}
             </div>
           </div>
+
+          {/* 发现新版本时的更新卡片与更新日志 */}
+          {updateState === 'available' && (
+            <div className="p-3 rounded-md bg-blue-500/10 border border-blue-500/20 text-[11px] space-y-2 animate-in fade-in">
+              <div className="flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
+                <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                <span>{t('settings.newVersionFound', { version: updateVersion })}</span>
+              </div>
+              {updateBody && (
+                <div className="text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap leading-relaxed max-h-36 overflow-y-auto text-[10px] bg-background/60 p-2 rounded border border-border/40">
+                  {updateBody}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 下载进度条 */}
           {updateState === 'downloading' && (
@@ -399,16 +401,6 @@ export const SettingsView: React.FC = () => {
                   className="h-full bg-primary transition-all duration-200"
                   style={{ width: `${downloadProgress}%` }}
                 />
-              </div>
-            </div>
-          )}
-
-          {/* 发现新版本时的更新日志摘要 */}
-          {updateState === 'available' && updateBody && (
-            <div className="p-3 rounded-md bg-muted/40 border border-border text-[11px] space-y-1 animate-in fade-in max-h-36 overflow-y-auto">
-              <div className="font-medium text-zinc-700 dark:text-zinc-300">{t('settings.releaseNotesSummary')}</div>
-              <div className="text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap leading-relaxed">
-                {updateBody}
               </div>
             </div>
           )}

@@ -321,6 +321,7 @@ jobs:
             }
 
             if (!manifest.platforms) manifest.platforms = {};
+            const downloadBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tagName}`;
 
             if (aarch64Tar) {
               let sig = manifest.platforms['darwin-aarch64']?.signature;
@@ -328,13 +329,14 @@ jobs:
                 sig = await fetchAssetText(aarch64Sig);
               }
               if (sig) {
+                const downloadUrl = `${downloadBase}/${aarch64Tar.name}`;
                 manifest.platforms['darwin-aarch64'] = {
                   signature: sig,
-                  url: aarch64Tar.browser_download_url,
+                  url: downloadUrl,
                 };
                 manifest.platforms['darwin-aarch64-app'] = {
                   signature: sig,
-                  url: aarch64Tar.browser_download_url,
+                  url: downloadUrl,
                 };
               }
             }
@@ -345,13 +347,14 @@ jobs:
                 sig = await fetchAssetText(x64Sig);
               }
               if (sig) {
+                const downloadUrl = `${downloadBase}/${x64Tar.name}`;
                 manifest.platforms['darwin-x86_64'] = {
                   signature: sig,
-                  url: x64Tar.browser_download_url,
+                  url: downloadUrl,
                 };
                 manifest.platforms['darwin-x86_64-app'] = {
                   signature: sig,
-                  url: x64Tar.browser_download_url,
+                  url: downloadUrl,
                 };
               }
             }
