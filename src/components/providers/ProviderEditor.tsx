@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Button } from '@/components/common/Button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Input } from '@/components/common/Input';
 import { Badge } from '@/components/common/Badge';
 import {
@@ -1866,48 +1867,36 @@ export function ProviderEditor() {
                     {pool.length > 0 && (
                       <div className="flex items-center gap-2 shrink-0">
                         {/* 视图分段选择：全部 / 已选 / 未选 */}
-                        <div className="inline-flex p-0.5 rounded-md bg-zinc-500/[0.08] dark:bg-white/[0.08] text-[11px] font-medium border border-border/40">
-                          <button
-                            type="button"
-                            onClick={() => setModelFilterTab('all')}
-                            className={`px-2 py-0.5 rounded border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
-                              modelFilterTab === 'all'
-                                ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
-                                : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
-                            }`}
-                          >
-                            {t('providerEditor.filterTabs.all')} <span className="opacity-70 font-mono text-[10px] ml-0.5">{pool.length}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setModelFilterTab('selected')}
-                            className={`px-2 py-0.5 rounded border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
-                              modelFilterTab === 'selected'
-                                ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
-                                : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
-                            }`}
-                          >
-                            {t('providerEditor.filterTabs.selected')} <span className="opacity-70 font-mono text-[10px] ml-0.5">{draft.models.length}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setModelFilterTab('unselected')}
-                            className={`px-2 py-0.5 rounded border border-transparent transition-[color,background-color,border-color,box-shadow] duration-150 cursor-pointer outline-none ${
-                              modelFilterTab === 'unselected'
-                                ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
-                                : 'text-zinc-500 dark:text-zinc-400 hover:text-foreground'
-                            }`}
-                          >
-                            {t('providerEditor.filterTabs.unselected')} <span className="opacity-70 font-mono text-[10px] ml-0.5">{Math.max(0, pool.length - draft.models.length)}</span>
-                          </button>
-                        </div>
+                        <Tabs
+                          value={modelFilterTab}
+                          onValueChange={(val) => setModelFilterTab(val as 'all' | 'selected' | 'unselected')}
+                        >
+                          <TabsList size="sm" aria-label={t('providerEditor.filterTabs.all')}>
+                            <TabsTrigger value="all">
+                              {t('providerEditor.filterTabs.all')}{' '}
+                              <span className="opacity-70 font-mono text-[10px] ml-0.5">{pool.length}</span>
+                            </TabsTrigger>
+                            <TabsTrigger value="selected">
+                              {t('providerEditor.filterTabs.selected')}{' '}
+                              <span className="opacity-70 font-mono text-[10px] ml-0.5">{draft.models.length}</span>
+                            </TabsTrigger>
+                            <TabsTrigger value="unselected">
+                              {t('providerEditor.filterTabs.unselected')}{' '}
+                              <span className="opacity-70 font-mono text-[10px] ml-0.5">
+                                {Math.max(0, pool.length - draft.models.length)}
+                              </span>
+                            </TabsTrigger>
+                          </TabsList>
+                        </Tabs>
 
                         {/* 快捷批量操作 */}
                         <div className="flex items-center gap-1 pl-1 border-l border-border/60 text-[11px] text-zinc-500 dark:text-zinc-400">
-                          <button
+                          <Button
                             type="button"
+                            variant="ghost"
+                            size="xs"
                             onClick={selectAllFiltered}
-                            className="px-1.5 py-0.5 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                            className="h-6 px-1.5 font-normal text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
                             title={t('providerEditor.selectAllTooltip')}
                           >
                             {modelSearch.trim()
@@ -1915,11 +1904,13 @@ export function ProviderEditor() {
                               : modelFilterTab === 'unselected'
                               ? t('providerEditor.selectAllUnselected')
                               : t('providerEditor.selectAll')}
-                          </button>
-                          <button
+                          </Button>
+                          <Button
                             type="button"
+                            variant="ghost"
+                            size="xs"
                             onClick={clearAllFiltered}
-                            className="px-1.5 py-0.5 rounded hover:bg-zinc-200/60 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                            className="h-6 px-1.5 font-normal text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
                             title={t('providerEditor.clearAllTooltip')}
                           >
                             {modelSearch.trim()
@@ -1927,7 +1918,7 @@ export function ProviderEditor() {
                               : modelFilterTab === 'selected'
                               ? t('providerEditor.clearAllSelected')
                               : t('providerEditor.clearAll')}
-                          </button>
+                          </Button>
                         </div>
                       </div>
                     )}

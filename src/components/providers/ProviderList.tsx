@@ -990,14 +990,15 @@ export function ProviderList() {
                 />
               ))}
             </div>
-            <button
+            <Button
               type="button"
+              variant="ghost"
               onClick={() => openProviderEditor(null)}
-              className="w-full py-2.5 px-4 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 border-t border-border flex items-center justify-center gap-1.5 transition-colors cursor-pointer select-none"
+              className="w-full h-9 rounded-none text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 border-t border-border flex items-center justify-center gap-1.5 cursor-pointer select-none"
             >
               <Plus className="w-3.5 h-3.5 stroke-[2.2]" />
               <span>{t('providers.addProvider')}</span>
-            </button>
+            </Button>
           </>
         )}
       </section>

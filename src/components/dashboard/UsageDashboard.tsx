@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/i18n';
-import { Badge } from '@/components/common/Badge';
+import { Tabs, TabsList, TabsTrigger } from '@/components/common/Tabs';
 import { Button } from '@/components/common/Button';
+import { Badge } from '@/components/common/Badge';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { ProviderAvatar } from '@/components/common/BrandIcons';
 import {
@@ -36,12 +37,12 @@ type SortMetric = 'count' | 'cost';
 
 const PROVIDER_COLORS = [
   '#3b82f6', // blue
-  '#8b5cf6', // violet
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#06b6d4', // cyan
-  '#ec4899', // pink
   '#6366f1', // indigo
+  '#8b5cf6', // violet
+  '#0ea5e9', // sky
+  '#14b8a6', // teal
+  '#f59e0b', // amber
+  '#64748b', // slate
 ];
 
 const CLIENT_COLORS: Record<string, string> = {
@@ -154,6 +155,19 @@ function formatLatency(ms: number): { value: string; unit: string } {
   return { value: (ms / 60000).toFixed(1), unit: 'min' };
 }
 
+function formatCompactTokens(tokens: number): string {
+  if (!tokens || tokens <= 0) return '0';
+  if (tokens >= 1_000_000) {
+    const val = tokens / 1_000_000;
+    return val >= 100 ? `${Math.round(val)}M` : `${val.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    const val = tokens / 1_000;
+    return val >= 100 ? `${Math.round(val)}K` : `${val.toFixed(1)}K`;
+  }
+  return tokens.toString();
+}
+
 function parseModelDisplay(rawModel: string, targetModel?: string): {
   displayName: string;
   namespace?: string;
@@ -178,13 +192,13 @@ function renderSuccessRateBadge(rate: number, count: number, locale: string) {
   if (count === 0 || rate >= 98) return null;
   if (rate >= 80) {
     return (
-      <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-mono font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 border border-amber-500/25 shrink-0">
+      <Badge variant="warning" className="px-1.5 py-0 text-[10px] font-mono font-medium shrink-0">
         {rate}% {locale === 'zh-CN' ? '成功' : 'success'}
-      </span>
+      </Badge>
     );
   }
   return (
-    <Badge variant="destructive" className="text-[10px] py-0 px-1 font-mono shrink-0">
+    <Badge variant="destructive" className="px-1.5 py-0 text-[10px] font-mono font-medium shrink-0">
       {rate}% {locale === 'zh-CN' ? '成功' : 'success'}
     </Badge>
   );
@@ -524,55 +538,35 @@ export const UsageDashboard: React.FC = () => {
 
         <div className="flex items-center gap-1.5 shrink-0">
           {/* 精简时间范围切换：全部 / 今天 / 1 小时 */}
-          <div className="flex items-center rounded-lg bg-zinc-500/[0.07] dark:bg-white/[0.07] p-0.5 border border-border text-xs">
-            <button
-              type="button"
-              onClick={() => setTimeRange('all')}
-              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border border-transparent transition-all duration-150 cursor-pointer outline-none ${
-                timeRange === 'all'
-                  ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t('dashboard.timeRange.all')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setTimeRange('today')}
-              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border border-transparent transition-all duration-150 cursor-pointer outline-none ${
-                timeRange === 'today'
-                  ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t('dashboard.timeRange.today')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setTimeRange('1h')}
-              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border border-transparent transition-all duration-150 cursor-pointer outline-none ${
-                timeRange === '1h'
-                  ? 'bg-background text-foreground shadow-2xs border-black/5 dark:border-white/10'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t('dashboard.timeRange.oneHour')}
-            </button>
-          </div>
+          <Tabs value={timeRange} onValueChange={(val) => setTimeRange(val as TimeRange)}>
+            <TabsList size="sm" aria-label={t('dashboard.timeRange.all')}>
+              <TabsTrigger value="all">
+                {t('dashboard.timeRange.all')}
+              </TabsTrigger>
+              <TabsTrigger value="today">
+                {t('dashboard.timeRange.today')}
+              </TabsTrigger>
+              <TabsTrigger value="1h">
+                {t('dashboard.timeRange.oneHour')}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
 
-          {/* 清空日志按钮 */}
+          {/* 清空日志按钮：与视图过滤增加安全隔离 */}
           {logs.length > 0 && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={clearingLogs}
-              onClick={() => setShowClearConfirm(true)}
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
-              title={t('dashboard.metrics.clearLogs')}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </Button>
+            <div className="flex items-center pl-1 border-l border-border/60">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={clearingLogs}
+                onClick={() => setShowClearConfirm(true)}
+                className="h-6 w-6 p-0 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer rounded-md"
+                title={t('dashboard.metrics.clearLogs')}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </Button>
+            </div>
           )}
         </div>
       </div>
@@ -594,7 +588,7 @@ export const UsageDashboard: React.FC = () => {
         </div>
       ) : (
         <>
-          {/* 1. 核心关键指标栏 (超紧凑单行 4 列集成条) */}
+          {/* 1. 核心关键指标栏 (超紧凑单行 4 列原生集成条) */}
           <div className="rounded-lg border border-border bg-card p-2 sm:p-2.5 shadow-2xs">
             <div className="grid grid-cols-4 divide-x divide-border/60">
               {/* 单元 1: 请求数 */}
@@ -615,8 +609,15 @@ export const UsageDashboard: React.FC = () => {
                 </div>
                 <div className="text-[10px] font-mono truncate">
                   {metrics.errorCount > 0 ? (
-                    <span className="text-rose-500 font-medium truncate">
-                      {metrics.successRate.toFixed(0)}% · {metrics.errorCount}{locale === 'zh-CN' ? '败' : 'err'}
+                    <span
+                      className={`${
+                        metrics.successRate < 90
+                          ? 'text-rose-500 font-semibold'
+                          : 'text-amber-500/90 font-medium'
+                      } truncate`}
+                      title={`${metrics.errorCount} ${locale === 'zh-CN' ? '次失败' : 'failed'}`}
+                    >
+                      {metrics.successRate.toFixed(0)}% · {metrics.errorCount} {locale === 'zh-CN' ? '失败' : 'failed'}
                     </span>
                   ) : (
                     <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-0.5 truncate">
@@ -640,8 +641,13 @@ export const UsageDashboard: React.FC = () => {
                     {formatTokens(metrics.totalTokens)}
                   </span>
                 </div>
-                <div className="text-[9px] text-zinc-400 font-mono truncate">
-                  ↑{formatTokens(metrics.promptTokens)} · ↓{formatTokens(metrics.completionTokens)}
+                <div
+                  className="text-[9px] text-zinc-400 font-mono truncate"
+                  title={`输入: ${formatTokens(metrics.promptTokens)} · 输出: ${formatTokens(metrics.completionTokens)}`}
+                >
+                  <span>↑{formatCompactTokens(metrics.promptTokens)}</span>
+                  <span className="text-zinc-300 dark:text-zinc-600 mx-0.5">·</span>
+                  <span>↓{formatCompactTokens(metrics.completionTokens)}</span>
                 </div>
               </div>
 
@@ -686,7 +692,7 @@ export const UsageDashboard: React.FC = () => {
           </div>
 
           {/* 2. 中层：服务商占比 & 热门模型横向条形排行榜 (双列网格) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {/* 左列：服务商分发 (全宽分段条 + 紧凑行内数据) */}
             <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden flex flex-col justify-between">
               <div>
@@ -696,30 +702,16 @@ export const UsageDashboard: React.FC = () => {
                     <span>{t('dashboard.charts.providerDistribution')}</span>
                   </div>
                   {/* 维度切换 */}
-                  <div className="flex items-center gap-0.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] p-0.5 rounded-md text-[10px] font-medium border border-border/50">
-                    <button
-                      type="button"
-                      onClick={() => setProviderSort('count')}
-                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
-                        providerSort === 'count'
-                          ? 'bg-background text-foreground shadow-2xs font-semibold'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {t('dashboard.charts.sortByRequests')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setProviderSort('cost')}
-                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
-                        providerSort === 'cost'
-                          ? 'bg-background text-foreground shadow-2xs font-semibold'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {t('dashboard.charts.sortByCost')}
-                    </button>
-                  </div>
+                  <Tabs value={providerSort} onValueChange={(val) => setProviderSort(val as SortMetric)}>
+                    <TabsList size="xs" aria-label={t('dashboard.charts.providerDistribution')}>
+                      <TabsTrigger value="count">
+                        {t('dashboard.charts.sortByRequests')}
+                      </TabsTrigger>
+                      <TabsTrigger value="cost">
+                        {t('dashboard.charts.sortByCost')}
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
                 </div>
 
                 <div className="p-3 space-y-2.5">
@@ -820,35 +812,18 @@ export const UsageDashboard: React.FC = () => {
                   <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
                     <Sparkles className="w-3.5 h-3.5 text-zinc-500" />
                     <span>{t('dashboard.charts.modelDistribution')}</span>
-                    <span className="text-[11px] font-mono text-zinc-400 font-normal">
-                      (Top {Math.min(5, sortedModels.length)})
-                    </span>
                   </div>
                   {/* 维度切换 */}
-                  <div className="flex items-center gap-0.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] p-0.5 rounded-md text-[10px] font-medium border border-border/50">
-                    <button
-                      type="button"
-                      onClick={() => setModelSort('count')}
-                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
-                        modelSort === 'count'
-                          ? 'bg-background text-foreground shadow-2xs font-semibold'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {t('dashboard.charts.sortByRequests')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setModelSort('cost')}
-                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer outline-none ${
-                        modelSort === 'cost'
-                          ? 'bg-background text-foreground shadow-2xs font-semibold'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {t('dashboard.charts.sortByCost')}
-                    </button>
-                  </div>
+                  <Tabs value={modelSort} onValueChange={(val) => setModelSort(val as SortMetric)}>
+                    <TabsList size="xs" aria-label={t('dashboard.charts.modelDistribution')}>
+                      <TabsTrigger value="count">
+                        {t('dashboard.charts.sortByRequests')}
+                      </TabsTrigger>
+                      <TabsTrigger value="cost">
+                        {t('dashboard.charts.sortByCost')}
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
                 </div>
 
                 <div className="p-3 space-y-2">
@@ -865,15 +840,15 @@ export const UsageDashboard: React.FC = () => {
 
                       const parsed = parseModelDisplay(m.model, m.targetModel);
 
-                      // 排名微样式：优雅的纯净质感
+                      // 排名微样式：优雅纯净的中性质感
                       const rankBadgeClass =
                         index === 0
                           ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'
                           : index === 1
-                          ? 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-300 border border-zinc-500/30'
+                          ? 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-300 border border-zinc-500/25'
                           : index === 2
-                          ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400 border border-orange-500/30'
-                          : 'bg-zinc-500/10 text-zinc-400';
+                          ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400 border border-orange-500/25'
+                          : 'bg-zinc-500/10 text-zinc-400 dark:text-zinc-500 border border-transparent';
 
                       return (
                         <div key={m.model} className="space-y-1">
@@ -884,20 +859,20 @@ export const UsageDashboard: React.FC = () => {
                               >
                                 {index + 1}
                               </span>
-                              {parsed.namespace && (
-                                <span
-                                  className="text-[10px] font-mono px-1 py-0.2 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-500 dark:text-zinc-400 shrink-0"
-                                  title={`${locale === 'zh-CN' ? '命名空间' : 'Namespace'}: ${parsed.namespace}`}
-                                >
-                                  {parsed.namespace}
-                                </span>
-                              )}
                               <span
                                 className="text-xs font-mono font-semibold text-zinc-900 dark:text-zinc-100 truncate"
                                 title={m.model}
                               >
                                 {parsed.displayName}
                               </span>
+                              {parsed.namespace && (
+                                <span
+                                  className="text-[9px] font-mono px-1 py-0.2 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] text-zinc-400 dark:text-zinc-500 shrink-0"
+                                  title={`${locale === 'zh-CN' ? '命名空间' : 'Namespace'}: ${parsed.namespace}`}
+                                >
+                                  {parsed.namespace}
+                                </span>
+                              )}
                               {parsed.targetDisplay && (
                                 <span
                                   className="text-[10px] font-mono text-zinc-400 truncate shrink-0"
@@ -915,21 +890,25 @@ export const UsageDashboard: React.FC = () => {
                             </div>
                           </div>
 
-                          {/* 横向柱形图 (Bar Chart) */}
-                          <div className="w-full h-1.5 bg-zinc-500/[0.08] dark:bg-white/[0.08] rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-300"
-                              style={{ width: `${Math.max(2, mShare)}%` }}
-                            />
-                          </div>
+                          {/* 横向柱形图 (Bar Chart)：仅当占比 > 0 时渲染，避免 0% 产生多余空条 */}
+                          {mShare > 0 ? (
+                            <div className="w-full h-1 bg-zinc-500/[0.08] dark:bg-white/[0.08] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-300"
+                                style={{ width: `${Math.max(2, mShare)}%` }}
+                              />
+                            </div>
+                          ) : null}
 
                           {/* 细分指标 */}
                           <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
                             <span className="truncate mr-2">
                               {formatTokens(m.totalTokens)} tok
-                              <span className="text-zinc-400 dark:text-zinc-500 ml-1.5">
-                                (↑{formatTokens(m.promptTokens)} · ↓{formatTokens(m.completionTokens)})
-                              </span>
+                              {m.totalTokens > 0 && (
+                                <span className="text-zinc-400 dark:text-zinc-500 ml-1.5">
+                                  (↑{formatTokens(m.promptTokens)} · ↓{formatTokens(m.completionTokens)})
+                                </span>
+                              )}
                             </span>
                             <div className="shrink-0">
                               {isCost ? (
@@ -953,85 +932,90 @@ export const UsageDashboard: React.FC = () => {
           </div>
 
           {/* 3. 下层：客户端调用分段比例图 & 链路稳定性与异常诊断 (双列网格) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {/* 左列：客户端接入统计 (带分段比例图) */}
-            <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden">
-              <div className="px-3.5 py-2 bg-muted/20 border-b border-border flex items-center justify-between text-xs">
-                <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
-                  <Terminal className="w-3.5 h-3.5 text-zinc-500" />
-                  <span>{t('dashboard.charts.clientDistribution')}</span>
-                </div>
-                <span className="text-[11px] font-mono text-zinc-400">
-                  {metrics.clientList.length} {locale === 'zh-CN' ? '类客户端' : 'clients'}
-                </span>
-              </div>
-
-              <div className="p-3 space-y-2.5">
-                {metrics.clientList.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-zinc-400">
-                    {locale === 'zh-CN' ? '暂无客户端请求' : 'No client requests'}
+            <div className="rounded-lg border border-border bg-card shadow-2xs overflow-hidden flex flex-col justify-between">
+              <div>
+                <div className="px-3.5 py-2 bg-muted/20 border-b border-border flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-200">
+                    <Terminal className="w-3.5 h-3.5 text-zinc-500" />
+                    <span>{t('dashboard.charts.clientDistribution')}</span>
                   </div>
-                ) : (
-                  <>
-                    {/* 客户端分段比例条 (Stacked Segment Bar) */}
-                    <div className="w-full h-2 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden gap-[1px]">
-                      {clientSegments.map((c) => (
-                        <div
-                          key={c.type}
-                          className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
-                          style={{
-                            width: `${c.share}%`,
-                            backgroundColor: c.color,
-                          }}
-                          title={`${formatClientType(c.type, t)}: ${c.share}%`}
-                        />
-                      ))}
+                </div>
+
+                <div className="p-3 space-y-2.5">
+                  {metrics.clientList.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-zinc-400">
+                      {locale === 'zh-CN' ? '暂无客户端请求' : 'No client requests'}
                     </div>
+                  ) : (
+                    <>
+                      {/* 客户端分段比例条 (Stacked Segment Bar) */}
+                      <div className="w-full h-2 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden gap-[1px]">
+                        {clientSegments.map((c) => (
+                          <div
+                            key={c.type}
+                            className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
+                            style={{
+                              width: `${c.share}%`,
+                              backgroundColor: c.color,
+                            }}
+                            title={`${formatClientType(c.type, t)}: ${c.share}%`}
+                          />
+                        ))}
+                      </div>
 
-                    {/* 客户端条目列表 */}
-                    <div className="divide-y divide-border/50">
-                      {clientSegments.map((c) => (
-                        <div key={c.type} className="py-1.5 first:pt-0 last:pb-0 space-y-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span
-                                className="w-2 h-2 rounded-full shrink-0"
-                                style={{ backgroundColor: c.color }}
-                              />
-                              <div className="w-4 h-4 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] flex items-center justify-center p-0.5 shrink-0">
-                                <ClientLogo type={c.type} className="w-3 h-3" />
-                              </div>
-                              <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                                {formatClientType(c.type, t)}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5 text-xs font-mono">
-                              <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                                {c.count} {locale === 'zh-CN' ? '次' : 'reqs'}
-                              </span>
-                              <span className="text-[11px] text-zinc-400 font-normal">({c.share}%)</span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono pl-3.5">
-                            <span>{formatTokens(c.totalTokens)} tok</span>
-                            <div className="flex items-center gap-1.5">
-                              {c.errorCount > 0 && (
-                                <span className="text-rose-500 font-medium font-mono">
-                                  {c.errorCount} {locale === 'zh-CN' ? '失败' : 'failed'}
+                      {/* 客户端条目列表 */}
+                      <div className="divide-y divide-border/50">
+                        {clientSegments.map((c) => (
+                          <div key={c.type} className="py-1.5 first:pt-0 last:pb-0 space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span
+                                  className="w-2 h-2 rounded-full shrink-0"
+                                  style={{ backgroundColor: c.color }}
+                                />
+                                <div className="w-4 h-4 rounded bg-zinc-500/[0.08] dark:bg-white/[0.08] flex items-center justify-center p-0.5 shrink-0">
+                                  <ClientLogo type={c.type} className="w-3 h-3" />
+                                </div>
+                                <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                                  {formatClientType(c.type, t)}
                                 </span>
-                              )}
-                              {c.errorCount > 0 && <span>·</span>}
-                              <span className="text-zinc-700 dark:text-zinc-300 font-medium">
-                                {formatCurrency(c.cost)}
-                              </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-xs font-mono">
+                                <span className="font-bold text-zinc-900 dark:text-zinc-100">
+                                  {c.count} {locale === 'zh-CN' ? '次' : 'reqs'}
+                                </span>
+                                <span className="text-[11px] text-zinc-400 font-normal">({c.share}%)</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono pl-3.5">
+                              <span>{formatTokens(c.totalTokens)} tok</span>
+                              <div className="flex items-center gap-1.5">
+                                {c.errorCount > 0 && (
+                                  <span
+                                    className={`${
+                                      c.errorCount / c.count > 0.1
+                                        ? 'text-rose-500 font-semibold'
+                                        : 'text-amber-500/90 font-medium'
+                                    } font-mono`}
+                                  >
+                                    {c.errorCount} {locale === 'zh-CN' ? '失败' : 'failed'}
+                                  </span>
+                                )}
+                                {c.errorCount > 0 && <span>·</span>}
+                                <span className="text-zinc-700 dark:text-zinc-300 font-medium">
+                                  {formatCurrency(c.cost)}
+                                </span>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1053,12 +1037,24 @@ export const UsageDashboard: React.FC = () => {
                 </div>
 
                 <div className="p-3 space-y-2.5">
-                  {/* 三色状态码分段进度条 */}
+                  {/* 状态码分段进度条 */}
                   <div className="space-y-1">
                     <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
-                      <span>{t('dashboard.charts.statusDistribution')}</span>
-                      <span>
-                        2xx: {metrics.status2xx} · 4xx: {metrics.status4xx} · 5xx: {metrics.status5xx}
+                      <span className="text-zinc-500">{locale === 'zh-CN' ? '状态响应' : 'HTTP Status'}</span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-emerald-500 font-medium">2xx: {metrics.status2xx}</span>
+                        {metrics.status4xx > 0 && (
+                          <>
+                            <span>·</span>
+                            <span className="text-amber-500 font-medium">4xx: {metrics.status4xx}</span>
+                          </>
+                        )}
+                        {metrics.status5xx > 0 && (
+                          <>
+                            <span>·</span>
+                            <span className="text-rose-500 font-medium">5xx: {metrics.status5xx}</span>
+                          </>
+                        )}
                       </span>
                     </div>
                     <div className="w-full h-1.5 rounded-full bg-zinc-500/[0.08] dark:bg-white/[0.08] flex overflow-hidden">
@@ -1101,22 +1097,31 @@ export const UsageDashboard: React.FC = () => {
                       </div>
                     ) : (
                       <div className="space-y-1">
-                        {metrics.errorDiagnostics.slice(0, 3).map(({ reason, count }) => (
-                          <div
-                            key={reason}
-                            className="p-1.5 rounded bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200/50 dark:border-rose-900/40 flex items-center justify-between text-xs gap-2"
-                          >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <AlertTriangle className="w-3 h-3 shrink-0 text-amber-500 dark:text-amber-400" />
-                              <span className="font-mono text-zinc-800 dark:text-zinc-200 truncate text-[10px]">
-                                {reason}
+                        {metrics.errorDiagnostics.slice(0, 3).map(({ reason, count }) => {
+                          const isFatal = reason.includes('502') || reason.includes('504') || reason.includes('500');
+                          return (
+                            <div
+                              key={reason}
+                              className="p-1.5 px-2 rounded-md bg-zinc-500/[0.04] dark:bg-white/[0.04] border border-border/60 hover:border-border transition-colors flex items-center justify-between text-xs gap-2"
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <AlertTriangle
+                                  className={`w-3 h-3 shrink-0 ${isFatal ? 'text-rose-500' : 'text-amber-500'}`}
+                                />
+                                <span className="font-mono text-zinc-700 dark:text-zinc-300 truncate text-[10px]" title={reason}>
+                                  {reason}
+                                </span>
+                              </div>
+                              <span
+                                className={`text-xs font-mono font-semibold shrink-0 ${
+                                  isFatal ? 'text-rose-500' : 'text-zinc-700 dark:text-zinc-300'
+                                }`}
+                              >
+                                {count} {locale === 'zh-CN' ? '次' : 'reqs'}
                               </span>
                             </div>
-                            <span className="text-xs font-mono font-bold text-rose-600 dark:text-rose-400 shrink-0">
-                              {count} {locale === 'zh-CN' ? '次' : 'reqs'}
-                            </span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
