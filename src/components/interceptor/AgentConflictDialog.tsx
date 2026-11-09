@@ -167,7 +167,13 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
 
           {/* 底部按钮栏 */}
           <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50">
-            <Button variant="outline" size="default" disabled={busy} onClick={onClose}>
+            <Button
+              variant="secondary"
+              size="default"
+              disabled={busy}
+              onClick={onClose}
+              className="min-w-16"
+            >
               {t('common.cancel')}
             </Button>
             <Button
@@ -175,6 +181,7 @@ export const AgentConflictDialog: React.FC<AgentConflictDialogProps> = ({
               size="default"
               disabled={busy}
               onClick={() => onConfirmTakeover(target)}
+              className="min-w-16"
             >
               {busy ? t('agentConflict.takingOver') : t('agentConflict.confirmTakeover')}
             </Button>

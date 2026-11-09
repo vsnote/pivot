@@ -55,7 +55,13 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           )}
 
           <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-800">
-            <Button variant="outline" size="default" disabled={busy} onClick={onCancel}>
+            <Button
+              variant="secondary"
+              size="default"
+              disabled={busy}
+              onClick={onCancel}
+              className="min-w-16"
+            >
               {cancelLabel || t('common.cancel')}
             </Button>
             <Button
@@ -64,6 +70,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               autoFocus
               disabled={busy}
               onClick={onConfirm}
+              className="min-w-16"
             >
               {busy ? t('common.processing') : confirmLabel}
             </Button>

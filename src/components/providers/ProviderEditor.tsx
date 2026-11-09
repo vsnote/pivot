@@ -2155,9 +2155,10 @@ export function ProviderEditor() {
                     ) : (
                       <Button
                         type="button"
-                        variant="outline"
+                        variant="secondary"
                         size="sm"
                         onClick={handleBack}
+                        className="min-w-16"
                       >
                         {t('providerEditor.backBtn')}
                       </Button>
@@ -2166,9 +2167,10 @@ export function ProviderEditor() {
                     <>
                       <Button
                         type="button"
-                        variant="outline"
+                        variant="secondary"
                         size="sm"
                         onClick={handleBack}
+                        className="min-w-16"
                       >
                         {t('providerEditor.backBtn')}
                       </Button>
@@ -2177,6 +2179,7 @@ export function ProviderEditor() {
                         variant="default"
                         size="sm"
                         disabled={saving || deleting || fetching || draft.models.length === 0}
+                        className="min-w-16"
                       >
                         {saving && (
                           <LoaderCircle className="w-3.5 h-3.5 animate-spin mr-1.5" />

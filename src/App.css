@@ -70,7 +70,7 @@
   --popover: oklch(0.185 0.005 260);
   --popover-foreground: oklch(0.985 0 0);
   /* 品牌高反差极光陶瓷白主色 (Monochrome Luminous White) */
-  --primary: oklch(0.985 0 0);
+  --primary: oklch(0.93 0.002 260);
   --primary-foreground: oklch(0.14 0.005 260);
   --secondary: oklch(0.22 0.005 260);
   --secondary-foreground: oklch(0.985 0 0);
