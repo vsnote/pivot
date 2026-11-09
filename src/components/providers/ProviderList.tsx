@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { invoke } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/i18n';
 import { panelClass } from '@/components/common/panelStyles';
-import { Provider, InterceptorStatus } from '@/types';
+import { Provider, InterceptorStatus, SubscriptionAccount } from '@/types';
 import { Switch } from '@/components/common/Switch';
 import { Button } from '@/components/common/Button';
 import { ClientModelSelect, GroupedModelOption } from './ClientModelSelect';
@@ -122,6 +123,7 @@ interface DragState extends PressState {
 interface ProviderCardProps {
   provider: Provider;
   isDragged: boolean;
+  accountCount?: number;
   onDragHandlePointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
   onRowClick: () => void;
   onContextMenu: (event: React.MouseEvent) => void;
@@ -130,11 +132,12 @@ interface ProviderCardProps {
 function ProviderCard({
   provider,
   isDragged,
+  accountCount,
   onDragHandlePointerDown,
   onRowClick,
   onContextMenu,
 }: ProviderCardProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const { openProviderEditor, toggleProvider, testProviderLatency } = useAppStore(
     useShallow((state) => ({
       openProviderEditor: state.openProviderEditor,
@@ -152,6 +155,8 @@ function ProviderCard({
     provider.presetId === 'antigravity' ||
     provider.presetId === 'chatgpt_subscription' ||
     provider.protocol === 'chatgpt';
+
+  const resolvedCount = accountCount !== undefined ? accountCount : 1;
 
   const handleToggle = async () => {
     if (toggling) return;
@@ -247,10 +252,25 @@ function ProviderCard({
               {/* 订阅池标记 */}
               {isSubscription && (
                 <span
-                  title={t('providers.subscriptionTitle')}
-                  className="shrink-0 inline-flex items-center justify-center h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight bg-indigo-500/[0.08] text-indigo-600 border border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25 select-none"
+                  title={
+                    resolvedCount > 0
+                      ? locale === 'zh-CN'
+                        ? `官方账号订阅池（已连接 ${resolvedCount} 个账号）`
+                        : `Official subscription pool (${resolvedCount} account${resolvedCount > 1 ? 's' : ''} connected)`
+                      : locale === 'zh-CN'
+                        ? '官方账号订阅池（尚未绑定账号）'
+                        : 'Official subscription pool (No accounts bound)'
+                  }
+                  className={`shrink-0 inline-flex items-center gap-1 h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight select-none border ${
+                    resolvedCount > 0
+                      ? 'bg-indigo-500/[0.08] text-indigo-600 border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25'
+                      : 'bg-zinc-500/[0.08] text-zinc-500 border-zinc-500/20 dark:bg-zinc-400/[0.12] dark:text-zinc-400 dark:border-zinc-400/25'
+                  }`}
                 >
-                  {t('providers.subscription')}
+                  <span>{t('providers.subscription')}</span>
+                  <span className="font-mono tabular-nums font-semibold text-[10px] opacity-85">
+                    · {resolvedCount}
+                  </span>
                 </span>
               )}
 
@@ -702,6 +722,7 @@ export function ProviderList() {
   const { t } = useTranslation();
   const {
     providers,
+    isProviderEditorOpen,
     initialLoaded,
     isLoading,
     openProviderEditor,
@@ -712,6 +733,7 @@ export function ProviderList() {
   } = useAppStore(
     useShallow((state) => ({
       providers: state.providers,
+      isProviderEditorOpen: state.isProviderEditorOpen,
       initialLoaded: state.initialLoaded,
       isLoading: state.isLoading,
       openProviderEditor: state.openProviderEditor,
@@ -721,6 +743,43 @@ export function ProviderList() {
       clearProviderLatencies: state.clearProviderLatencies,
     })),
   );
+
+  const [subAccountCounts, setSubAccountCounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchCounts = async () => {
+      const poolProviders = providers.filter(
+        (prov) =>
+          prov.authType === 'subscription_pool' ||
+          prov.presetId === 'antigravity' ||
+          prov.presetId === 'chatgpt_subscription' ||
+          prov.protocol === 'chatgpt',
+      );
+      if (poolProviders.length === 0) return;
+
+      const counts: Record<string, number> = {};
+      await Promise.all(
+        poolProviders.map(async (prov) => {
+          try {
+            const list = await invoke<SubscriptionAccount[]>('get_subscription_accounts', {
+              providerId: prov.id,
+            });
+            counts[prov.id] = list.length;
+          } catch {
+            counts[prov.id] = 1;
+          }
+        }),
+      );
+      if (!cancelled) {
+        setSubAccountCounts(counts);
+      }
+    };
+    fetchCounts();
+    return () => {
+      cancelled = true;
+    };
+  }, [providers, isProviderEditorOpen]);
 
   // 离开列表页（切换 Tab 或组件卸载）时清空临时测速结果，离开后需重新测速
   useEffect(() => {
@@ -916,6 +975,7 @@ export function ProviderList() {
                 <ProviderCard
                   key={provider.id}
                   provider={provider}
+                  accountCount={subAccountCounts[provider.id]}
                   isDragged={drag?.id === provider.id}
                   onDragHandlePointerDown={(event) => handleDragHandlePointerDown(event, provider)}
                   onRowClick={() => handleRowClick(provider)}
@@ -1001,6 +1061,7 @@ export function ProviderList() {
           >
             <ProviderCard
               provider={draggedProvider}
+              accountCount={subAccountCounts[draggedProvider.id]}
               isDragged={false}
               onRowClick={() => {}}
               onContextMenu={() => {}}
