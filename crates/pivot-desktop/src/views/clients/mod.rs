@@ -1,5 +1,5 @@
+use crate::components::NativeSwitch;
 use crate::PivotApp;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::*;
 use pivot_core::interceptor::InterceptorInfo;
 
@@ -205,18 +205,14 @@ fn render_client_row(
                         .child("未安装此客户端")
                 })
                 .child(if is_installed {
-                    div().child(
-                        Switch::new(format!("client-switch-{}", client_id))
-                            .checked(is_enabled)
-                            .on_click(cx.listener({
-                                let cid = client_id.clone();
-                                move |this, checked: &bool, _, cx| {
-                                    this.toggle_interceptor(cid.clone(), *checked, cx);
-                                }
-                            })),
-                    )
+                    NativeSwitch::new(is_enabled).on_toggle(cx.listener({
+                        let cid = client_id.clone();
+                        move |this, _, _, cx| {
+                            this.toggle_interceptor(cid.clone(), !is_enabled, cx);
+                        }
+                    }))
                 } else {
-                    div()
+                    NativeSwitch::new(false).disabled(true).on_toggle(|_, _, _| {})
                 }),
         )
 }

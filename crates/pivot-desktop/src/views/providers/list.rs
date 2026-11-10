@@ -1,5 +1,5 @@
+use crate::components::NativeSwitch;
 use crate::PivotApp;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::*;
 use pivot_core::db::Provider;
 
@@ -153,25 +153,27 @@ fn render_provider_row(
         .px(px(16.0))
         .border_b_1()
         .border_color(rgb(0x2e2e32))
-        .cursor_pointer()
         .bg(if is_enabled {
             rgb(0x1c1c1f)
         } else {
             rgba(0x1c1c1f80)
         })
         .hover(|s| s.bg(rgb(0x242428)))
-        .on_mouse_down(MouseButton::Left, cx.listener({
-            let p = p_clone.clone();
-            move |this, _, window, cx| {
-                this.open_editor(Some(p.clone()), window, cx);
-            }
-        }))
         .child(
-            // 左侧：24×24 Avatar + 名称 + 订阅/端点标签
+            // 左侧：24×24 Avatar + 名称 + 订阅/端点标签 (点击打开编辑)
             div()
                 .flex()
+                .flex_1()
+                .h_full()
                 .items_center()
+                .cursor_pointer()
                 .gap(px(10.0))
+                .on_mouse_down(MouseButton::Left, cx.listener({
+                    let p = p_clone.clone();
+                    move |this, _, window, cx| {
+                        this.open_editor(Some(p.clone()), window, cx);
+                    }
+                }))
                 .child(
                     // 统一 24×24 品牌图标槽
                     div()
@@ -328,16 +330,12 @@ fn render_provider_row(
                         .child("⚡")
                 })
                 .child(
-                    div().child(
-                        Switch::new(format!("provider-switch-{}", p_id))
-                            .checked(is_enabled)
-                            .on_click(cx.listener({
-                                let id = p_id.clone();
-                                move |this, checked: &bool, _, cx| {
-                                    this.toggle_provider(id.clone(), *checked, cx);
-                                }
-                            })),
-                    ),
+                    NativeSwitch::new(is_enabled).on_toggle(cx.listener({
+                        let id = p_id.clone();
+                        move |this, _, _, cx| {
+                            this.toggle_provider(id.clone(), !is_enabled, cx);
+                        }
+                    })),
                 ),
         )
 }

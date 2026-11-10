@@ -1,5 +1,5 @@
+use crate::components::NativeButton;
 use crate::PivotApp;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -65,23 +65,15 @@ pub fn render_provider_editor(
                                 .gap(px(8.0))
                                 .when(is_edit, |el| {
                                     el.child(
-                                        div()
-                                            .px(px(8.0))
-                                            .py(px(4.0))
-                                            .rounded(px(5.0))
-                                            .cursor_pointer()
-                                            .bg(rgba(0xef444415))
-                                            .hover(|s| s.bg(rgba(0xef444425)))
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(0xf87171))
-                                            .on_mouse_down(MouseButton::Left, cx.listener({
+                                        NativeButton::new("删除服务商")
+                                            .danger()
+                                            .on_click(cx.listener({
                                                 let id = edit_id.clone().unwrap_or_default();
                                                 move |this, _, _, cx| {
                                                     this.delete_provider(id.clone(), cx);
                                                     this.close_editor(cx);
                                                 }
-                                            }))
-                                            .child("删除服务商"),
+                                            })),
                                     )
                                 })
                                 .child(
@@ -225,17 +217,15 @@ pub fn render_provider_editor(
                         .border_t_1()
                         .border_color(rgb(0x2e2e32))
                         .child(
-                            Button::new("cancel-btn")
-                                .with_variant(ButtonVariant::Ghost)
-                                .label("取消")
+                            NativeButton::new("取消")
+                                .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.close_editor(cx);
                                 })),
                         )
                         .child(
-                            Button::new("save-btn")
-                                .with_variant(ButtonVariant::Primary)
-                                .label("保存服务商")
+                            NativeButton::new("保存服务商")
+                                .primary()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.save_current_editor(cx);
                                 })),
