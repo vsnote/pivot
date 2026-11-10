@@ -900,13 +900,15 @@ pub async fn acquire_subscription_account(
                             account.email,
                             e
                         );
-                        let is_revoked = e.contains("invalid_grant")
-                            || e.contains("revoked")
-                            || e.contains("expired")
-                            || e.contains("unauthorized");
+                        let is_revoked = is_token_revoked_or_invalid(&e);
                         if is_revoked {
-                            // 授权已被上游撤销或失效，冷却 24 小时避免反复重试
+                            // 授权已被上游撤销或失效，冷却 24 小时避免反复重试（前端将显示授权失效并引导重新授权）
                             let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
+                            account.cooldown_until = now_sec + 86400;
+                        } else if account.expires_at <= now_sec {
+                            // Token 已过期但可能因网络原因暂时失败，冷却 60 秒避免短时间内对失效账号高频重试
+                            let _ = db.set_account_cooldown(&account.id, now_sec + 60);
+                            account.cooldown_until = now_sec + 60;
                         }
                         if account.expires_at <= now_sec {
                             account_valid = false;
@@ -920,6 +922,8 @@ pub async fn acquire_subscription_account(
                 }
             } else if account.expires_at <= now_sec {
                 account_valid = false;
+                let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
+                account.cooldown_until = now_sec + 86400;
                 last_err = format!(
                     "订阅账号 {} Token 已过期且缺少 refresh_token",
                     account.email.as_deref().unwrap_or(&account.id)
@@ -981,10 +985,7 @@ pub async fn try_refresh_subscription_account(
             Ok(account)
         }
         Err(e) => {
-            let is_revoked = e.contains("invalid_grant")
-                || e.contains("revoked")
-                || e.contains("expired")
-                || e.contains("unauthorized");
+            let is_revoked = is_token_revoked_or_invalid(&e);
             if is_revoked {
                 let now_sec = chrono::Utc::now().timestamp();
                 let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
@@ -992,6 +993,20 @@ pub async fn try_refresh_subscription_account(
             Err(e)
         }
     }
+}
+
+/// 判断 Token 刷新或上游鉴权错误是否属于授权撤销/失效（需要用户重新授权）
+pub fn is_token_revoked_or_invalid(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("invalid_grant")
+        || lower.contains("invalid_refresh_token")
+        || lower.contains("invalid_request")
+        || lower.contains("revoked")
+        || lower.contains("unauthorized")
+        || lower.contains("unauthenticated")
+        || lower.contains("401")
+        || (lower.contains("refresh_token") && (lower.contains("invalid") || lower.contains("expired") || lower.contains("failed")))
+        || (lower.contains("token") && (lower.contains("expired") || lower.contains("invalid")))
 }
 
 /// 标记账号进入冷却（如遇到 429 速率限制，默认冷却 5 分钟）
@@ -1549,5 +1564,15 @@ mod tests {
         assert_eq!(buckets[1].label, "Plus 周周期配额");
         assert!((buckets[1].remaining_fraction - 0.55).abs() < 1e-4);
         assert_eq!(buckets[1].is_exhausted, true); // limit_reached: true
+    }
+
+    #[test]
+    fn test_is_token_revoked_or_invalid() {
+        assert!(is_token_revoked_or_invalid("刷新 OpenAI Token 失败: { \"error\": { \"message\": \"Invalid refresh token.\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"invalid_refresh_token\" } }"));
+        assert!(is_token_revoked_or_invalid("Token has been revoked"));
+        assert!(is_token_revoked_or_invalid("invalid_grant: bad credentials"));
+        assert!(is_token_revoked_or_invalid("401 Unauthorized"));
+        assert!(is_token_revoked_or_invalid("UNAUTHENTICATED: Request had invalid authentication credentials"));
+        assert!(!is_token_revoked_or_invalid("Connection timed out after 5000 ms"));
     }
 }

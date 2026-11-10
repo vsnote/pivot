@@ -258,6 +258,16 @@ fn sanitize_openai_tool_parameters(parameters: &mut Value, function_name: &str) 
     }
 }
 
+/// 判断目标模型是否原生支持 OpenAI 的 reasoning_effort 调节参数
+/// 仅 OpenAI 官方推理模型（o1, o3, gpt-5, gpt-6 系列，排除 o1-preview）支持该参数；
+/// 其余非推理模型（如 gpt-4o 等）及绝大多数第三方服务商（如 DeepSeek, Qwen 等）会报 400 错误。
+fn is_openai_reasoning_effort_supported(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    let name = lower.split('/').last().unwrap_or(&lower);
+    (name.starts_with("o1") || name.starts_with("o3") || name.starts_with("gpt-5") || name.starts_with("gpt-6"))
+        && !name.contains("preview")
+}
+
 /// Normalize OpenAIChatRequest before sending to upstream OpenAI-compatible endpoints.
 /// 1. Roles: translates "developer" -> "system", "model" -> "assistant", "human" -> "user"
 ///    (e.g. DeepSeek, Ollama, Groq, Mistral, Moonshot reject "developer" with 422).
@@ -394,10 +404,25 @@ fn normalize_openai_req_for_upstream(req: &mut OpenAIChatRequest) {
     }
 
     if let Some(ref mut effort) = req.reasoning_effort {
-        if effort.is_empty() {
+        if effort.is_empty()
+            || effort.eq_ignore_ascii_case("none")
+            || !is_openai_reasoning_effort_supported(&req.model)
+        {
             req.reasoning_effort = None;
-        } else if effort.eq_ignore_ascii_case("ultra") {
-            *effort = "max".to_string();
+        } else {
+            let lower = req.model.to_lowercase();
+            let name = lower.split('/').last().unwrap_or(&lower);
+            if effort.eq_ignore_ascii_case("ultra") {
+                *effort = if name.starts_with("gpt-5") || name.starts_with("gpt-6") {
+                    "max".to_string()
+                } else {
+                    "high".to_string()
+                };
+            } else if effort.eq_ignore_ascii_case("xhigh") || effort.eq_ignore_ascii_case("max") {
+                if !name.starts_with("gpt-5") && !name.starts_with("gpt-6") {
+                    *effort = "high".to_string();
+                }
+            }
         }
     }
 
@@ -2122,7 +2147,7 @@ async fn dispatch_chatgpt_request(
         .post(upstream_url)
         .timeout(timeout)
         .header("authorization", format!("Bearer {}", account.access_token))
-        .header("user-agent", "codex-cli/0.154.0")
+        .header("user-agent", crate::oauth::codex_user_agent())
         .header("content-type", "application/json");
 
     let res = req_builder.json(&responses_body).send().await.map_err(|e| {
@@ -2138,6 +2163,13 @@ async fn dispatch_chatgpt_request(
         let text = res.text().await.unwrap_or_default();
         if status == StatusCode::TOO_MANY_REQUESTS {
             crate::oauth::mark_account_cooldown(&state.db, &account.id, 300);
+        } else if status == StatusCode::UNAUTHORIZED {
+            // 上游返回 401 说明 access_token 已失效，立即尝试刷新凭据；若刷新失败则冷却该账号
+            if let Err(refresh_err) = crate::oauth::try_refresh_subscription_account(&state.db, &state.http_client, &account.id).await {
+                tracing::warn!("Upstream ChatGPT returned 401 and refresh failed for {}: {}", account.id, refresh_err);
+                let now_sec = chrono::Utc::now().timestamp();
+                let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+            }
         }
         return Err((status, text));
     }
@@ -3570,6 +3602,38 @@ mod tests {
         // 4. Multimodal message preserved as array
         assert_eq!(req.messages[3].role, "user");
         assert!(req.messages[3].content.as_ref().unwrap().is_array());
+
+        // 5. reasoning_effort on unsupported models (e.g. deepseek-chat, gpt-4o) stripped
+        let mut non_reasoning_req = OpenAIChatRequest {
+            model: "deepseek-chat".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            reasoning_effort: Some("high".to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            stream_options: None,
+        };
+        normalize_openai_req_for_upstream(&mut non_reasoning_req);
+        assert_eq!(non_reasoning_req.reasoning_effort, None);
+
+        // 6. reasoning_effort on supported models (e.g. o3-mini) preserved and normalized
+        let mut reasoning_req = OpenAIChatRequest {
+            model: "o3-mini".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            reasoning_effort: Some("ultra".to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            stream_options: None,
+        };
+        normalize_openai_req_for_upstream(&mut reasoning_req);
+        assert_eq!(reasoning_req.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

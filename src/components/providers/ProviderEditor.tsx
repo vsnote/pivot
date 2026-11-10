@@ -312,6 +312,29 @@ export function ProviderEditor() {
     }
   };
 
+  const checkAllAccountsQuota = async (accounts: SubscriptionAccount[]) => {
+    if (!draft.id || accounts.length === 0) return;
+    try {
+      const results = await invoke<AccountQuota[]>('get_all_subscription_quotas', {
+        providerId: draft.id,
+        baseUrl: draft.baseUrl || undefined,
+      });
+      if (results && results.length > 0) {
+        const quotasMap: Record<string, AccountQuota> = {};
+        for (const q of results) {
+          quotasMap[q.accountId] = q;
+        }
+        setAccountQuotas((prev) => ({ ...prev, ...quotasMap }));
+        const updated = await invoke<SubscriptionAccount[]>('get_subscription_accounts', {
+          providerId: draft.id,
+        });
+        setSubAccounts(updated);
+      }
+    } catch (e) {
+      console.warn('检查订阅账号状态失败:', e);
+    }
+  };
+
   const loadSubscriptionAccounts = async () => {
     if (!draft.id) return;
     try {
@@ -320,6 +343,10 @@ export function ProviderEditor() {
         providerId: draft.id,
       });
       setSubAccounts(list);
+      if (list.length > 0) {
+        // 静默预加载并检查各账号额度与健康状态（若 Token 过期会自动触发刷新或标记冷却）
+        checkAllAccountsQuota(list);
+      }
       // 若已绑定账号且候选池较少，后台静默补充拉取一次上游模型扩充 pool（保持已选模型不变）
       if (list.length > 0 && pool.length <= draft.models.length) {
         syncSubscriptionModels(draft.baseUrl);
@@ -1296,10 +1323,27 @@ export function ProviderEditor() {
                           <label className="text-xs font-bold text-foreground tracking-wider">
                             {t('providerEditor.accountPool')}
                           </label>
-                          <Badge variant="secondary" className="font-mono text-[10px] px-1.5 py-0">
+                          <Badge
+                            variant={subAccounts.length > 0 && subAccounts.filter((a) => {
+                              const now = Math.floor(Date.now() / 1000);
+                              if (!a.enabled || a.cooldownUntil > now) return false;
+                              if (!a.refreshToken && a.expiresAt > 0 && a.expiresAt <= now) return false;
+                              const q = accountQuotas[a.id];
+                              if (q?.error && (q.error.includes('失效') || q.error.includes('401') || q.error.includes('UNAUTHENTICATED') || q.error.includes('invalid') || q.error.includes('revoked'))) return false;
+                              return true;
+                            }).length === 0 ? "destructive" : "secondary"}
+                            className="font-mono text-[10px] px-1.5 py-0"
+                          >
                             {subAccounts.length > 0
                               ? t('providerEditor.accountAvailable', {
-                                  available: subAccounts.filter((a) => a.enabled).length,
+                                  available: subAccounts.filter((a) => {
+                                    const now = Math.floor(Date.now() / 1000);
+                                    if (!a.enabled || a.cooldownUntil > now) return false;
+                                    if (!a.refreshToken && a.expiresAt > 0 && a.expiresAt <= now) return false;
+                                    const q = accountQuotas[a.id];
+                                    if (q?.error && (q.error.includes('失效') || q.error.includes('401') || q.error.includes('UNAUTHENTICATED') || q.error.includes('invalid') || q.error.includes('revoked'))) return false;
+                                    return true;
+                                  }).length,
                                   total: subAccounts.length,
                                 })
                               : t('providerEditor.notConnected')}
@@ -1462,12 +1506,14 @@ export function ProviderEditor() {
                             const isCooldown = acc.cooldownUntil > nowSec;
                             const isAuthError =
                               acc.cooldownUntil - nowSec > 3600 ||
+                              (!acc.refreshToken && acc.expiresAt > 0 && acc.expiresAt <= nowSec) ||
                               Boolean(
                                 quota?.error &&
                                   (quota.error.includes('失效') ||
                                     quota.error.includes('401') ||
                                     quota.error.includes('UNAUTHENTICATED') ||
-                                    quota.error.includes('invalid_grant'))
+                                    quota.error.includes('invalid') ||
+                                    quota.error.includes('revoked'))
                               );
                             const cooldownRemaining = Math.ceil((acc.cooldownUntil - nowSec) / 60);
                             const isRefreshingThis = refreshingQuotaId === acc.id;

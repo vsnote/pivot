@@ -124,6 +124,8 @@ interface ProviderCardProps {
   provider: Provider;
   isDragged: boolean;
   accountCount?: number;
+  availableAccountCount?: number;
+  hasAuthError?: boolean;
   onDragHandlePointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
   onRowClick: () => void;
   onContextMenu: (event: React.MouseEvent) => void;
@@ -133,6 +135,8 @@ function ProviderCard({
   provider,
   isDragged,
   accountCount,
+  availableAccountCount,
+  hasAuthError,
   onDragHandlePointerDown,
   onRowClick,
   onContextMenu,
@@ -251,27 +255,44 @@ function ProviderCard({
 
               {/* 订阅池标记 */}
               {isSubscription && (
-                <span
-                  title={
-                    resolvedCount > 0
-                      ? locale === 'zh-CN'
-                        ? `官方账号订阅池（已连接 ${resolvedCount} 个账号）`
-                        : `Official subscription pool (${resolvedCount} account${resolvedCount > 1 ? 's' : ''} connected)`
-                      : locale === 'zh-CN'
-                        ? '官方账号订阅池（尚未绑定账号）'
-                        : 'Official subscription pool (No accounts bound)'
-                  }
-                  className={`shrink-0 inline-flex items-center gap-1 h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight select-none border ${
-                    resolvedCount > 0
-                      ? 'bg-indigo-500/[0.08] text-indigo-600 border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25'
-                      : 'bg-zinc-500/[0.08] text-zinc-500 border-zinc-500/20 dark:bg-zinc-400/[0.12] dark:text-zinc-400 dark:border-zinc-400/25'
-                  }`}
-                >
-                  <span>{t('providers.subscription')}</span>
-                  <span className="font-mono tabular-nums font-semibold text-[10px] opacity-85">
-                    · {resolvedCount}
+                resolvedCount > 0 && (hasAuthError || (availableAccountCount !== undefined && availableAccountCount === 0)) ? (
+                  <span
+                    title={
+                      locale === 'zh-CN'
+                        ? '订阅账号授权已失效或在冷却中，请点击此服务商重新授权'
+                        : 'Subscription account auth expired, click to re-authenticate'
+                    }
+                    className="shrink-0 inline-flex items-center gap-1 h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight select-none border bg-rose-500/[0.08] text-rose-600 border-rose-500/20 dark:bg-rose-400/[0.12] dark:text-rose-300 dark:border-rose-400/25"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
+                    <span>{t('providerEditor.authExpired')}</span>
+                    <span className="font-mono tabular-nums font-semibold text-[10px] opacity-85">
+                      · {availableAccountCount ?? 0}/{resolvedCount}
+                    </span>
                   </span>
-                </span>
+                ) : (
+                  <span
+                    title={
+                      resolvedCount > 0
+                        ? locale === 'zh-CN'
+                          ? `官方账号订阅池（已连接 ${resolvedCount} 个账号）`
+                          : `Official subscription pool (${resolvedCount} account${resolvedCount > 1 ? 's' : ''} connected)`
+                        : locale === 'zh-CN'
+                          ? '官方账号订阅池（尚未绑定账号）'
+                          : 'Official subscription pool (No accounts bound)'
+                    }
+                    className={`shrink-0 inline-flex items-center gap-1 h-4.5 px-1.5 rounded-[4px] text-[10px] font-medium tracking-tight select-none border ${
+                      resolvedCount > 0
+                        ? 'bg-indigo-500/[0.08] text-indigo-600 border-indigo-500/20 dark:bg-indigo-400/[0.12] dark:text-indigo-300 dark:border-indigo-400/25'
+                        : 'bg-zinc-500/[0.08] text-zinc-500 border-zinc-500/20 dark:bg-zinc-400/[0.12] dark:text-zinc-400 dark:border-zinc-400/25'
+                    }`}
+                  >
+                    <span>{t('providers.subscription')}</span>
+                    <span className="font-mono tabular-nums font-semibold text-[10px] opacity-85">
+                      · {resolvedCount}
+                    </span>
+                  </span>
+                )
               )}
 
               {/* 紧凑端点信息（非订阅服务商展示，空间宽裕时完整展示，空间受限时自适应截断） */}
@@ -744,7 +765,13 @@ export function ProviderList() {
     })),
   );
 
-  const [subAccountCounts, setSubAccountCounts] = useState<Record<string, number>>({});
+  interface SubAccountStat {
+    total: number;
+    available: number;
+    hasAuthError: boolean;
+  }
+
+  const [subAccountStats, setSubAccountStats] = useState<Record<string, SubAccountStat>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -758,21 +785,30 @@ export function ProviderList() {
       );
       if (poolProviders.length === 0) return;
 
-      const counts: Record<string, number> = {};
+      const stats: Record<string, SubAccountStat> = {};
+      const nowSec = Math.floor(Date.now() / 1000);
       await Promise.all(
         poolProviders.map(async (prov) => {
           try {
             const list = await invoke<SubscriptionAccount[]>('get_subscription_accounts', {
               providerId: prov.id,
             });
-            counts[prov.id] = list.length;
+            const total = list.length;
+            const hasAuthError = list.some(
+              (a) =>
+                a.enabled &&
+                (a.cooldownUntil - nowSec > 3600 ||
+                  (!a.refreshToken && a.expiresAt > 0 && a.expiresAt <= nowSec)),
+            );
+            const available = list.filter((a) => a.enabled && a.cooldownUntil <= nowSec).length;
+            stats[prov.id] = { total, available, hasAuthError };
           } catch {
-            counts[prov.id] = 1;
+            stats[prov.id] = { total: 1, available: 1, hasAuthError: false };
           }
         }),
       );
       if (!cancelled) {
-        setSubAccountCounts(counts);
+        setSubAccountStats(stats);
       }
     };
     fetchCounts();
@@ -975,7 +1011,9 @@ export function ProviderList() {
                 <ProviderCard
                   key={provider.id}
                   provider={provider}
-                  accountCount={subAccountCounts[provider.id]}
+                  accountCount={subAccountStats[provider.id]?.total}
+                  availableAccountCount={subAccountStats[provider.id]?.available}
+                  hasAuthError={subAccountStats[provider.id]?.hasAuthError}
                   isDragged={drag?.id === provider.id}
                   onDragHandlePointerDown={(event) => handleDragHandlePointerDown(event, provider)}
                   onRowClick={() => handleRowClick(provider)}
@@ -1062,7 +1100,9 @@ export function ProviderList() {
           >
             <ProviderCard
               provider={draggedProvider}
-              accountCount={subAccountCounts[draggedProvider.id]}
+              accountCount={subAccountStats[draggedProvider.id]?.total}
+              availableAccountCount={subAccountStats[draggedProvider.id]?.available}
+              hasAuthError={subAccountStats[draggedProvider.id]?.hasAuthError}
               isDragged={false}
               onRowClick={() => {}}
               onContextMenu={() => {}}

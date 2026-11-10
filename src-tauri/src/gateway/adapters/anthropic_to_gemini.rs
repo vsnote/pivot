@@ -396,6 +396,15 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
     if let Some(mt) = req.max_tokens {
         gen_config["maxOutputTokens"] = json!(mt);
     }
+    if let Some(ref th) = req.thinking {
+        if th.thinking_type == "enabled" {
+            let budget = th.budget_tokens.unwrap_or(2048);
+            gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+            if let Some(mt) = req.max_tokens {
+                gen_config["maxOutputTokens"] = json!(mt.max(budget + 2048));
+            }
+        }
+    }
 
     GeminiRequest {
         contents,
@@ -752,5 +761,33 @@ mod tests {
             part.thought_signature.as_deref(),
             Some("REAL_ENCRYPTED_SIGNATURE_123")
         );
+    }
+
+    #[test]
+    fn test_gemini_thinking_config_mapping() {
+        let req = AnthropicMessageRequest {
+            model: "gemini-2.5-flash".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: json!("Hello"),
+            }],
+            system: None,
+            max_tokens: Some(4096),
+            temperature: None,
+            stream: None,
+            metadata: None,
+            thinking: Some(crate::gateway::types::AnthropicThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: Some(4000),
+            }),
+            tool_choice: None,
+            tools: None,
+        };
+
+        let gemini_req = convert_anthropic_req_to_gemini(&req);
+        let gen_config = gemini_req.generation_config.expect("should have generation_config");
+        let thinking_config = gen_config.get("thinkingConfig").expect("should have thinkingConfig");
+        assert_eq!(thinking_config["thinkingBudget"], 4000);
+        assert_eq!(gen_config["maxOutputTokens"], 6048);
     }
 }
