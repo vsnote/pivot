@@ -231,10 +231,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust 1.92.0
-        uses: dtolnay/rust-toolchain@master
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.92.0"
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
