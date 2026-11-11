@@ -1,12 +1,59 @@
 use crate::theme::ThemePalette;
-use gpui_kit::assets::IconName;
+use gpui_kit::assets::{icon_assets, Assets as DefaultAssets, IconName};
 use gpui_kit::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 const APP_ICON_DARK_BYTES: &[u8] = include_bytes!("../../assets/app-icon-dark.png");
 const APP_ICON_LIGHT_BYTES: &[u8] = include_bytes!("../../assets/app-icon-light.png");
+
+pub fn app_icon_bytes(is_dark: bool) -> &'static [u8] {
+    if is_dark {
+        APP_ICON_DARK_BYTES
+    } else {
+        APP_ICON_LIGHT_BYTES
+    }
+}
+
+icon_assets!(
+    ExtraIcons,
+    [
+        Activity,
+        CircleQuestionMark,
+        CodeXml,
+        Download,
+        GripVertical,
+        SlidersHorizontal,
+        Sparkles,
+        Terminal,
+        Trash,
+        Upload,
+        X,
+        Zap,
+    ]
+);
+
+/// 按需嵌入的轻量图标源：仅包含默认组件图标集（44 KB）与 Pivot 额外使用的 12 个图标，避免 `AllAssets` 全量打包 1,830 个 SVG
+pub struct PivotAssets;
+
+impl AssetSource for PivotAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        DefaultAssets.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = DefaultAssets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
 
 static APP_ICON_DARK: LazyLock<Arc<Image>> =
     LazyLock::new(|| Arc::new(Image::from_bytes(ImageFormat::Png, APP_ICON_DARK_BYTES.to_vec())));
@@ -576,4 +623,50 @@ pub fn lucide_spinner(id: impl Into<ElementId>, size_px: f32, color: Rgba) -> im
             Animation::new(Duration::from_millis(850)).repeat(),
             |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn all_used_lucide_icons_are_embedded_in_pivot_assets() {
+        let used_icons = [
+            IconName::Activity,
+            IconName::Check,
+            IconName::ChevronDown,
+            IconName::ChevronUp,
+            IconName::CircleAlert,
+            IconName::CircleCheck,
+            IconName::CircleQuestionMark,
+            IconName::CodeXml,
+            IconName::Copy,
+            IconName::Download,
+            IconName::ExternalLink,
+            IconName::Eye,
+            IconName::EyeOff,
+            IconName::GripVertical,
+            IconName::LoaderCircle,
+            IconName::Plus,
+            IconName::RefreshCw,
+            IconName::Search,
+            IconName::SlidersHorizontal,
+            IconName::Sparkles,
+            IconName::Terminal,
+            IconName::Trash,
+            IconName::TriangleAlert,
+            IconName::Upload,
+            IconName::X,
+            IconName::Zap,
+        ];
+
+        for icon in used_icons {
+            let path = icon.path();
+            let loaded = PivotAssets
+                .load(&path)
+                .unwrap_or_else(|e| panic!("failed to load icon {}: {:?}", path, e));
+            let bytes = loaded.unwrap_or_else(|| panic!("missing embedded icon: {}", path));
+            assert!(!bytes.is_empty(), "empty svg payload for {}", path);
+        }
+    }
 }

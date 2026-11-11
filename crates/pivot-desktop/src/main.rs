@@ -49,9 +49,9 @@ fn main() {
         pivot_core::start_gateway(app_state.clone(), Some(log_tx));
     }
 
-    // 4. 启动 GPUI 原生桌面应用并注入全部矢量图标资产
+    // 4. 启动 GPUI 原生桌面应用并按需注入轻量矢量图标资产
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(components::icons::PivotAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
 

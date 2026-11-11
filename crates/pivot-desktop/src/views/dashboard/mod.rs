@@ -417,7 +417,7 @@ pub fn render_dashboard_view(
     // 排序各维度列表
     let mut prov_list: Vec<ProvAgg> = prov_map.into_values().collect();
     match metric_mode {
-        ProviderMetricMode::Calls => prov_list.sort_by(|a, b| b.calls.cmp(&a.calls)),
+        ProviderMetricMode::Calls => prov_list.sort_by_key(|a| std::cmp::Reverse(a.calls)),
         ProviderMetricMode::Cost => prov_list.sort_by(|a, b| {
             b.cost
                 .partial_cmp(&a.cost)
@@ -426,14 +426,14 @@ pub fn render_dashboard_view(
     }
 
     let mut model_list: Vec<ModelAgg> = model_map.into_values().collect();
-    model_list.sort_by(|a, b| b.calls.cmp(&a.calls));
+    model_list.sort_by_key(|a| std::cmp::Reverse(a.calls));
     model_list.truncate(5);
 
     let mut client_list: Vec<(String, usize)> = client_map.into_iter().collect();
-    client_list.sort_by(|a, b| b.1.cmp(&a.1));
+    client_list.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     let mut err_list: Vec<(&'static str, usize)> = err_reasons.into_iter().collect();
-    err_list.sort_by(|a, b| b.1.cmp(&a.1));
+    err_list.sort_by_key(|a| std::cmp::Reverse(a.1));
     err_list.truncate(3);
 
     // 3. 组装顶部单行紧凑 4 指标集成卡

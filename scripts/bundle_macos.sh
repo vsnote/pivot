@@ -101,7 +101,7 @@ hdiutil create \
   -volname "Pivot" \
   -srcfolder "${DMG_STAGE}" \
   -ov \
-  -format UDZO \
+  -format ULMO \
   "${OUT_DMG}"
 
 rm -rf "${DMG_STAGE}"

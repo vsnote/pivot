@@ -59,17 +59,11 @@ mod macos {
 
     static REGISTER_TARGET_CLASS: Once = Once::new();
     const TRAY_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
-    const APP_ICON_LIGHT_PNG: &[u8] = include_bytes!("../assets/app-icon-light.png");
-    const APP_ICON_DARK_PNG: &[u8] = include_bytes!("../assets/app-icon-dark.png");
 
     pub fn set_app_dock_icon(is_dark: bool) {
         unsafe {
             let _pool = NSAutoreleasePool::new(nil);
-            let bytes = if is_dark {
-                APP_ICON_DARK_PNG
-            } else {
-                APP_ICON_LIGHT_PNG
-            };
+            let bytes = crate::components::icons::app_icon_bytes(is_dark);
             let ns_data: id = msg_send![
                 class!(NSData),
                 dataWithBytes: bytes.as_ptr() as *const c_void
