@@ -1,6 +1,6 @@
 [package]
 name = "pivot-core"
-version = "0.2.12"
+version = "0.3.0"
 description = "Pivot Core Gateway and Database Engine"
 authors = ["Pivot"]
 edition = "2021"
