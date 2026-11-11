@@ -2,6 +2,7 @@ use crate::components::button::{render_segmented_tabs, NativeButton, SegmentedTa
 use crate::components::icons::{lucide_icon, lucide_spinner, render_pivot_app_icon};
 use crate::i18n::Locale;
 use crate::theme::{ThemePalette, ThemePreference};
+use crate::updater::{UpdateCheckState, RELEASE_LATEST_PAGE_URL};
 use crate::PivotApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder;
@@ -11,19 +12,6 @@ use gpui_kit::*;
 pub struct SettingsBanner {
     pub is_error: bool,
     pub message: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum UpdateCheckState {
-    Idle,
-    Checking,
-    UpToDate,
-    Available {
-        version: String,
-        notes: Option<String>,
-        url: String,
-    },
-    Failed(String),
 }
 
 pub fn render_settings_view(
@@ -372,86 +360,10 @@ pub fn render_settings_view(
                                 )
                                 .child(render_update_action(&app.update_state, locale, palette, cx)),
                         )
-                        // 更新详情展示区
+                        // 更新详情、进度与重启面板
                         .when_some(
-                            match &app.update_state {
-                                UpdateCheckState::Available {
-                                    version,
-                                    notes,
-                                    url,
-                                } => Some((version.clone(), notes.clone(), url.clone())),
-                                _ => None,
-                            },
-                            |el, (ver, notes, dl_url)| {
-                                el.child(
-                                    div()
-                                        .p(px(10.0))
-                                        .rounded(px(6.0))
-                                        .bg(palette.blue_soft_bg)
-                                        .border_1()
-                                        .border_color(palette.blue_soft_border)
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.0))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(11.5))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(palette.blue_text)
-                                                        .child(format!(
-                                                            "{} v{}",
-                                                            locale.pick(
-                                                                "发现新版本",
-                                                                "New release available:"
-                                                            ),
-                                                            ver
-                                                        )),
-                                                )
-                                                .child(
-                                                    NativeButton::new(
-                                                        locale.pick("前往下载", "Download"),
-                                                        palette,
-                                                    )
-                                                    .primary()
-                                                    .xs()
-                                                    .icon(IconName::ExternalLink)
-                                                    .on_click(move |_, _, app_cx| {
-                                                        app_cx.open_url(&dl_url);
-                                                    }),
-                                                ),
-                                        )
-                                        .when_some(
-                                            notes.filter(|s| !s.trim().is_empty()),
-                                            |box_el, body| {
-                                                box_el.child(
-                                                    div()
-                                                        .text_size(px(11.0))
-                                                        .text_color(palette.muted_foreground)
-                                                        .child(body),
-                                                )
-                                            },
-                                        ),
-                                )
-                            },
-                        )
-                        .when_some(
-                            match &app.update_state {
-                                UpdateCheckState::Failed(err) => Some(err.clone()),
-                                _ => None,
-                            },
-                            |el, err| {
-                                el.child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(palette.rose_text)
-                                        .child(err),
-                                )
-                            },
+                            render_update_panel(&app.update_state, locale, palette, cx),
+                            |el, panel| el.child(panel),
                         ),
                 )
                 .child(
@@ -598,6 +510,28 @@ fn render_update_action(
                     .child(locale.pick("已是最新", "Up to date")),
             )
             .into_any_element(),
+        UpdateCheckState::Downloading { .. } | UpdateCheckState::Installing { .. } => {
+            NativeButton::new(locale.pick("检查更新", "Check Updates"), palette)
+                .outline()
+                .xs()
+                .icon(IconName::RefreshCw)
+                .disabled(true)
+                .on_click(|_, _, _| {})
+                .into_any_element()
+        }
+        UpdateCheckState::ReadyToRestart { .. } => div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(11.0))
+            .text_color(palette.emerald_text)
+            .child(lucide_icon(
+                IconName::CircleCheck,
+                12.0,
+                palette.emerald_text,
+            ))
+            .child(locale.pick("已就绪", "Ready"))
+            .into_any_element(),
         _ => NativeButton::new(locale.pick("检查更新", "Check Updates"), palette)
             .outline()
             .xs()
@@ -606,5 +540,316 @@ fn render_update_action(
                 this.check_for_updates(cx);
             }))
             .into_any_element(),
+    }
+}
+
+fn render_update_panel(
+    state: &UpdateCheckState,
+    locale: Locale,
+    palette: ThemePalette,
+    cx: &mut Context<PivotApp>,
+) -> Option<AnyElement> {
+    match state {
+        UpdateCheckState::Available(info) => {
+            let ver = info.version.clone();
+            let notes = info.notes.clone().filter(|s| !s.trim().is_empty());
+            let action_btn = if info.can_self_update() {
+                let info_for_click = info.clone();
+                NativeButton::new(locale.pick("立即更新", "Update Now"), palette)
+                    .primary()
+                    .xs()
+                    .icon(IconName::Download)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_self_update(info_for_click.clone(), cx);
+                    }))
+            } else {
+                let dl_url = info.release_url.clone();
+                NativeButton::new(locale.pick("前往下载", "Download"), palette)
+                    .primary()
+                    .xs()
+                    .icon(IconName::ExternalLink)
+                    .on_click(move |_, _, app_cx| {
+                        app_cx.open_url(&dl_url);
+                    })
+            };
+
+            Some(
+                div()
+                    .p(px(10.0))
+                    .rounded(px(6.0))
+                    .bg(palette.blue_soft_bg)
+                    .border_1()
+                    .border_color(palette.blue_soft_border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(palette.blue_text)
+                                    .child(format!(
+                                        "{} v{}",
+                                        locale.pick("发现新版本", "New release available:"),
+                                        ver
+                                    )),
+                            )
+                            .child(action_btn),
+                    )
+                    .when_some(notes, |box_el, body| {
+                        box_el.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(palette.muted_foreground)
+                                .child(body),
+                        )
+                    })
+                    .into_any_element(),
+            )
+        }
+        UpdateCheckState::Downloading { info, progress } => {
+            let pct = (*progress).min(100);
+            let label = format!(
+                "{} v{}…",
+                locale.pick("正在下载", "Downloading"),
+                info.version
+            );
+            Some(
+                div()
+                    .p(px(10.0))
+                    .rounded(px(6.0))
+                    .bg(palette.blue_soft_bg)
+                    .border_1()
+                    .border_color(palette.blue_soft_border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(palette.blue_text)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(palette.muted_foreground)
+                                    .child(format!("{}%", pct)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(5.0))
+                            .rounded(px(99.0))
+                            .bg(palette.muted)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded(px(99.0))
+                                    .bg(palette.blue_text)
+                                    .w(relative((pct as f32 / 100.0).clamp(0.0, 1.0))),
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        }
+        UpdateCheckState::Installing { info } => {
+            let label = format!(
+                "{} v{}…",
+                locale.pick("正在安装", "Installing"),
+                info.version
+            );
+            Some(
+                div()
+                    .p(px(10.0))
+                    .rounded(px(6.0))
+                    .bg(palette.blue_soft_bg)
+                    .border_1()
+                    .border_color(palette.blue_soft_border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .child(lucide_spinner(
+                                        "update_install_spin",
+                                        12.0,
+                                        palette.blue_text,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(palette.blue_text)
+                                            .child(label),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(palette.muted_foreground)
+                                    .child("100%"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(5.0))
+                            .rounded(px(99.0))
+                            .bg(palette.muted)
+                            .overflow_hidden()
+                            .child(div().h_full().w_full().rounded(px(99.0)).bg(palette.blue_text)),
+                    )
+                    .into_any_element(),
+            )
+        }
+        UpdateCheckState::ReadyToRestart {
+            version,
+            app_bundle,
+        } => {
+            let ver = version.clone();
+            let bundle_for_click = app_bundle.clone();
+            Some(
+                div()
+                    .p(px(10.0))
+                    .rounded(px(6.0))
+                    .bg(palette.emerald_soft_bg)
+                    .border_1()
+                    .border_color(palette.emerald_soft_border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .min_w_0()
+                            .child(lucide_icon(
+                                IconName::CircleCheck,
+                                13.0,
+                                palette.emerald_text,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(palette.emerald_text)
+                                    .child(format!(
+                                        "v{} {}",
+                                        ver,
+                                        locale.pick("已安装", "installed")
+                                    )),
+                            ),
+                    )
+                    .child(
+                        NativeButton::new(locale.pick("立即重启", "Restart Now"), palette)
+                            .primary()
+                            .xs()
+                            .icon(IconName::RefreshCw)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.restart_for_update(bundle_for_click.clone(), cx);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        }
+        UpdateCheckState::Failed { error, retry_info } => {
+            let err_msg = error.clone();
+            let retry_target = retry_info.clone();
+            let dl_url = retry_info
+                .as_ref()
+                .map(|i| i.release_url.clone())
+                .unwrap_or_else(|| RELEASE_LATEST_PAGE_URL.to_string());
+
+            Some(
+                div()
+                    .p(px(10.0))
+                    .rounded(px(6.0))
+                    .bg(palette.rose_soft_bg)
+                    .border_1()
+                    .border_color(palette.rose_soft_border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(lucide_icon(
+                                IconName::CircleAlert,
+                                13.0,
+                                palette.rose_text,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.0))
+                                    .text_color(palette.rose_text)
+                                    .child(err_msg),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                NativeButton::new(locale.pick("重试", "Retry"), palette)
+                                    .outline()
+                                    .xs()
+                                    .icon(IconName::RefreshCw)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(info) = retry_target.clone() {
+                                            if info.can_self_update() {
+                                                this.start_self_update(info, cx);
+                                                return;
+                                            }
+                                        }
+                                        this.check_for_updates(cx);
+                                    })),
+                            )
+                            .child(
+                                NativeButton::new(locale.pick("前往下载", "Download"), palette)
+                                    .outline()
+                                    .xs()
+                                    .icon(IconName::ExternalLink)
+                                    .on_click(move |_, _, app_cx| {
+                                        app_cx.open_url(&dl_url);
+                                    }),
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        }
+        _ => None,
     }
 }

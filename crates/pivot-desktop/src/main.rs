@@ -6,6 +6,7 @@ mod i18n;
 mod pricing;
 mod theme;
 mod tray;
+mod updater;
 mod views;
 
 pub use app::{ActiveTab, PivotApp};

@@ -8,6 +8,9 @@ use crate::theme::{
     save_ui_preferences, sync_gpui_component_theme, ThemePalette, ThemePreference, UiPreferences,
 };
 use crate::tray::{self, TrayCommand};
+use crate::updater::{
+    self, InstallProgressEvent, UpdateCheckState, UpdateReleaseInfo, RELEASE_LATEST_PAGE_URL,
+};
 use crate::views::clients::model_select::resolve_default_model_for_client;
 use crate::views::clients::{
     render_client_model_popover, render_clients_view, render_conflict_dialog,
@@ -20,7 +23,7 @@ use crate::views::providers::{
     render_provider_list, AbandonAction, ProviderContextMenuState, ProviderEditorState,
     PROVIDER_ROW_HEIGHT,
 };
-use crate::views::settings::{render_settings_view, SettingsBanner, UpdateCheckState};
+use crate::views::settings::{render_settings_view, SettingsBanner};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -187,30 +190,6 @@ fn resolve_display_names_for_models<'a>(
             }
         }
     }
-}
-
-fn is_newer_semver(remote: &str, local: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.trim()
-            .trim_start_matches('v')
-            .split(['.', '-'])
-            .take(3)
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
-    };
-    let r = parse(remote);
-    let l = parse(local);
-    for i in 0..3 {
-        let rv = r.get(i).copied().unwrap_or(0);
-        let lv = l.get(i).copied().unwrap_or(0);
-        if rv > lv {
-            return true;
-        }
-        if rv < lv {
-            return false;
-        }
-    }
-    false
 }
 
 impl PivotApp {
@@ -2143,7 +2122,13 @@ impl PivotApp {
     }
 
     fn run_update_check(&mut self, silent: bool, cx: &mut Context<Self>) {
-        if matches!(self.update_state, UpdateCheckState::Checking) {
+        if matches!(
+            self.update_state,
+            UpdateCheckState::Checking
+                | UpdateCheckState::Downloading { .. }
+                | UpdateCheckState::Installing { .. }
+                | UpdateCheckState::ReadyToRestart { .. }
+        ) {
             return;
         }
         if !silent {
@@ -2157,51 +2142,38 @@ impl PivotApp {
 
         cx.spawn(async move |this, cx| {
             let res = handle
-                .spawn(async move {
-                    let resp = client
-                        .get("https://github.com/vsnote/pivot/releases/latest/download/latest.json")
-                        .timeout(Duration::from_secs(8))
-                        .send()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if !resp.status().is_success() {
-                        return Err(format!("HTTP {}", resp.status().as_u16()));
-                    }
-                    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-                    let remote_ver = json
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .trim_start_matches('v')
-                        .to_string();
-                    let notes = json
-                        .get("notes")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    Ok::<(String, Option<String>), String>((remote_ver, notes))
-                })
+                .spawn(async move { updater::fetch_latest_manifest(&client).await })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 match res {
-                    Ok(Ok((remote_ver, notes))) if !remote_ver.is_empty() => {
-                        if is_newer_semver(&remote_ver, &local_ver) {
-                            app.update_version = Some(remote_ver.clone());
-                            app.update_state = UpdateCheckState::Available {
-                                version: remote_ver,
-                                notes,
-                                url: "https://github.com/vsnote/pivot/releases/latest".to_string(),
+                    Ok(Ok(manifest)) if !manifest.version.is_empty() => {
+                        if updater::is_newer_semver(&manifest.version, &local_ver) {
+                            let info = UpdateReleaseInfo {
+                                version: manifest.version.clone(),
+                                notes: manifest.notes,
+                                asset_url: manifest.asset_url,
+                                release_url: RELEASE_LATEST_PAGE_URL.to_string(),
+                                app_bundle: updater::resolve_current_app_bundle(),
                             };
+                            app.update_version = Some(manifest.version);
+                            app.update_state = UpdateCheckState::Available(info);
                         } else if !silent {
                             app.update_version = None;
                             app.update_state = UpdateCheckState::UpToDate;
                         }
                     }
                     Ok(Err(err)) if !silent => {
-                        app.update_state = UpdateCheckState::Failed(err);
+                        app.update_state = UpdateCheckState::Failed {
+                            error: err,
+                            retry_info: None,
+                        };
                     }
                     Err(e) if !silent => {
-                        app.update_state = UpdateCheckState::Failed(e.to_string());
+                        app.update_state = UpdateCheckState::Failed {
+                            error: e.to_string(),
+                            retry_info: None,
+                        };
                     }
                     _ => {}
                 }
@@ -2209,6 +2181,117 @@ impl PivotApp {
             });
         })
         .detach();
+    }
+
+    pub fn start_self_update(&mut self, info: UpdateReleaseInfo, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_state,
+            UpdateCheckState::Downloading { .. } | UpdateCheckState::Installing { .. }
+        ) {
+            return;
+        }
+
+        self.update_state = UpdateCheckState::Downloading {
+            info: info.clone(),
+            progress: 0,
+        };
+        cx.notify();
+
+        let client = self.core_state.http_client.clone();
+        let handle = self.tokio_handle.clone();
+        let locale = self.prefs.locale;
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<InstallProgressEvent>();
+
+        let info_for_progress = info.clone();
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = progress_rx.recv().await {
+                let info_snapshot = info_for_progress.clone();
+                let ok = this
+                    .update(cx, |app, cx| {
+                        match ev {
+                            InstallProgressEvent::Downloading(pct) => {
+                                if matches!(app.update_state, UpdateCheckState::Downloading { .. }) {
+                                    app.update_state = UpdateCheckState::Downloading {
+                                        info: info_snapshot,
+                                        progress: pct,
+                                    };
+                                    cx.notify();
+                                }
+                            }
+                            InstallProgressEvent::Installing => {
+                                app.update_state = UpdateCheckState::Installing {
+                                    info: info_snapshot,
+                                };
+                                cx.notify();
+                            }
+                        }
+                    })
+                    .is_ok();
+                if !ok {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let retry_snapshot = info.clone();
+        let target_version = info.version.clone();
+        cx.spawn(async move |this, cx| {
+            let res = handle
+                .spawn(async move {
+                    updater::download_and_install_update(client, info, locale, progress_tx).await
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match res {
+                    Ok(Ok(app_bundle)) => {
+                        app.update_state = UpdateCheckState::ReadyToRestart {
+                            version: target_version,
+                            app_bundle,
+                        };
+                    }
+                    Ok(Err(err)) => {
+                        app.update_state = UpdateCheckState::Failed {
+                            error: err,
+                            retry_info: Some(retry_snapshot),
+                        };
+                    }
+                    Err(join_err) => {
+                        app.update_state = UpdateCheckState::Failed {
+                            error: join_err.to_string(),
+                            retry_info: Some(retry_snapshot),
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn restart_for_update(&mut self, app_bundle: PathBuf, cx: &mut Context<Self>) {
+        match updater::schedule_relaunch_after_exit(&app_bundle) {
+            Ok(()) => {
+                tray::mark_quitting();
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    std::process::exit(0);
+                });
+                cx.quit();
+            }
+            Err(err) => {
+                self.update_state = UpdateCheckState::Failed {
+                    error: format!(
+                        "{}: {}",
+                        self.prefs.locale.pick("自动重启失败，请手动重启应用", "Auto-restart failed, please restart manually"),
+                        err
+                    ),
+                    retry_info: None,
+                };
+                cx.notify();
+            }
+        }
     }
 
     // ================= 键盘快捷键与通用确认弹窗处理 =================
