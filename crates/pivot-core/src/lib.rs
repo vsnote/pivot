@@ -91,4 +91,15 @@ pub fn start_gateway(
     };
 
     gateway::start_gateway(gw_state, state.port);
+
+    if !model_catalog::is_fresh(86400) {
+        let client = state.http_client.clone();
+        let catalog_path = get_db_path()
+            .parent()
+            .map(|dir| dir.join("model-catalog.json"))
+            .unwrap_or_else(|| PathBuf::from("model-catalog.json"));
+        tokio::spawn(async move {
+            let _ = model_catalog::refresh(&client, &catalog_path).await;
+        });
+    }
 }

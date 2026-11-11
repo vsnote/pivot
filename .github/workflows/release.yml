@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: '发布版本标签 (例如 v0.1.0，留空则自动读取 package.json)'
+        description: '发布版本标签 (例如 v0.3.0，留空则自动读取 Cargo.toml)'
         required: false
         type: string
       draft:
@@ -35,6 +35,7 @@ jobs:
     outputs:
       release_id: ${{ steps.prepare_release.outputs.release_id }}
       tag_name: ${{ steps.prepare_release.outputs.tag_name }}
+      version: ${{ steps.prepare_release.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -53,22 +54,23 @@ jobs:
             const fs = require('fs');
             const { execSync } = require('child_process');
 
-            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
-            const pkgVersion = pkg.version;
+            const cargoToml = fs.readFileSync('./crates/pivot-desktop/Cargo.toml', 'utf8');
+            const verMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+            const cargoVersion = verMatch ? verMatch[1] : '0.3.0';
 
             let tagName = process.env.INPUT_TAG;
             if (!tagName) {
               if (context.ref && context.ref.startsWith('refs/tags/')) {
                 tagName = context.ref.replace('refs/tags/', '');
               } else {
-                tagName = `v${pkgVersion}`;
+                tagName = `v${cargoVersion}`;
               }
             }
-            console.log(`Target release tag: ${tagName}`);
+            const cleanVersion = tagName.replace(/^v/, '');
+            console.log(`Target release tag: ${tagName} (version: ${cleanVersion})`);
 
             const isPrerelease = process.env.PRERELEASE === 'true';
 
-            // 1. 从 Git Log 智能提取与分类提交记录 (Changelog)
             function generateGitChangelog(tag) {
               let prevTag = '';
               try {
@@ -134,7 +136,6 @@ jobs:
 
             const gitChangelog = generateGitChangelog(tagName);
 
-            // 2. 尝试调用 GitHub API 获取 PR Notes (如包含贡献者等信息)
             let apiNotes = '';
             try {
               const notesRes = await github.rest.repos.generateReleaseNotes({
@@ -148,14 +149,13 @@ jobs:
               console.log('generateReleaseNotes warning:', notesErr.message);
             }
 
-            // 3. 组装说明文档，包含 macOS 各架构下载指引与安全拦截提示
             const macosNotice = [
-              '### 🍎 macOS 安装与下载说明',
+              '### 🍎 macOS 安装与下载说明 (原生 Rust + GPUI 构建)',
               '',
               '| 芯片架构 | 适用机型 | 安装包推荐 |',
               '| :--- | :--- | :--- |',
-              '| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | `Pivot_*_aarch64.dmg` |',
-              '| **Intel** | 采用 Intel 处理器的传统 Mac | `Pivot_*_x64.dmg` |',
+              `| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | \`Pivot_${cleanVersion}_aarch64.dmg\` |`,
+              `| **Intel** | 采用 Intel 处理器的传统 Mac | \`Pivot_${cleanVersion}_x64.dmg\` |`,
               '',
               '> **💡 首次打开提示「已损坏」或「无法打开」？**',
               '> 由于开源分发未内置苹果商业付费证书签名，macOS Gatekeeper 可能会弹出拦截提示。可通过以下方式解决：',
@@ -180,24 +180,22 @@ jobs:
 
             const finalBody = `${macosNotice}${changelogContent}\n\n---\n**完整提交历史**: https://github.com/${context.repo.owner}/${context.repo.repo}/commits/${tagName}\n`;
 
-            // 4. 查找或创建 Release
             let release;
-            try {
-              const existing = await github.rest.repos.getReleaseByTag({
+            const { data: allReleases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 30,
+            });
+            const existing = allReleases.find((r) => r.tag_name === tagName);
+            if (existing) {
+              const updated = await github.rest.repos.updateRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag: tagName,
-              });
-              release = existing.data;
-              console.log(`Found existing release ID: ${release.id}, updating body with Changelog...`);
-              await github.rest.repos.updateRelease({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: release.id,
+                release_id: existing.id,
                 body: finalBody,
               });
-            } catch (err) {
-              console.log(`Creating release for tag ${tagName}...`);
+              release = updated.data;
+            } else {
               const created = await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -213,6 +211,7 @@ jobs:
 
             core.setOutput('release_id', release.id.toString());
             core.setOutput('tag_name', tagName);
+            core.setOutput('version', cleanVersion);
 
   build-macos:
     name: Build macOS (${{ matrix.name }})
@@ -223,61 +222,49 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
+            arch_label: aarch64
             name: Apple Silicon (aarch64)
           - target: x86_64-apple-darwin
+            arch_label: x64
             name: Intel (x64)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@master
         with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'pnpm'
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
+          toolchain: "1.92.0"
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          key: gpui-${{ matrix.target }}
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Run Core Unit Tests
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: cargo test --workspace
 
-      - name: Build Tauri DMG & Upload to Release
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          tagName: ${{ needs.create-release.outputs.tag_name }}
-          args: --target ${{ matrix.target }} --ignore-version-mismatches
+      - name: Build Native GPUI Release Binary
+        run: cargo build --release --target ${{ matrix.target }} -p pivot-desktop
 
-  publish-release:
-    name: Publish Release
-    needs: [create-release, build-macos]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Normalize latest.json updater manifest
+      - name: Package Pivot.app & DMG Installer
+        run: bash scripts/bundle_macos.sh "${{ matrix.target }}" "${{ needs.create-release.outputs.version }}"
+
+      - name: Upload DMG to Release
         uses: actions/github-script@v7
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-          TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
+          DMG_NAME: Pivot_${{ needs.create-release.outputs.version }}_${{ matrix.arch_label }}.dmg
         with:
           script: |
+            const fs = require('fs');
             const releaseId = parseInt(process.env.RELEASE_ID, 10);
-            const tagName = process.env.TAG_NAME;
+            const dmgName = process.env.DMG_NAME;
+            const dmgPath = `target/bundle/${dmgName}`;
+            const data = fs.readFileSync(dmgPath);
+            console.log(`Uploading ${dmgName} (${data.length} bytes) to release ${releaseId}...`);
 
             const { data: assets } = await github.rest.repos.listReleaseAssets({
               owner: context.repo.owner,
@@ -285,105 +272,87 @@ jobs:
               release_id: releaseId,
               per_page: 100,
             });
-
-            console.log(`Found ${assets.length} assets in release ${releaseId}`);
-            const latestAsset = assets.find((a) => a.name === 'latest.json');
-
-            const aarch64Tar = assets.find((a) => a.name.includes('aarch64') && a.name.endsWith('.app.tar.gz'));
-            const aarch64Sig = assets.find((a) => a.name.includes('aarch64') && a.name.endsWith('.app.tar.gz.sig'));
-            const x64Tar = assets.find((a) => (a.name.includes('x64') || a.name.includes('x86_64')) && a.name.endsWith('.app.tar.gz'));
-            const x64Sig = assets.find((a) => (a.name.includes('x64') || a.name.includes('x86_64')) && a.name.endsWith('.app.tar.gz.sig'));
-
-            async function fetchAssetText(asset) {
-              const res = await github.rest.repos.getReleaseAsset({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                asset_id: asset.id,
-                headers: { accept: 'application/octet-stream' },
-              });
-              return Buffer.from(res.data).toString('utf8').trim();
-            }
-
-            let manifest = {
-              version: tagName.replace(/^v/, ''),
-              notes: `Release ${tagName}`,
-              pub_date: new Date().toISOString(),
-              platforms: {},
-            };
-
-            if (latestAsset) {
-              try {
-                const text = await fetchAssetText(latestAsset);
-                manifest = JSON.parse(text);
-              } catch (e) {
-                console.log('Failed to parse existing latest.json, recreating:', e.message);
-              }
-            }
-
-            if (!manifest.platforms) manifest.platforms = {};
-            const downloadBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tagName}`;
-
-            if (aarch64Tar) {
-              let sig = manifest.platforms['darwin-aarch64']?.signature;
-              if (!sig && aarch64Sig) {
-                sig = await fetchAssetText(aarch64Sig);
-              }
-              if (sig) {
-                const downloadUrl = `${downloadBase}/${aarch64Tar.name}`;
-                manifest.platforms['darwin-aarch64'] = {
-                  signature: sig,
-                  url: downloadUrl,
-                };
-                manifest.platforms['darwin-aarch64-app'] = {
-                  signature: sig,
-                  url: downloadUrl,
-                };
-              }
-            }
-
-            if (x64Tar) {
-              let sig = manifest.platforms['darwin-x86_64']?.signature;
-              if (!sig && x64Sig) {
-                sig = await fetchAssetText(x64Sig);
-              }
-              if (sig) {
-                const downloadUrl = `${downloadBase}/${x64Tar.name}`;
-                manifest.platforms['darwin-x86_64'] = {
-                  signature: sig,
-                  url: downloadUrl,
-                };
-                manifest.platforms['darwin-x86_64-app'] = {
-                  signature: sig,
-                  url: downloadUrl,
-                };
-              }
-            }
-
-            if (latestAsset) {
-              console.log(`Deleting old latest.json (asset ID: ${latestAsset.id})...`);
+            const existingAsset = assets.find((a) => a.name === dmgName);
+            if (existingAsset) {
               await github.rest.repos.deleteReleaseAsset({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                asset_id: latestAsset.id,
+                asset_id: existingAsset.id,
               });
             }
-
-            const updatedBody = JSON.stringify(manifest, null, 2);
-            console.log('Uploading corrected latest.json with browser_download_url:');
-            console.log(updatedBody);
 
             await github.rest.repos.uploadReleaseAsset({
               owner: context.repo.owner,
               repo: context.repo.repo,
               release_id: releaseId,
-              name: 'latest.json',
-              data: Buffer.from(updatedBody, 'utf8'),
+              name: dmgName,
+              data,
               headers: {
-                'content-type': 'application/json',
-                'content-length': Buffer.byteLength(updatedBody),
+                'content-type': 'application/x-apple-diskimage',
+                'content-length': data.length,
               },
             });
-            console.log('latest.json normalized and uploaded successfully.');
+            console.log(`Uploaded ${dmgName} successfully.`);
+
+  publish-release:
+    name: Publish Release
+    needs: [create-release, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate & Upload latest.json Update Manifest
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        with:
+          script: |
+            const releaseId = parseInt(process.env.RELEASE_ID, 10);
+            const tagName = process.env.TAG_NAME;
+            const version = process.env.VERSION;
+            const downloadBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tagName}`;
+
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
+            const oldManifest = assets.find((a) => a.name === 'latest.json');
+            if (oldManifest) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: oldManifest.id,
+              });
+            }
+
+            const manifest = {
+              version,
+              notes: `Pivot ${tagName} — 原生 Rust + GPUI 桌面版`,
+              pub_date: new Date().toISOString(),
+              platforms: {
+                'darwin-aarch64': {
+                  url: `${downloadBase}/Pivot_${version}_aarch64.dmg`,
+                },
+                'darwin-x86_64': {
+                  url: `${downloadBase}/Pivot_${version}_x64.dmg`,
+                },
+              },
+            };
+
+            const body = JSON.stringify(manifest, null, 2);
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              name: 'latest.json',
+              data: Buffer.from(body, 'utf8'),
+              headers: {
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(body),
+              },
+            });
 
       - name: Publish Release if not requested as Draft
         uses: actions/github-script@v7
@@ -396,7 +365,6 @@ jobs:
             const isDraftRequested = process.env.DRAFT === 'true';
 
             if (!isDraftRequested) {
-              console.log(`Publishing release ID: ${releaseId}`);
               await github.rest.repos.updateRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -404,6 +372,4 @@ jobs:
                 draft: false,
               });
               console.log('Release published successfully.');
-            } else {
-              console.log('Draft release preserved as requested.');
             }

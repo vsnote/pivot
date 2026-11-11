@@ -1,6 +1,6 @@
 [package]
 name = "pivot-desktop"
-version = "0.2.11"
+version = "0.2.12"
 description = "Pivot High-Performance Native Desktop Client with GPUI"
 authors = ["Pivot"]
 edition = "2021"
@@ -20,3 +20,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 uuid = "1.10"
 dirs = "5.0"
+open = "5.3"
+reqwest = { version = "0.12", features = ["json"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.25"
+objc = "0.2"

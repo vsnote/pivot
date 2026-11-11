@@ -1,286 +1,610 @@
+use crate::components::button::{render_segmented_tabs, NativeButton, SegmentedTabsSize};
+use crate::components::icons::{lucide_icon, lucide_spinner, render_pivot_app_icon};
+use crate::i18n::Locale;
+use crate::theme::{ThemePalette, ThemePreference};
 use crate::PivotApp;
+use gpui_kit::assets::IconName;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+
+#[derive(Debug, Clone)]
+pub struct SettingsBanner {
+    pub is_error: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdateCheckState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available {
+        version: String,
+        notes: Option<String>,
+        url: String,
+    },
+    Failed(String),
+}
 
 pub fn render_settings_view(
     app: &PivotApp,
+    palette: ThemePalette,
     _window: &mut Window,
-    _cx: &mut Context<PivotApp>,
+    cx: &mut Context<PivotApp>,
 ) -> impl IntoElement {
-    let port = app.port;
-    let db_path = pivot_core::get_db_path();
+    let locale = app.prefs.locale;
+    let cur_theme = app.prefs.theme;
+    let app_for_theme = cx.entity();
+    let app_for_locale = cx.entity();
+    let version_str = env!("CARGO_PKG_VERSION");
 
     div()
         .flex()
         .flex_col()
-        .w_full()
-        .max_w(px(960.0))
-        .mx_auto()
-        .gap(px(14.0))
-        // 卡片 1：通用偏好
+        .gap(px(12.0))
+        // 备份/恢复结果提示条
+        .when_some(app.settings_banner.clone(), |el, banner| {
+            let fg = if banner.is_error {
+                palette.rose_text
+            } else {
+                palette.emerald_text
+            };
+            let bg = if banner.is_error {
+                palette.rose_soft_bg
+            } else {
+                palette.emerald_soft_bg
+            };
+            let bd = if banner.is_error {
+                palette.rose_soft_border
+            } else {
+                palette.emerald_soft_border
+            };
+
+            el.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(7.0))
+                    .bg(bg)
+                    .border_1()
+                    .border_color(bd)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .min_w_0()
+                            .flex_1()
+                            .child(lucide_icon(
+                                if banner.is_error {
+                                    IconName::CircleAlert
+                                } else {
+                                    IconName::CircleCheck
+                                },
+                                13.5,
+                                fg,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.5))
+                                    .text_color(fg)
+                                    .child(banner.message),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("dismiss_settings_banner")
+                            .size(px(20.0))
+                            .rounded(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings_banner = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(lucide_icon(IconName::X, 11.5, fg)),
+                    ),
+            )
+        })
+        // 卡片 1：通用偏好（外观 + 语言）
         .child(
             div()
-                .flex()
-                .flex_col()
                 .w_full()
                 .rounded(px(8.0))
+                .bg(palette.card)
                 .border_1()
-                .border_color(rgb(0x2e2e32))
-                .bg(rgb(0x1c1c1f))
+                .border_color(palette.border)
                 .overflow_hidden()
-                .child(
-                    div()
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .bg(rgb(0x222226))
-                        .border_b_1()
-                        .border_color(rgb(0x2e2e32))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0xededee))
-                        .child("通用偏好设置"),
-                )
-                // 外观模式
+                .flex()
+                .flex_col()
+                .child(render_section_header(
+                    locale.pick("通用偏好", "Preferences"),
+                    palette,
+                ))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .px(px(16.0))
-                        .py(px(12.0))
-                        .border_b_1()
-                        .border_color(rgb(0x2e2e32))
+                        .gap(px(10.0))
+                        .px(px(14.0))
+                        .py(px(9.5))
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(0xededee))
-                                .child("界面外观"),
+                                .text_color(palette.foreground)
+                                .child(locale.pick("界面外观", "Appearance")),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .p(px(2.0))
-                                .rounded(px(6.0))
-                                .bg(rgb(0x27272a))
-                                .child(render_setting_chip("深色", true))
-                                .child(render_setting_chip("浅色", false))
-                                .child(render_setting_chip("跟随系统", false)),
-                        ),
+                        .child(render_segmented_tabs(
+                            vec![
+                                (
+                                    ThemePreference::Light,
+                                    locale.pick("浅色", "Light").to_string(),
+                                ),
+                                (
+                                    ThemePreference::Dark,
+                                    locale.pick("深色", "Dark").to_string(),
+                                ),
+                                (
+                                    ThemePreference::System,
+                                    locale.pick("跟随系统", "System").to_string(),
+                                ),
+                            ],
+                            cur_theme,
+                            SegmentedTabsSize::Sm,
+                            palette,
+                            move |next_theme, window, app_cx| {
+                                app_for_theme.update(app_cx, |this, cx| {
+                                    this.set_theme_preference(next_theme, window, cx);
+                                });
+                            },
+                        )),
                 )
-                // 语言
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .px(px(16.0))
-                        .py(px(12.0))
+                        .gap(px(10.0))
+                        .px(px(14.0))
+                        .py(px(9.5))
+                        .border_t_1()
+                        .border_color(palette.border_subtle)
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(0xededee))
-                                .child("界面语言"),
+                                .text_color(palette.foreground)
+                                .child(locale.pick("界面语言", "Language")),
+                        )
+                        .child(render_segmented_tabs(
+                            vec![
+                                (Locale::ZhCn, "简体中文".to_string()),
+                                (Locale::En, "English".to_string()),
+                            ],
+                            locale,
+                            SegmentedTabsSize::Sm,
+                            palette,
+                            move |next_locale, _, app_cx| {
+                                app_for_locale.update(app_cx, |this, cx| {
+                                    this.set_locale_preference(next_locale, cx);
+                                });
+                            },
+                        )),
+                ),
+        )
+        // 卡片 2：快捷键速览
+        .child(
+            div()
+                .w_full()
+                .rounded(px(8.0))
+                .bg(palette.card)
+                .border_1()
+                .border_color(palette.border)
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(render_section_header(
+                    locale.pick("快捷键", "Shortcuts"),
+                    palette,
+                ))
+                .child(render_shortcut_row(
+                    locale.pick("切换主导航标签", "Switch navigation tabs"),
+                    &["⌘", "1 ~ 4"],
+                    false,
+                    palette,
+                ))
+                .child(render_shortcut_row(
+                    locale.pick("新建服务商渠道", "Add new provider"),
+                    &["⌘", "N"],
+                    true,
+                    palette,
+                ))
+                .child(render_shortcut_row(
+                    locale.pick("关闭弹窗 / 返回列表", "Close dialog / Back"),
+                    &["Esc"],
+                    true,
+                    palette,
+                )),
+        )
+        // 卡片 3：配置备份与迁移
+        .child(
+            div()
+                .w_full()
+                .rounded(px(8.0))
+                .bg(palette.card)
+                .border_1()
+                .border_color(palette.border)
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(render_section_header(
+                    locale.pick("配置备份与迁移", "Backup & Restore"),
+                    palette,
+                ))
+                .child(
+                    div()
+                        .p(px(14.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(palette.muted_foreground)
+                                .child(locale.pick(
+                                    "导出或恢复所有服务商渠道、API 密钥池与模型配置 (.json)",
+                                    "Export or restore providers, API keys, and model pools (.json)",
+                                )),
                         )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
-                                .p(px(2.0))
-                                .rounded(px(6.0))
-                                .bg(rgb(0x27272a))
-                                .child(render_setting_chip("简体中文", true))
-                                .child(render_setting_chip("English", false)),
+                                .gap(px(8.0))
+                                .flex_wrap()
+                                .child(
+                                    NativeButton::new(
+                                        locale.pick("导出配置备份", "Export Backup"),
+                                        palette,
+                                    )
+                                    .outline()
+                                    .sm()
+                                    .icon(IconName::Download)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.export_backup_json(cx);
+                                    })),
+                                )
+                                .child(
+                                    NativeButton::new(
+                                        locale.pick("从备份文件恢复", "Restore Backup"),
+                                        palette,
+                                    )
+                                    .outline()
+                                    .sm()
+                                    .icon(IconName::Upload)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.import_backup_json(cx);
+                                    })),
+                                ),
                         ),
                 ),
         )
-        // 卡片 2：常用快捷键速查
+        // 卡片 4：关于 Pivot & 版本检查
         .child(
             div()
-                .flex()
-                .flex_col()
                 .w_full()
                 .rounded(px(8.0))
+                .bg(palette.card)
                 .border_1()
-                .border_color(rgb(0x2e2e32))
-                .bg(rgb(0x1c1c1f))
+                .border_color(palette.border)
                 .overflow_hidden()
-                .child(
-                    div()
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .bg(rgb(0x222226))
-                        .border_b_1()
-                        .border_color(rgb(0x2e2e32))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0xededee))
-                        .child("常用快捷键"),
-                )
-                .child(render_shortcut_row("切换主要视图页面", "⌘ 1 ~ 4"))
-                .child(render_shortcut_row("快速打开新增服务商", "⌘ N"))
-                .child(render_shortcut_row("关闭抽屉或取消返回", "Esc")),
-        )
-        // 卡片 3：关于 Pivot 与网关信息
-        .child(
-            div()
                 .flex()
                 .flex_col()
-                .w_full()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(0x2e2e32))
-                .bg(rgb(0x1c1c1f))
-                .p(px(16.0))
-                .gap(px(12.0))
                 .child(
                     div()
+                        .p(px(14.0))
                         .flex()
-                        .items_center()
-                        .justify_between()
+                        .flex_col()
+                        .gap(px(10.0))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
+                                .justify_between()
                                 .gap(px(10.0))
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .size(px(36.0))
-                                        .rounded(px(8.0))
-                                        .bg(rgb(0x2563eb))
-                                        .text_size(px(18.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xffffff))
-                                        .child("P"),
+                                        .gap(px(10.0))
+                                        .child(render_pivot_app_icon(40.0, palette.is_dark))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(2.0))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(6.0))
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(13.0))
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(palette.foreground)
+                                                                .child("Pivot"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .px(px(6.0))
+                                                                .py(px(1.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(palette.muted)
+                                                                .text_size(px(10.5))
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(
+                                                                    palette.muted_foreground,
+                                                                )
+                                                                .child(format!("v{}", version_str)),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .text_color(palette.muted_foreground)
+                                                        .child(locale.pick(
+                                                            "AI 编程客户端本地网关与统一路由中枢",
+                                                            "Local AI Coding Agent Gateway & Router",
+                                                        )),
+                                                ),
+                                        ),
                                 )
-                                .child(
+                                .child(render_update_action(&app.update_state, locale, palette, cx)),
+                        )
+                        // 更新详情展示区
+                        .when_some(
+                            match &app.update_state {
+                                UpdateCheckState::Available {
+                                    version,
+                                    notes,
+                                    url,
+                                } => Some((version.clone(), notes.clone(), url.clone())),
+                                _ => None,
+                            },
+                            |el, (ver, notes, dl_url)| {
+                                el.child(
                                     div()
+                                        .p(px(10.0))
+                                        .rounded(px(6.0))
+                                        .bg(palette.blue_soft_bg)
+                                        .border_1()
+                                        .border_color(palette.blue_soft_border)
                                         .flex()
                                         .flex_col()
-                                        .gap(px(2.0))
+                                        .gap(px(6.0))
                                         .child(
                                             div()
                                                 .flex()
                                                 .items_center()
-                                                .gap(px(6.0))
+                                                .justify_between()
                                                 .child(
                                                     div()
-                                                        .text_size(px(14.0))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(rgb(0xededee))
-                                                        .child("Pivot Native (GPUI)"),
+                                                        .text_size(px(11.5))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(palette.blue_text)
+                                                        .child(format!(
+                                                            "{} v{}",
+                                                            locale.pick(
+                                                                "发现新版本",
+                                                                "New release available:"
+                                                            ),
+                                                            ver
+                                                        )),
                                                 )
                                                 .child(
-                                                    div()
-                                                        .px(px(6.0))
-                                                        .py(px(1.0))
-                                                        .rounded(px(4.0))
-                                                        .bg(rgb(0x27272a))
-                                                        .text_size(px(10.0))
-                                                        .text_color(rgb(0xa1a1aa))
-                                                        .child("v0.2.11"),
+                                                    NativeButton::new(
+                                                        locale.pick("前往下载", "Download"),
+                                                        palette,
+                                                    )
+                                                    .primary()
+                                                    .xs()
+                                                    .icon(IconName::ExternalLink)
+                                                    .on_click(move |_, _, app_cx| {
+                                                        app_cx.open_url(&dl_url);
+                                                    }),
                                                 ),
                                         )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .text_color(rgb(0x71717a))
-                                                .child("高性能、零内存泄漏的本地 AI 网关与模型调度中枢"),
+                                        .when_some(
+                                            notes.filter(|s| !s.trim().is_empty()),
+                                            |box_el, body| {
+                                                box_el.child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .text_color(palette.muted_foreground)
+                                                        .child(body),
+                                                )
+                                            },
                                         ),
-                                ),
+                                )
+                            },
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(div().size(px(6.0)).rounded_full().bg(rgb(0x10b981)))
-                                .child(
+                        .when_some(
+                            match &app.update_state {
+                                UpdateCheckState::Failed(err) => Some(err.clone()),
+                                _ => None,
+                            },
+                            |el, err| {
+                                el.child(
                                     div()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(0x34d399))
-                                        .child("已是最新版本"),
-                                ),
+                                        .text_color(palette.rose_text)
+                                        .child(err),
+                                )
+                            },
                         ),
                 )
                 .child(
                     div()
+                        .px(px(14.0))
+                        .py(px(9.0))
+                        .bg(palette.muted_subtle)
+                        .border_t_1()
+                        .border_color(palette.border_subtle)
                         .flex()
                         .items_center()
                         .justify_between()
-                        .pt(px(10.0))
-                        .border_t_1()
-                        .border_color(rgb(0x2e2e32))
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x71717a))
-                        .child(format!("本地网关: http://127.0.0.1:{} · 数据库: {}", port, db_path.to_string_lossy()))
+                        .gap(px(8.0))
                         .child(
                             div()
-                                .text_color(rgb(0x60a5fa))
+                                .text_size(px(10.5))
+                                .text_color(palette.muted_foreground)
+                                .truncate()
+                                .child(locale.pick(
+                                    "纯本地运行 · 数据存储于 ~/.pivot/pivot.db",
+                                    "Runs 100% locally · Stored in ~/.pivot/pivot.db",
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("open_github_repo_link")
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
                                 .cursor_pointer()
-                                .child("github.com/vsnote/pivot ↗"),
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(palette.muted_foreground)
+                                .hover(move |s| s.text_color(palette.foreground))
+                                .on_mouse_down(MouseButton::Left, |_, _, app_cx| {
+                                    app_cx.open_url("https://github.com/vsnote/pivot");
+                                })
+                                .child("GitHub")
+                                .child(lucide_icon(
+                                    IconName::ExternalLink,
+                                    11.0,
+                                    palette.muted_foreground,
+                                )),
                         ),
                 ),
         )
 }
 
-fn render_setting_chip(label: &'static str, is_active: bool) -> impl IntoElement {
+fn render_section_header(title: &str, palette: ThemePalette) -> Div {
     div()
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(px(4.0))
+        .px(px(14.0))
+        .py(px(6.5))
+        .bg(palette.muted_subtle)
+        .border_b_1()
+        .border_color(palette.border)
         .text_size(px(11.0))
-        .font_weight(if is_active {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        })
-        .bg(if is_active {
-            rgb(0x3f3f46)
-        } else {
-            rgba(0x00000000)
-        })
-        .text_color(if is_active {
-            rgb(0xffffff)
-        } else {
-            rgb(0xa1a1aa)
-        })
-        .cursor_pointer()
-        .child(label)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(palette.muted_foreground)
+        .child(title.to_string())
 }
 
-fn render_shortcut_row(label: &'static str, shortcut: &'static str) -> impl IntoElement {
+fn render_shortcut_row(
+    label: &str,
+    keys: &[&str],
+    has_top_border: bool,
+    palette: ThemePalette,
+) -> Div {
+    let mut kbd_group = div().flex().items_center().gap(px(4.0));
+    for &k in keys {
+        kbd_group = kbd_group.child(
+            div()
+                .px(px(6.0))
+                .py(px(1.5))
+                .rounded(px(4.0))
+                .bg(palette.muted)
+                .border_1()
+                .border_color(palette.border)
+                .text_size(px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(palette.muted_foreground)
+                .child(k.to_string()),
+        );
+    }
+
     div()
         .flex()
         .items_center()
         .justify_between()
-        .w_full()
-        .px(px(16.0))
-        .py(px(10.0))
-        .border_b_1()
-        .border_color(rgb(0x2e2e32))
+        .px(px(14.0))
+        .py(px(9.5))
+        .when(has_top_border, |el| {
+            el.border_t_1().border_color(palette.border_subtle)
+        })
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(rgb(0xededee))
-                .child(label),
+                .text_color(palette.foreground)
+                .child(label.to_string()),
         )
-        .child(
-            div()
-                .px(px(8.0))
-                .py(px(2.0))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(rgb(0x3f3f46))
-                .bg(rgb(0x27272a))
-                .text_size(px(11.0))
-                .text_color(rgb(0xd4d4d8))
-                .child(shortcut),
-        )
+        .child(kbd_group)
+}
+
+fn render_update_action(
+    state: &UpdateCheckState,
+    locale: Locale,
+    palette: ThemePalette,
+    cx: &mut Context<PivotApp>,
+) -> AnyElement {
+    match state {
+        UpdateCheckState::Checking => div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .px(px(8.0))
+            .py(px(4.0))
+            .child(lucide_spinner(
+                "update_check_spin",
+                12.0,
+                palette.muted_foreground,
+            ))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(palette.muted_foreground)
+                    .child(locale.pick("检查中…", "Checking…")),
+            )
+            .into_any_element(),
+        UpdateCheckState::UpToDate => div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(palette.emerald_text)
+                    .child(lucide_icon(
+                        IconName::CircleCheck,
+                        12.0,
+                        palette.emerald_text,
+                    ))
+                    .child(locale.pick("已是最新", "Up to date")),
+            )
+            .into_any_element(),
+        _ => NativeButton::new(locale.pick("检查更新", "Check Updates"), palette)
+            .outline()
+            .xs()
+            .icon(IconName::RefreshCw)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.check_for_updates(cx);
+            }))
+            .into_any_element(),
+    }
 }

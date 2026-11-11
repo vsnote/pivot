@@ -1,31 +1,16 @@
-# Logs
+# Build & Logs
+/target
 /logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-target/
-node_modules
-dist
-dist-ssr
 *.local
 
-# Editor directories and files
+# Editor & OS files
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
 *.sw?
 
-# Design previews & exploration assets
+# Design exploration previews
 preview_*.html
 /public/generated-logos/
-src-tauri/icons/tray-icon-22.png
-

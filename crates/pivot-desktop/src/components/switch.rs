@@ -1,16 +1,41 @@
+use crate::theme::ThemePalette;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::rc::Rc;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SwitchSize {
+    Sm,
+    Xs,
+}
+
+type SwitchCallback = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>;
+
+#[derive(IntoElement)]
 pub struct NativeSwitch {
+    id: ElementId,
     checked: bool,
     disabled: bool,
+    size: SwitchSize,
+    palette: ThemePalette,
+    on_toggle: Option<SwitchCallback>,
 }
 
 impl NativeSwitch {
-    pub fn new(checked: bool) -> Self {
+    pub fn new(id: impl Into<ElementId>, checked: bool, palette: ThemePalette) -> Self {
         Self {
+            id: id.into(),
             checked,
             disabled: false,
+            size: SwitchSize::Sm,
+            palette,
+            on_toggle: None,
         }
+    }
+
+    pub fn xs(mut self) -> Self {
+        self.size = SwitchSize::Xs;
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -19,71 +44,90 @@ impl NativeSwitch {
     }
 
     pub fn on_toggle(
-        self,
-        on_toggle: impl Fn(&gpui_kit::MouseDownEvent, &mut Window, &mut App) + 'static,
-    ) -> Div {
+        mut self,
+        on_toggle: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_toggle = Some(Rc::new(on_toggle));
+        self
+    }
+}
+
+impl RenderOnce for NativeSwitch {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_checked = self.checked;
         let is_disabled = self.disabled;
+        let palette = self.palette;
+        let on_toggle = self.on_toggle.clone();
 
-        // 原生 iOS / macOS 紧凑标准开关 (36px × 20px, 纯白 14px 圆形滑块)
+        let (track_w, track_h, thumb_d, max_offset) = match self.size {
+            SwitchSize::Sm => (36.0, 20.0, 16.0, 16.0),
+            SwitchSize::Xs => (30.0, 16.0, 12.0, 14.0),
+        };
+
+        let spring_id = ElementId::Name(SharedString::from(format!("{}_thumb_x", self.id)));
+        let thumb_x = gpui_kit::base::spring(
+            spring_id,
+            if is_checked { px(max_offset) } else { px(0.0) },
+            gpui_kit::base::Spring::new(std::time::Duration::from_millis(150)),
+            window,
+            cx,
+        );
+
+        let track_bg = if is_checked {
+            palette.primary
+        } else {
+            palette.switch_unchecked_bg
+        };
+
+        let track_hover_bg = if is_checked {
+            palette.primary_hover
+        } else {
+            palette.switch_unchecked_hover
+        };
+
+        let thumb_bg = if is_checked {
+            palette.switch_thumb_checked
+        } else {
+            palette.switch_thumb_unchecked
+        };
+
         div()
+            .id(self.id)
             .flex()
             .items_center()
-            .w(px(36.0))
-            .h(px(20.0))
+            .flex_shrink_0()
+            .w(px(track_w))
+            .h(px(track_h))
             .rounded_full()
             .p(px(2.0))
-            .cursor_pointer()
-            .border_1()
-            .border_color(if is_checked {
-                if is_disabled {
-                    rgba(0x10b98140)
-                } else {
-                    rgb(0x10b981)
-                }
+            .bg(track_bg)
+            .when(is_disabled, |el| el.opacity(0.4))
+            .cursor(if is_disabled {
+                CursorStyle::Arrow
             } else {
-                rgb(0x3f3f46)
+                CursorStyle::PointingHand
             })
-            .bg(if is_checked {
-                if is_disabled {
-                    rgba(0x10b98160)
-                } else {
-                    rgb(0x10b981)
-                }
-            } else {
-                if is_disabled {
-                    rgb(0x222226)
-                } else {
-                    rgb(0x27272a)
-                }
-            })
-            .hover(|style| {
+            .hover(move |style| {
                 if !is_disabled {
-                    if is_checked {
-                        style.bg(rgb(0x059669))
-                    } else {
-                        style.bg(rgb(0x323238))
-                    }
+                    style.bg(track_hover_bg)
                 } else {
                     style
                 }
             })
             .on_mouse_down(MouseButton::Left, move |e, window, app| {
+                app.stop_propagation();
                 if !is_disabled {
-                    on_toggle(e, window, app);
+                    if let Some(handler) = &on_toggle {
+                        handler(e, window, app);
+                    }
                 }
             })
             .child(
-                // 纯白圆滑块，利用 margin-left 瞬时或极简平移，响应零延迟，绝不卡死
                 div()
-                    .size(px(14.0))
+                    .size(px(thumb_d))
                     .rounded_full()
-                    .bg(if is_disabled {
-                        rgb(0xa1a1aa)
-                    } else {
-                        rgb(0xffffff)
-                    })
-                    .ml(if is_checked { px(16.0) } else { px(0.0) }),
+                    .bg(thumb_bg)
+                    .ml(thumb_x),
             )
     }
 }

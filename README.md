@@ -90,15 +90,19 @@ Pivot 是面向现代主流 AI Coding Agent 打造的本地轻量路由网关。
 
 ## 🛠️ 本地开发
 
-```bash
-# 启动前端与 Tauri 桌面端调试
-pnpm install
-pnpm tauri dev
+基于纯 Rust + GPUI 构建，零前端运行时依赖：
 
-# 运行测试与打包
-pnpm test
-cargo test --manifest-path src-tauri/Cargo.toml
-pnpm tauri build
+```bash
+# 启动原生 GPUI 桌面端调试
+cargo run -p pivot-desktop
+
+# 运行核心单元测试与静态检查
+cargo test --workspace
+cargo clippy -p pivot-desktop --all-targets -- -D warnings
+
+# 构建 Release 并打包 macOS DMG 安装包
+cargo build --release -p pivot-desktop
+bash scripts/bundle_macos.sh
 ```
 
 ---

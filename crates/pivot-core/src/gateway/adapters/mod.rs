@@ -906,7 +906,10 @@ mod tests {
         let evts2 = parse_openai_chunk_to_anthropic_events(chunk2, &mut state, "req-ds", "deepseek-reasoner");
         let out2 = evts2.concat();
         // Crucial: Must have closed the thinking block at index 0 first!
-        assert!(out2.contains(r#"{"index":0,"type":"content_block_stop"}"#));
+        assert!(
+            out2.contains(r#"{"index":0,"type":"content_block_stop"}"#)
+                || out2.contains(r#"{"type":"content_block_stop","index":0}"#)
+        );
         // And started the tool_use block at index 1!
         assert!(out2.contains(r#""type":"content_block_start""#));
         assert!(out2.contains(r#""index":1"#));
@@ -929,7 +932,10 @@ mod tests {
         let evts4 = parse_openai_chunk_to_anthropic_events(chunk4, &mut state, "req-ds", "deepseek-reasoner");
         let out4 = evts4.concat();
         // Must close the tool_use block at index 1
-        assert!(out4.contains(r#"{"index":1,"type":"content_block_stop"}"#));
+        assert!(
+            out4.contains(r#"{"index":1,"type":"content_block_stop"}"#)
+                || out4.contains(r#"{"type":"content_block_stop","index":1}"#)
+        );
         assert!(out4.contains(r#""stop_reason":"tool_use""#));
         assert!(out4.contains(r#"event: message_stop"#));
         assert!(state.stream_finished);
@@ -952,7 +958,10 @@ mod tests {
         // 2. Upstream closes unexpectedly without [DONE] or finish_reason
         let finish_events = finish_openai_stream(&mut state, "end_turn");
         let out = finish_events.concat();
-        assert!(out.contains(r#"{"index":0,"type":"content_block_stop"}"#));
+        assert!(
+            out.contains(r#"{"index":0,"type":"content_block_stop"}"#)
+                || out.contains(r#"{"type":"content_block_stop","index":0}"#)
+        );
         assert!(out.contains(r#""stop_reason":"end_turn""#));
         assert!(out.contains(r#"event: message_stop"#));
         assert!(state.stream_finished);
