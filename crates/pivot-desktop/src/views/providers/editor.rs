@@ -912,7 +912,10 @@ fn render_preset_chooser(
                                             && prov.protocol == "chatgpt")
                                 })
                                 .map(|prov| {
-                                    app.sub_account_counts.get(&prov.id).copied().unwrap_or(0)
+                                    app.sub_account_stats
+                                        .get(&prov.id)
+                                        .map(|s| s.total)
+                                        .unwrap_or(0)
                                 })
                         } else {
                             None

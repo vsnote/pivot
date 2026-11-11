@@ -37,21 +37,20 @@ fn clean_quota_label(label: &str) -> String {
 }
 
 fn is_account_auth_expired(acc: &SubscriptionAccount, quota: Option<&AccountQuota>, now_ts: i64) -> bool {
+    if acc.cooldown_until - now_ts > 3600 {
+        return true;
+    }
     if acc.refresh_token.as_deref().unwrap_or("").is_empty()
         && acc.expires_at > 0
-        && acc.expires_at < now_ts
+        && acc.expires_at <= now_ts
     {
         return true;
     }
     if let Some(err) = quota.and_then(|q| q.error.as_deref()) {
-        let lower = err.to_lowercase();
-        if lower.contains("401")
-            || lower.contains("403")
-            || lower.contains("invalid_grant")
-            || lower.contains("unauthorized")
-            || lower.contains("expired")
-            || lower.contains("重新登录")
-            || lower.contains("授权失效")
+        if pivot_core::oauth::is_token_revoked_or_invalid(err)
+            || err.contains("失效")
+            || err.contains("重新登录")
+            || err.contains("重新授权")
         {
             return true;
         }
@@ -75,7 +74,11 @@ pub fn render_subscription_section(
     let active_count = editor
         .sub_accounts
         .iter()
-        .filter(|a| a.enabled && !is_account_auth_expired(a, editor.sub_quotas.get(&a.id), now_ts))
+        .filter(|a| {
+            a.enabled
+                && a.cooldown_until <= now_ts
+                && !is_account_auth_expired(a, editor.sub_quotas.get(&a.id), now_ts)
+        })
         .count();
 
     let display_name = editor.name_input.read(cx).value().to_string();
@@ -203,20 +206,20 @@ pub fn render_subscription_section(
                                 .bg(if active_count > 0 {
                                     palette.emerald_soft_bg
                                 } else {
-                                    palette.amber_soft_bg
+                                    palette.rose_soft_bg
                                 })
                                 .border_1()
                                 .border_color(if active_count > 0 {
                                     palette.emerald_soft_border
                                 } else {
-                                    palette.amber_soft_border
+                                    palette.rose_soft_border
                                 })
                                 .text_size(px(10.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(if active_count > 0 {
                                     palette.emerald_text
                                 } else {
-                                    palette.amber_text
+                                    palette.rose_text
                                 })
                                 .child(format!(
                                     "{} / {} {}",

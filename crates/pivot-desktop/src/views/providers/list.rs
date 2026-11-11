@@ -176,7 +176,11 @@ pub fn render_provider_row(
 ) -> AnyElement {
     let p_id = provider.id.clone();
     let is_sub = is_subscription_provider(provider);
-    let sub_count = app.sub_account_counts.get(&p_id).copied().unwrap_or(1);
+    let sub_stat = app.sub_account_stats.get(&p_id).copied().unwrap_or(crate::app::SubAccountStat {
+        total: 1,
+        available: 1,
+        has_auth_error: false,
+    });
     let display_endpoint = clean_display_endpoint(&provider.base_url);
     let is_hovered = !is_floating_preview && app.hovered_provider_id.as_deref() == Some(p_id.as_str());
     let copy_key = format!("prov_url_{}", p_id);
@@ -334,40 +338,74 @@ pub fn render_provider_row(
                                 .child(provider.name.clone()),
                         )
                         .when(is_sub, |el| {
-                            let (bg, border, fg) = if sub_count > 0 {
-                                (
-                                    palette.sub_badge_bg,
-                                    palette.sub_badge_border,
-                                    palette.sub_badge_text,
+                            let show_expired = sub_stat.total > 0
+                                && (sub_stat.has_auth_error || sub_stat.available == 0);
+                            if show_expired {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .flex_shrink_0()
+                                        .h(px(18.0))
+                                        .px(px(6.0))
+                                        .rounded(px(4.0))
+                                        .bg(palette.rose_soft_bg)
+                                        .border_1()
+                                        .border_color(palette.rose_soft_border)
+                                        .text_size(px(10.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(palette.rose_text)
+                                        .child(
+                                            div()
+                                                .size(px(5.0))
+                                                .rounded_full()
+                                                .flex_shrink_0()
+                                                .bg(palette.rose_text),
+                                        )
+                                        .child(format!(
+                                            "{} · {}/{}",
+                                            locale.pick("授权已失效", "Auth Expired"),
+                                            sub_stat.available,
+                                            sub_stat.total
+                                        )),
                                 )
                             } else {
-                                (
-                                    palette.muted_subtle,
-                                    palette.border,
-                                    palette.muted_foreground,
+                                let (bg, border, fg) = if sub_stat.total > 0 {
+                                    (
+                                        palette.sub_badge_bg,
+                                        palette.sub_badge_border,
+                                        palette.sub_badge_text,
+                                    )
+                                } else {
+                                    (
+                                        palette.muted_subtle,
+                                        palette.border,
+                                        palette.muted_foreground,
+                                    )
+                                };
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .flex_shrink_0()
+                                        .h(px(18.0))
+                                        .px(px(6.0))
+                                        .rounded(px(4.0))
+                                        .bg(bg)
+                                        .border_1()
+                                        .border_color(border)
+                                        .text_size(px(10.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg)
+                                        .child(format!(
+                                            "{} · {}",
+                                            locale.pick("订阅", "Subscription"),
+                                            sub_stat.total
+                                        )),
                                 )
-                            };
-                            el.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(3.0))
-                                    .flex_shrink_0()
-                                    .h(px(18.0))
-                                    .px(px(6.0))
-                                    .rounded(px(4.0))
-                                    .bg(bg)
-                                    .border_1()
-                                    .border_color(border)
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(fg)
-                                    .child(format!(
-                                        "{} · {}",
-                                        locale.pick("订阅", "Subscription"),
-                                        sub_count
-                                    )),
-                            )
+                            }
                         })
                         .when(!is_sub && !display_endpoint.is_empty(), |el| {
                             el.child(

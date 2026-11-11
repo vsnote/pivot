@@ -248,15 +248,71 @@ pub async fn test_provider_latency(state: &AppState, id: String) -> Result<i64, 
         .find(|p| p.id == id)
         .ok_or_else(|| format!("Provider not found: {}", id))?;
 
-    let measured_latency = measure_http_latency(
-        &state.http_client,
-        &provider.protocol,
-        &provider.base_url,
-        provider.api_keys.first().map(String::as_str),
-    )
-    .await?;
+    let is_sub = provider.auth_type.as_deref() == Some("subscription_pool")
+        || provider.preset_id.as_deref() == Some("chatgpt_subscription")
+        || provider.preset_id.as_deref() == Some("antigravity")
+        || provider.protocol == "chatgpt";
 
-    Ok(measured_latency)
+    if is_sub {
+        let accounts = state.db.get_subscription_accounts(&provider.id).unwrap_or_default();
+        if accounts.is_empty() {
+            return Err("未绑定任何订阅账号，请先在编辑中添加账号".to_string());
+        }
+        let now_sec = chrono::Utc::now().timestamp();
+        // 尝试获取可用账号（未在冷却且能成功刷新 Token）
+        match oauth::acquire_subscription_account(&state.db, &state.http_client, &provider.id).await {
+            Ok(acc) => {
+                let start = Instant::now();
+                if provider.protocol == "chatgpt" {
+                    let res = state.http_client
+                        .get("https://chatgpt.com/backend-api/models")
+                        .header("authorization", format!("Bearer {}", acc.access_token))
+                        .header("user-agent", oauth::codex_user_agent())
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await;
+                    match res {
+                        Ok(r) if r.status().is_success() => Ok(start.elapsed().as_millis() as i64),
+                        Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                            let _ = state.db.set_account_cooldown(&acc.id, now_sec + 86400);
+                            Err("订阅账号授权已失效，请在编辑中重新授权".to_string())
+                        }
+                        Ok(_) => Ok(start.elapsed().as_millis() as i64),
+                        Err(e) => Err(format!("连接超时或失败: {}", e)),
+                    }
+                } else {
+                    let base = provider.base_url.trim().trim_end_matches('/');
+                    let ep = format!("{}/v1internal:fetchAvailableModels", base);
+                    let res = state.http_client
+                        .get(&ep)
+                        .header("authorization", format!("Bearer {}", acc.access_token))
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await;
+                    match res {
+                        Ok(r) if r.status().is_success() => Ok(start.elapsed().as_millis() as i64),
+                        Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                            let _ = state.db.set_account_cooldown(&acc.id, now_sec + 86400);
+                            Err("订阅账号授权已失效，请在编辑中重新授权".to_string())
+                        }
+                        Ok(_) => Ok(start.elapsed().as_millis() as i64),
+                        Err(e) => Err(format!("连接超时或失败: {}", e)),
+                    }
+                }
+            }
+            Err((_, msg)) => Err(format!("账号异常: {}", msg)),
+        }
+    } else {
+        let measured_latency = measure_http_latency(
+            &state.http_client,
+            &provider.protocol,
+            &provider.base_url,
+            provider.api_keys.first().map(String::as_str),
+        )
+        .await?;
+
+        Ok(measured_latency)
+    }
 }
 
 pub async fn test_endpoint_latency(
@@ -654,13 +710,32 @@ pub async fn get_subscription_account_quota(
                     account.cooldown_until = 0;
                 }
                 Err(ref e) => {
-                    let is_revoked = e.contains("invalid_grant") || e.contains("revoked") || e.contains("expired") || e.contains("unauthorized");
+                    let is_revoked = oauth::is_token_revoked_or_invalid(e);
                     if is_revoked {
                         let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
                         account.cooldown_until = now_sec + 86400;
                     }
+                    if account.expires_at <= now_sec {
+                        return Ok(oauth::AccountQuota {
+                            account_id,
+                            updated_at: now_sec,
+                            buckets: Vec::new(),
+                            reset_credits: None,
+                            error: Some("账号授权已失效，请重新授权".to_string()),
+                        });
+                    }
                 }
             }
+        } else if account.expires_at <= now_sec {
+            let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+            account.cooldown_until = now_sec + 86400;
+            return Ok(oauth::AccountQuota {
+                account_id,
+                updated_at: now_sec,
+                buckets: Vec::new(),
+                reset_credits: None,
+                error: Some("账号授权已失效，请重新授权".to_string()),
+            });
         }
     }
 
@@ -668,7 +743,7 @@ pub async fn get_subscription_account_quota(
         match oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await {
             Ok((b, rc)) => (b, Some(rc)),
             Err(e) => {
-                let is_auth_err = e.contains("401") || e.contains("UNAUTHENTICATED") || e.contains("invalid_grant");
+                let is_auth_err = oauth::is_token_revoked_or_invalid(&e);
                 if is_auth_err {
                     let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
                 }
@@ -686,7 +761,7 @@ pub async fn get_subscription_account_quota(
         match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
             Ok(b) => (b, None),
             Err(e) => {
-                let is_auth_err = e.contains("401") || e.contains("UNAUTHENTICATED") || e.contains("invalid_grant");
+                let is_auth_err = oauth::is_token_revoked_or_invalid(&e);
                 if is_auth_err {
                     let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
                 }

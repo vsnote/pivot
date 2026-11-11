@@ -69,6 +69,40 @@ pub enum PendingConfirm {
     ClearLogs,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SubAccountStat {
+    pub total: usize,
+    pub available: usize,
+    pub has_auth_error: bool,
+}
+
+pub fn compute_sub_stat(accounts: &[pivot_core::db::SubscriptionAccount]) -> SubAccountStat {
+    let now_sec = chrono::Utc::now().timestamp();
+    let total = accounts.len();
+    let has_auth_error = accounts.iter().any(|a| {
+        a.enabled
+            && (a.cooldown_until - now_sec > 3600
+                || (a.refresh_token.as_deref().unwrap_or("").is_empty()
+                    && a.expires_at > 0
+                    && a.expires_at <= now_sec))
+    });
+    let available = accounts
+        .iter()
+        .filter(|a| {
+            a.enabled
+                && a.cooldown_until <= now_sec
+                && !(a.refresh_token.as_deref().unwrap_or("").is_empty()
+                    && a.expires_at > 0
+                    && a.expires_at <= now_sec)
+        })
+        .count();
+    SubAccountStat {
+        total,
+        available,
+        has_auth_error,
+    }
+}
+
 pub struct PivotApp {
     pub core_state: AppState,
     pub tokio_handle: tokio::runtime::Handle,
@@ -84,7 +118,7 @@ pub struct PivotApp {
     pub presets: Vec<Preset>,
     pub providers: Vec<Provider>,
     pub saved_pools: HashMap<String, Vec<String>>,
-    pub sub_account_counts: HashMap<String, usize>,
+    pub sub_account_stats: HashMap<String, SubAccountStat>,
     pub model_rates: HashMap<String, ModelRate>,
     pub model_display_names: HashMap<String, String>,
 
@@ -121,14 +155,14 @@ pub struct PivotApp {
     pub global_error: Option<String>,
 }
 
-fn collect_sub_counts(state: &AppState, providers: &[Provider]) -> HashMap<String, usize> {
+fn collect_sub_stats(state: &AppState, providers: &[Provider]) -> HashMap<String, SubAccountStat> {
     let mut map = HashMap::new();
     for p in providers {
         if is_subscription_provider(p) {
-            let cnt = service::get_subscription_accounts(state, p.id.clone())
-                .map(|v| v.len())
-                .unwrap_or(0);
-            map.insert(p.id.clone(), cnt);
+            let stat = service::get_subscription_accounts(state, p.id.clone())
+                .map(|v| compute_sub_stat(&v))
+                .unwrap_or_default();
+            map.insert(p.id.clone(), stat);
         }
     }
     map
@@ -218,7 +252,7 @@ impl PivotApp {
             presets,
             providers: Vec::new(),
             saved_pools,
-            sub_account_counts: HashMap::new(),
+            sub_account_stats: HashMap::new(),
             model_rates,
             model_display_names,
             hovered_provider_id: None,
@@ -397,15 +431,15 @@ impl PivotApp {
                     let i = service::get_interceptor_status(&state).await;
                     let l = service::get_logs(&state, Some(500), None).await;
                     let gw = service::get_gateway_status(&state).await;
-                    let counts = match &p {
-                        Ok(list) => collect_sub_counts(&state, list),
+                    let stats = match &p {
+                        Ok(list) => collect_sub_stats(&state, list),
                         Err(_) => HashMap::new(),
                     };
-                    (p, i, l, gw, counts)
+                    (p, i, l, gw, stats)
                 })
                 .await;
 
-            if let Ok((p_res, i_res, l_res, gw_res, counts)) = res {
+            if let Ok((p_res, i_res, l_res, gw_res, stats)) = res {
                 let _ = this.update(cx, |app, cx| {
                     if let Ok(providers) = p_res {
                         for prov in &providers {
@@ -416,7 +450,7 @@ impl PivotApp {
                         }
                         app.providers = providers;
                     }
-                    app.sub_account_counts = counts;
+                    app.sub_account_stats = stats;
                     if let Ok(interceptors) = i_res {
                         app.interceptors = interceptors;
                     }
@@ -450,16 +484,16 @@ impl PivotApp {
             let res = handle
                 .spawn(async move {
                     let p = service::get_providers(&state).await;
-                    let counts = match &p {
-                        Ok(list) => collect_sub_counts(&state, list),
+                    let stats = match &p {
+                        Ok(list) => collect_sub_stats(&state, list),
                         Err(_) => HashMap::new(),
                     };
                     let inter = service::get_interceptor_status(&state).await;
-                    (p, counts, inter)
+                    (p, stats, inter)
                 })
                 .await;
 
-            if let Ok((Ok(providers), counts, inter_res)) = res {
+            if let Ok((Ok(providers), stats, inter_res)) = res {
                 let _ = this.update(cx, |app, cx| {
                     for prov in &providers {
                         resolve_display_names_for_models(
@@ -468,7 +502,7 @@ impl PivotApp {
                         );
                     }
                     app.providers = providers;
-                    app.sub_account_counts = counts;
+                    app.sub_account_stats = stats;
                     if let Ok(interceptors) = inter_res {
                         app.interceptors = interceptors;
                     }
@@ -544,6 +578,10 @@ impl PivotApp {
             }
             _ => Vec::new(),
         };
+        let precheck_sub = provider
+            .as_ref()
+            .filter(|p| is_subscription_provider(p) && !sub_accounts.is_empty())
+            .map(|p| (p.id.clone(), p.base_url.clone()));
 
         let ed = ProviderEditorState::new(
             provider,
@@ -557,6 +595,48 @@ impl PivotApp {
         self.editor = Some(ed);
         self.is_provider_editor_open = true;
         cx.notify();
+
+        // 静默预加载并检查订阅账号健康状态（若 Token 已过期会自动触发刷新或标记冷却）
+        if let Some((pid, base_url)) = precheck_sub {
+            let state = self.core_state.clone();
+            let handle = self.tokio_handle.clone();
+            let pid_clone = pid.clone();
+            cx.spawn(async move |this, cx| {
+                let res = handle
+                    .spawn(async move {
+                        let quotas = service::get_all_subscription_quotas(
+                            &state,
+                            pid_clone.clone(),
+                            if base_url.is_empty() {
+                                None
+                            } else {
+                                Some(base_url)
+                            },
+                        )
+                        .await;
+                        let accounts = service::get_subscription_accounts(&state, pid_clone)
+                            .unwrap_or_default();
+                        (quotas, accounts)
+                    })
+                    .await;
+                if let Ok((quotas_res, accounts)) = res {
+                    let _ = this.update(cx, |app, cx| {
+                        app.sub_account_stats
+                            .insert(pid.clone(), compute_sub_stat(&accounts));
+                        if let Some(ed) = app.editor.as_mut().filter(|e| e.provider_id == pid) {
+                            ed.sub_accounts = accounts;
+                            if let Ok(list) = quotas_res {
+                                for q in list {
+                                    ed.sub_quotas.insert(q.account_id.clone(), q);
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
     }
 
     // ================= 剪贴板与服务商列表操作 =================
@@ -629,14 +709,33 @@ impl PivotApp {
 
         cx.spawn(async move |this, cx| {
             let res = handle
-                .spawn(async move { service::test_provider_latency(&state, target_id).await })
+                .spawn(async move {
+                    let lat = service::test_provider_latency(&state, target_id.clone()).await;
+                    let sub_stat = service::get_subscription_accounts(&state, target_id)
+                        .ok()
+                        .map(|v| compute_sub_stat(&v));
+                    (lat, sub_stat)
+                })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 app.testing_latencies.remove(&id);
                 match res {
-                    Ok(Ok(ms)) => {
+                    Ok((Ok(ms), sub_stat)) => {
+                        if let Some(st) = sub_stat {
+                            if app.sub_account_stats.contains_key(&id) {
+                                app.sub_account_stats.insert(id.clone(), st);
+                            }
+                        }
                         app.latencies.insert(id, ms);
+                    }
+                    Ok((Err(_), sub_stat)) => {
+                        if let Some(st) = sub_stat {
+                            if app.sub_account_stats.contains_key(&id) {
+                                app.sub_account_stats.insert(id.clone(), st);
+                            }
+                        }
+                        app.latencies.insert(id, -1);
                     }
                     _ => {
                         app.latencies.insert(id, -1);
@@ -1423,7 +1522,9 @@ impl PivotApp {
             enabled,
         );
         ed.sub_accounts =
-            service::get_subscription_accounts(&self.core_state, pid).unwrap_or_default();
+            service::get_subscription_accounts(&self.core_state, pid.clone()).unwrap_or_default();
+        let stat = compute_sub_stat(&ed.sub_accounts);
+        self.sub_account_stats.insert(pid, stat);
         cx.notify();
     }
 
@@ -1443,7 +1544,8 @@ impl PivotApp {
         if ed.expanded_quota_account_id.as_deref() == Some(account_id.as_str()) {
             ed.expanded_quota_account_id = None;
         }
-        self.sub_account_counts.insert(pid, ed.sub_accounts.len());
+        let stat = compute_sub_stat(&ed.sub_accounts);
+        self.sub_account_stats.insert(pid, stat);
         cx.notify();
     }
 

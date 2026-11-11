@@ -1,6 +1,23 @@
 use crate::gateway::types::*;
 use serde_json::{json, Value};
 
+fn is_anthropic_thinking_supported(target_model: &str) -> bool {
+    let lower = target_model.to_lowercase();
+    let name = lower.split('/').last().unwrap_or(&lower);
+    let is_explicit_non_thinking = (name.contains("claude-3-5")
+        || name.contains("claude-3-opus")
+        || name.contains("claude-3-haiku")
+        || name.starts_with("claude-2"))
+        && !name.contains("thinking");
+    if is_explicit_non_thinking {
+        return false;
+    }
+    name.contains("claude-3-7")
+        || name.contains("opus-4")
+        || name.contains("sonnet-4")
+        || name.contains("thinking")
+}
+
 pub fn convert_openai_req_to_anthropic(
     req: &OpenAIChatRequest,
     target_model: &str,
@@ -102,31 +119,35 @@ pub fn convert_openai_req_to_anthropic(
             .collect()
     });
 
-    let thinking = if let Some(ref effort) = req.reasoning_effort {
-        match effort.as_str() {
-            "none" => None,
-            "low" => Some(AnthropicThinkingConfig {
-                thinking_type: "enabled".to_string(),
-                budget_tokens: Some(2048),
-            }),
-            "high" => Some(AnthropicThinkingConfig {
-                thinking_type: "enabled".to_string(),
-                budget_tokens: Some(16384),
-            }),
-            "xhigh" | "max" => Some(AnthropicThinkingConfig {
-                thinking_type: "enabled".to_string(),
-                budget_tokens: Some(32768),
-            }),
-            _ => Some(AnthropicThinkingConfig {
+    let thinking = if is_anthropic_thinking_supported(target_model) {
+        if let Some(ref effort) = req.reasoning_effort {
+            match effort.as_str() {
+                "none" => None,
+                "low" => Some(AnthropicThinkingConfig {
+                    thinking_type: "enabled".to_string(),
+                    budget_tokens: Some(2048),
+                }),
+                "high" => Some(AnthropicThinkingConfig {
+                    thinking_type: "enabled".to_string(),
+                    budget_tokens: Some(16384),
+                }),
+                "xhigh" | "max" | "ultra" => Some(AnthropicThinkingConfig {
+                    thinking_type: "enabled".to_string(),
+                    budget_tokens: Some(32768),
+                }),
+                _ => Some(AnthropicThinkingConfig {
+                    thinking_type: "enabled".to_string(),
+                    budget_tokens: Some(8192),
+                }),
+            }
+        } else if target_model.contains("thinking") {
+            Some(AnthropicThinkingConfig {
                 thinking_type: "enabled".to_string(),
                 budget_tokens: Some(8192),
-            }),
+            })
+        } else {
+            None
         }
-    } else if target_model.contains("thinking") {
-        Some(AnthropicThinkingConfig {
-            thinking_type: "enabled".to_string(),
-            budget_tokens: Some(8192),
-        })
     } else {
         None
     };
@@ -307,5 +328,32 @@ mod tests {
             convert_openai_tool_choice_to_anthropic(&None),
             None
         );
+    }
+
+    #[test]
+    fn test_convert_openai_req_to_anthropic_thinking_filter() {
+        let req = OpenAIChatRequest {
+            model: "any".to_string(),
+            messages: vec![],
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            max_completion_tokens: None,
+            reasoning_effort: Some("high".to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            stream_options: None,
+        };
+
+        // claude-3-5-sonnet: thinking stripped
+        let ant_35 = convert_openai_req_to_anthropic(&req, "claude-3-5-sonnet-20241022");
+        assert!(ant_35.thinking.is_none());
+        assert_eq!(ant_35.temperature, Some(0.7));
+
+        // claude-3-7-sonnet: thinking mapped and temperature cleared
+        let ant_37 = convert_openai_req_to_anthropic(&req, "claude-3-7-sonnet-20250219");
+        assert!(ant_37.thinking.is_some());
+        assert_eq!(ant_37.thinking.unwrap().budget_tokens, Some(16384));
+        assert_eq!(ant_37.temperature, None);
     }
 }
