@@ -1042,6 +1042,7 @@ async fn dispatch_anthropic_request(
 
             if is_stream {
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
                 let req_id_str = req_id.to_string();
@@ -1095,7 +1096,9 @@ async fn dispatch_anthropic_request(
                         if final_completion_tokens == 0 { final_completion_tokens = 1; }
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -1192,6 +1195,7 @@ async fn dispatch_anthropic_request(
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
 
@@ -1268,7 +1272,9 @@ async fn dispatch_anthropic_request(
                         final_completion_tokens = sse_state.total_output_tokens.max(1);
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -1532,6 +1538,7 @@ async fn dispatch_anthropic_request(
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
 
@@ -1604,7 +1611,9 @@ async fn dispatch_anthropic_request(
                         final_completion_tokens = sse_state.total_output_tokens.max(1);
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -2348,6 +2357,7 @@ async fn dispatch_openai_request(
                 let req_id_str = req_id.to_string();
                 let byte_stream = res.bytes_stream();
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
 
@@ -2398,7 +2408,9 @@ async fn dispatch_openai_request(
                         final_completion_tokens = generated_tokens.max(1);
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -2496,6 +2508,7 @@ async fn dispatch_openai_request(
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
 
@@ -2556,7 +2569,9 @@ async fn dispatch_openai_request(
                         final_completion_tokens = generated_tokens.max(1);
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -2754,6 +2769,7 @@ async fn dispatch_openai_request(
                 let model_str = req.model.clone();
                 let byte_stream = res.bytes_stream();
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
 
@@ -2853,7 +2869,9 @@ async fn dispatch_openai_request(
                         }
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -3327,6 +3345,7 @@ async fn dispatch_gemini_request(
                 let req_id_str = req_id.to_string();
                 let byte_stream = res.bytes_stream();
                 let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
                 let stats_clone = state.stats.clone();
                 let start_time_clone = Instant::now();
 
@@ -3375,7 +3394,9 @@ async fn dispatch_gemini_request(
                     }
 
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
-                    let _ = db_clone.update_request_log_tokens(
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
                         &req_id_str,
                         final_prompt_tokens as i32,
                         final_completion_tokens as i32,
@@ -3433,6 +3454,23 @@ async fn dispatch_gemini_request(
 fn emit_log_event(state: &GatewayState, log: &RequestLog) {
     if let Some(ref sender) = state.log_sender {
         let _ = sender.send(log.clone());
+    }
+}
+
+fn finalize_stream_log(
+    db: &Database,
+    log_sender: &Option<tokio::sync::broadcast::Sender<crate::db::RequestLog>>,
+    req_id: &str,
+    prompt_tokens: i32,
+    completion_tokens: i32,
+    stream_latency: i64,
+) {
+    if let Ok(Some(updated_log)) =
+        db.update_request_log_tokens(req_id, prompt_tokens, completion_tokens, stream_latency)
+    {
+        if let Some(ref sender) = log_sender {
+            let _ = sender.send(updated_log);
+        }
     }
 }
 

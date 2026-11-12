@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::i18n::Locale;
 use pivot_core::db::RequestLog;
 use pivot_core::service;
@@ -104,14 +106,9 @@ pub fn estimate_cost(
         + (completion_tokens as f64 / 1_000_000.0) * rate.completion
 }
 
-/// 1:1 复刻 `UsageDashboard.tsx` 的 `getEffectiveTokens`
 pub fn effective_tokens(log: &RequestLog) -> (u64, u64, u64) {
-    let mut p = log.prompt_tokens.max(0) as u64;
-    let mut c = log.completion_tokens.max(0) as u64;
-    if p == 0 && c == 0 && (200..300).contains(&log.status_code) {
-        c = 30u64.max(((log.latency_ms.max(0) as f64 / 1000.0) * 35.0).round() as u64);
-        p = 1500u64.max(c * 3);
-    }
+    let p = log.prompt_tokens.max(0) as u64;
+    let c = log.completion_tokens.max(0) as u64;
     (p, c, p + c)
 }
 
@@ -140,6 +137,28 @@ pub fn format_tokens(tokens: u64) -> String {
     }
     if tokens >= 1_000 {
         return format!("{:.1} K", tokens as f64 / 1_000.0);
+    }
+    tokens.to_string()
+}
+
+pub fn format_tokens_compact(tokens: u64) -> String {
+    if tokens == 0 {
+        return "0".to_string();
+    }
+    if tokens >= 100_000_000 {
+        return format!("{:.0}M", tokens as f64 / 1_000_000.0);
+    }
+    if tokens >= 10_000_000 {
+        return format!("{:.1}M", tokens as f64 / 1_000_000.0);
+    }
+    if tokens >= 1_000_000 {
+        return format!("{:.2}M", tokens as f64 / 1_000_000.0);
+    }
+    if tokens >= 100_000 {
+        return format!("{:.0}K", tokens as f64 / 1_000.0);
+    }
+    if tokens >= 1_000 {
+        return format!("{:.1}K", tokens as f64 / 1_000.0);
     }
     tokens.to_string()
 }

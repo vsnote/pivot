@@ -1,6 +1,8 @@
 use crate::db::presets::{self, Preset};
+use crate::db::{
+    DashboardRawStats, Provider, RequestLog, StatsBucketPlan, SubscriptionAccount,
+};
 use crate::gateway::router as gateway_router;
-use crate::db::{Provider, RequestLog, SubscriptionAccount};
 use crate::interceptor::{InterceptorInfo, InterceptorManager};
 use crate::oauth;
 use crate::state::AppState;
@@ -338,6 +340,30 @@ pub async fn get_logs(
     let lim = limit.unwrap_or(100);
     let off = offset.unwrap_or(0);
     state.db.get_logs(lim, off).map_err(|e| e.to_string())
+}
+
+pub fn get_logs_in_window(
+    state: &AppState,
+    since_epoch: Option<i64>,
+    errors_only: bool,
+    limit: usize,
+) -> Result<Vec<RequestLog>, String> {
+    state
+        .db
+        .get_logs_in_window(since_epoch, errors_only, limit)
+        .map_err(|e| e.to_string())
+}
+
+pub fn get_dashboard_stats(
+    state: &AppState,
+    since_epoch: Option<i64>,
+    fixed_buckets: Option<StatsBucketPlan>,
+    today_start_epoch: i64,
+) -> Result<DashboardRawStats, String> {
+    state
+        .db
+        .get_dashboard_stats(since_epoch, fixed_buckets, today_start_epoch)
+        .map_err(|e| e.to_string())
 }
 
 pub async fn clear_logs(state: &AppState) -> Result<(), String> {

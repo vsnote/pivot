@@ -16,7 +16,10 @@ use crate::views::clients::{
     render_client_model_popover, render_clients_view, render_conflict_dialog,
     ClientModelSelectState,
 };
-use crate::views::dashboard::{render_dashboard_view, DashboardTimeRange, ProviderMetricMode};
+use crate::views::dashboard::{
+    compute_time_window, render_dashboard_view, DashboardLogFilter, DashboardSubView,
+    DashboardTimeRange, ProviderMetricMode,
+};
 use crate::views::providers::list::render_provider_row;
 use crate::views::providers::{
     is_subscription_provider, render_provider_context_menu, render_provider_editor,
@@ -29,7 +32,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use pivot_core::db::presets::Preset;
-use pivot_core::db::{Provider, RequestLog};
+use pivot_core::db::{DashboardRawStats, Provider, RequestLog};
 use pivot_core::interceptor::InterceptorInfo;
 use pivot_core::service;
 use pivot_core::state::AppState;
@@ -145,9 +148,13 @@ pub struct PivotApp {
     pub universal_card_expanded: bool,
 
     pub logs: Vec<RequestLog>,
+    pub dashboard_stats: DashboardRawStats,
+    pub dashboard_sub_view: DashboardSubView,
     pub dashboard_range: DashboardTimeRange,
     pub dashboard_metric: ProviderMetricMode,
-    pub hovered_chart_hour: Option<usize>,
+    pub dashboard_log_filter: DashboardLogFilter,
+    pub expanded_log_id: Option<String>,
+    pub hovered_chart_bucket: Option<usize>,
 
     pub settings_banner: Option<SettingsBanner>,
     pub update_state: UpdateCheckState,
@@ -251,9 +258,13 @@ impl PivotApp {
             client_model_select: None,
             universal_card_expanded: true,
             logs: Vec::new(),
+            dashboard_stats: DashboardRawStats::default(),
+            dashboard_sub_view: DashboardSubView::Overview,
             dashboard_range: DashboardTimeRange::All,
             dashboard_metric: ProviderMetricMode::Calls,
-            hovered_chart_hour: None,
+            dashboard_log_filter: DashboardLogFilter::All,
+            expanded_log_id: None,
+            hovered_chart_bucket: None,
             settings_banner: None,
             update_state: UpdateCheckState::Idle,
             update_version: None,
@@ -294,13 +305,23 @@ impl PivotApp {
                     let keep_going = this
                         .update(cx, |app, cx| {
                             resolve_display_names_for_models(
-                                std::iter::once(&new_log.routed_model),
+                                [&new_log.routed_model, &new_log.incoming_model].into_iter(),
                                 &mut app.model_display_names,
                             );
-                            app.logs.insert(0, new_log);
-                            if app.logs.len() > 1000 {
-                                app.logs.truncate(1000);
+                            let errors_only =
+                                app.dashboard_log_filter == DashboardLogFilter::Errors;
+                            let is_err = !(200..300).contains(&new_log.status_code);
+                            if let Some(existing) =
+                                app.logs.iter_mut().find(|l| l.id == new_log.id)
+                            {
+                                *existing = new_log;
+                            } else if !errors_only || is_err {
+                                app.logs.insert(0, new_log);
+                                if app.logs.len() > 200 {
+                                    app.logs.truncate(200);
+                                }
                             }
+                            app.refresh_dashboard_data(cx);
                             cx.notify();
                         })
                         .is_ok();
@@ -308,7 +329,12 @@ impl PivotApp {
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.refresh_dashboard_data(cx);
+                    });
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         })
@@ -402,23 +428,28 @@ impl PivotApp {
     pub fn refresh_all(&mut self, cx: &mut Context<Self>) {
         let state = self.core_state.clone();
         let handle = self.tokio_handle.clone();
+        let range = self.dashboard_range;
+        let errors_only = self.dashboard_log_filter == DashboardLogFilter::Errors;
 
         cx.spawn(async move |this, cx| {
             let res = handle
                 .spawn(async move {
                     let p = service::get_providers(&state).await;
                     let i = service::get_interceptor_status(&state).await;
-                    let l = service::get_logs(&state, Some(500), None).await;
+                    let (since, buckets, today_start) = compute_time_window(range);
+                    let raw_stats =
+                        service::get_dashboard_stats(&state, since, buckets, today_start);
+                    let l = service::get_logs_in_window(&state, since, errors_only, 200);
                     let gw = service::get_gateway_status(&state).await;
                     let stats = match &p {
                         Ok(list) => collect_sub_stats(&state, list),
                         Err(_) => HashMap::new(),
                     };
-                    (p, i, l, gw, stats)
+                    (p, i, raw_stats, l, gw, stats)
                 })
                 .await;
 
-            if let Ok((p_res, i_res, l_res, gw_res, stats)) = res {
+            if let Ok((p_res, i_res, raw_stats_res, l_res, gw_res, stats)) = res {
                 let _ = this.update(cx, |app, cx| {
                     if let Ok(providers) = p_res {
                         for prov in &providers {
@@ -433,7 +464,18 @@ impl PivotApp {
                     if let Ok(interceptors) = i_res {
                         app.interceptors = interceptors;
                     }
+                    if let Ok(st) = raw_stats_res {
+                        resolve_display_names_for_models(
+                            st.route_model_slices.iter().map(|s| &s.model),
+                            &mut app.model_display_names,
+                        );
+                        app.dashboard_stats = st;
+                    }
                     if let Ok(logs) = l_res {
+                        resolve_display_names_for_models(
+                            logs.iter().flat_map(|l| [&l.routed_model, &l.incoming_model]),
+                            &mut app.model_display_names,
+                        );
                         app.logs = logs;
                     }
                     if let Ok(val) = gw_res {
@@ -453,6 +495,55 @@ impl PivotApp {
             }
         })
         .detach();
+    }
+
+    pub fn refresh_dashboard_data(&mut self, cx: &mut Context<Self>) {
+        let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
+        let range = self.dashboard_range;
+        let errors_only = self.dashboard_log_filter == DashboardLogFilter::Errors;
+
+        cx.spawn(async move |this, cx| {
+            let res = handle
+                .spawn(async move {
+                    let (since, buckets, today_start) = compute_time_window(range);
+                    let raw_stats =
+                        service::get_dashboard_stats(&state, since, buckets, today_start);
+                    let logs = service::get_logs_in_window(&state, since, errors_only, 200);
+                    (raw_stats, logs)
+                })
+                .await;
+
+            if let Ok((stats_res, logs_res)) = res {
+                let _ = this.update(cx, |app, cx| {
+                    if let Ok(st) = stats_res {
+                        resolve_display_names_for_models(
+                            st.route_model_slices.iter().map(|s| &s.model),
+                            &mut app.model_display_names,
+                        );
+                        app.dashboard_stats = st;
+                    }
+                    if let Ok(logs) = logs_res {
+                        resolve_display_names_for_models(
+                            logs.iter().flat_map(|l| [&l.routed_model, &l.incoming_model]),
+                            &mut app.model_display_names,
+                        );
+                        app.logs = logs;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn jump_to_error_logs(&mut self, cx: &mut Context<Self>) {
+        self.dashboard_sub_view = DashboardSubView::Logs;
+        self.dashboard_log_filter = DashboardLogFilter::Errors;
+        self.expanded_log_id = None;
+        self.main_scroll_handle.set_offset(point(px(0.0), px(0.0)));
+        self.refresh_dashboard_data(cx);
+        cx.notify();
     }
 
     pub fn refresh_providers_only(&mut self, cx: &mut Context<Self>) {
@@ -517,6 +608,10 @@ impl PivotApp {
         self.context_menu = None;
         self.client_model_select = None;
         self.active_tab = tab;
+        if tab == ActiveTab::Logs {
+            self.hovered_chart_bucket = None;
+            self.refresh_dashboard_data(cx);
+        }
         self.main_scroll_handle.set_offset(point(px(0.0), px(0.0)));
         cx.notify();
     }
@@ -1936,7 +2031,7 @@ impl PivotApp {
     // ================= 统计看板与设置页操作 =================
 
     pub fn prompt_clear_logs(&mut self, cx: &mut Context<Self>) {
-        if self.logs.is_empty() {
+        if !self.dashboard_stats.has_any_logs && self.logs.is_empty() {
             return;
         }
         self.pending_confirm = Some(PendingConfirm::ClearLogs);
@@ -1959,6 +2054,9 @@ impl PivotApp {
                 .await;
             let _ = this.update(cx, |app, cx| {
                 app.logs.clear();
+                app.dashboard_stats = DashboardRawStats::default();
+                app.expanded_log_id = None;
+                app.hovered_chart_bucket = None;
                 app.confirm_busy = false;
                 app.pending_confirm = None;
                 cx.notify();

@@ -87,6 +87,68 @@ pub struct LogAttempt {
     pub latency_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsBucketPlan {
+    pub start_epoch: i64,
+    pub step_secs: i64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteModelSlice {
+    pub provider_id: String,
+    pub provider_name: Option<String>,
+    pub model: String,
+    pub calls: usize,
+    pub ok_calls: usize,
+    pub err_calls: usize,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorBreakdown {
+    pub unrouted: usize,
+    pub rate_limited_429: usize,
+    pub auth_401_403: usize,
+    pub not_found_404: usize,
+    pub bad_request_4xx: usize,
+    pub upstream_timeout_502_504: usize,
+    pub upstream_500: usize,
+    pub other_err: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendBucket {
+    pub start_epoch: i64,
+    pub end_epoch: i64,
+    pub ok_calls: usize,
+    pub err_calls: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardRawStats {
+    pub has_any_logs: bool,
+    pub total_reqs: usize,
+    pub ok_2xx: usize,
+    pub err_4xx: usize,
+    pub err_5xx: usize,
+    pub unrouted_reqs: usize,
+    pub fallback_count: usize,
+    pub ok_latency_sum_ms: i64,
+    pub ok_latency_samples: usize,
+    pub earliest_epoch: Option<i64>,
+    pub route_model_slices: Vec<RouteModelSlice>,
+    pub client_counts: Vec<(String, usize)>,
+    pub errors: ErrorBreakdown,
+    pub buckets: Vec<TrendBucket>,
+}
+
 /// True when `table` already has `column`; used to keep schema upgrades additive
 /// and repeatable on databases created by earlier versions.
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
@@ -262,13 +324,14 @@ impl Database {
             conn.execute("ALTER TABLE interceptor_state ADD COLUMN model TEXT", [])?;
         }
 
-        // 修复之前因流式响应直通未捕获导致 token 全为 0 的历史成功请求
+        // 清理早期版本按延迟公式伪造写入的虚假 Token 估算值，还原为真实 0 值
         let _ = conn.execute(
             "UPDATE request_logs
-             SET prompt_tokens = MAX(1500, CAST(latency_ms * 35 / 1000 * 3 AS INTEGER)),
-                 completion_tokens = MAX(30, CAST(latency_ms * 35 / 1000 AS INTEGER))
+             SET prompt_tokens = 0,
+                 completion_tokens = 0
              WHERE status_code >= 200 AND status_code < 300
-               AND prompt_tokens = 0 AND completion_tokens = 0",
+               AND prompt_tokens = MAX(1500, CAST(latency_ms * 35 / 1000 * 3 AS INTEGER))
+               AND completion_tokens = MAX(30, CAST(latency_ms * 35 / 1000 AS INTEGER))",
             [],
         );
 
@@ -510,6 +573,36 @@ impl Database {
         Ok(())
     }
 
+    fn map_request_log_row(row: &rusqlite::Row<'_>) -> Result<RequestLog, rusqlite::Error> {
+        let is_stream_int: i32 = row.get(14)?;
+        let fallback_int: i32 = row.get(15)?;
+        // Logs written before the attempts column existed have no chain.
+        let attempts_json: Option<String> = row.get(16)?;
+        let attempts = attempts_json
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+
+        Ok(RequestLog {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            method: row.get(2)?,
+            path: row.get(3)?,
+            client_type: row.get(4)?,
+            incoming_model: row.get(5)?,
+            routed_provider_id: row.get(6)?,
+            routed_provider_name: row.get(7)?,
+            routed_model: row.get(8)?,
+            status_code: row.get(9)?,
+            latency_ms: row.get(10)?,
+            prompt_tokens: row.get(11)?,
+            completion_tokens: row.get(12)?,
+            error_message: row.get(13)?,
+            is_stream: is_stream_int == 1,
+            fallback_used: fallback_int == 1,
+            attempts,
+        })
+    }
+
     pub fn get_logs(
         &self,
         limit: usize,
@@ -521,41 +614,293 @@ impl Database {
              FROM request_logs ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2",
         )?;
 
-        let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
-            let is_stream_int: i32 = row.get(14)?;
-            let fallback_int: i32 = row.get(15)?;
-            // Logs written before the attempts column existed have no chain.
-            let attempts_json: Option<String> = row.get(16)?;
-            let attempts = attempts_json
-                .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_default();
-
-            Ok(RequestLog {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                method: row.get(2)?,
-                path: row.get(3)?,
-                client_type: row.get(4)?,
-                incoming_model: row.get(5)?,
-                routed_provider_id: row.get(6)?,
-                routed_provider_name: row.get(7)?,
-                routed_model: row.get(8)?,
-                status_code: row.get(9)?,
-                latency_ms: row.get(10)?,
-                prompt_tokens: row.get(11)?,
-                completion_tokens: row.get(12)?,
-                error_message: row.get(13)?,
-                is_stream: is_stream_int == 1,
-                fallback_used: fallback_int == 1,
-                attempts,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![limit as i64, offset as i64],
+            Self::map_request_log_row,
+        )?;
 
         let mut logs = Vec::new();
         for r in rows {
             logs.push(r?);
         }
         Ok(logs)
+    }
+
+    pub fn get_logs_in_window(
+        &self,
+        since_epoch: Option<i64>,
+        errors_only: bool,
+        limit: usize,
+    ) -> Result<Vec<RequestLog>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used, attempts
+             FROM request_logs
+             WHERE (?1 IS NULL OR unixepoch(timestamp) >= ?1)
+               AND (?2 = 0 OR status_code < 200 OR status_code >= 300)
+             ORDER BY timestamp DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![since_epoch, if errors_only { 1 } else { 0 }, limit as i64],
+            Self::map_request_log_row,
+        )?;
+        let mut logs = Vec::new();
+        for r in rows {
+            logs.push(r?);
+        }
+        Ok(logs)
+    }
+
+    pub fn get_dashboard_stats(
+        &self,
+        since_epoch: Option<i64>,
+        fixed_buckets: Option<StatsBucketPlan>,
+        today_start_epoch: i64,
+    ) -> Result<DashboardRawStats, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let (any_count, earliest_epoch): (i64, Option<i64>) = conn.query_row(
+            "SELECT COUNT(*), MIN(unixepoch(timestamp)) FROM request_logs",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        if any_count == 0 {
+            return Ok(DashboardRawStats::default());
+        }
+
+        let (
+            total_reqs,
+            ok_2xx,
+            unrouted_reqs,
+            err_4xx,
+            err_5xx,
+            fallback_count,
+            ok_latency_sum_ms,
+            ok_latency_samples,
+            rate_limited_429,
+            auth_401_403,
+            not_found_404,
+            bad_request_4xx,
+            upstream_timeout_502_504,
+            upstream_500,
+        ): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn.query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN (status_code < 200 OR status_code >= 300) AND (routed_provider_id = 'none' OR trim(routed_provider_id) = '') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN (status_code >= 500 OR status_code < 200) AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN fallback_used != 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND latency_ms > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code = 429 AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code IN (401, 403) AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code = 404 AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 AND status_code NOT IN (401, 403, 404, 429) AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code IN (502, 503, 504) AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code = 500 AND routed_provider_id != 'none' AND trim(routed_provider_id) != '' THEN 1 ELSE 0 END), 0)
+             FROM request_logs
+             WHERE (?1 IS NULL OR unixepoch(timestamp) >= ?1)",
+            params![since_epoch],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                    r.get(13)?,
+                ))
+            },
+        )?;
+
+        let total_err = (total_reqs - ok_2xx).max(0) as usize;
+        let known_err = (unrouted_reqs
+            + rate_limited_429
+            + auth_401_403
+            + not_found_404
+            + bad_request_4xx
+            + upstream_timeout_502_504
+            + upstream_500)
+            .max(0) as usize;
+        let other_err = total_err.saturating_sub(known_err);
+
+        let mut slice_stmt = conn.prepare(
+            "SELECT
+                CASE WHEN trim(routed_provider_id) = '' THEN 'none' ELSE routed_provider_id END AS pid,
+                MAX(NULLIF(trim(routed_provider_name), '')) AS pname,
+                CASE
+                    WHEN trim(routed_model) != '' THEN trim(routed_model)
+                    WHEN trim(incoming_model) != '' THEN trim(incoming_model)
+                    ELSE 'unknown'
+                END AS eff_model,
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code < 200 OR status_code >= 300 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(MAX(prompt_tokens, 0)), 0),
+                COALESCE(SUM(MAX(completion_tokens, 0)), 0)
+             FROM request_logs
+             WHERE (?1 IS NULL OR unixepoch(timestamp) >= ?1)
+             GROUP BY pid, eff_model",
+        )?;
+        let slice_rows = slice_stmt.query_map(params![since_epoch], |r| {
+            let calls: i64 = r.get(3)?;
+            let ok_c: i64 = r.get(4)?;
+            let err_c: i64 = r.get(5)?;
+            let p_tok: i64 = r.get(6)?;
+            let c_tok: i64 = r.get(7)?;
+            Ok(RouteModelSlice {
+                provider_id: r.get(0)?,
+                provider_name: r.get(1)?,
+                model: r.get(2)?,
+                calls: calls.max(0) as usize,
+                ok_calls: ok_c.max(0) as usize,
+                err_calls: err_c.max(0) as usize,
+                prompt_tokens: p_tok.max(0) as u64,
+                completion_tokens: c_tok.max(0) as u64,
+            })
+        })?;
+        let mut route_model_slices = Vec::new();
+        for s in slice_rows {
+            route_model_slices.push(s?);
+        }
+
+        let mut client_stmt = conn.prepare(
+            "SELECT
+                CASE WHEN trim(client_type) = '' THEN 'unknown' ELSE trim(client_type) END AS ctype,
+                COUNT(*)
+             FROM request_logs
+             WHERE (?1 IS NULL OR unixepoch(timestamp) >= ?1)
+             GROUP BY ctype
+             ORDER BY COUNT(*) DESC",
+        )?;
+        let client_rows = client_stmt.query_map(params![since_epoch], |r| {
+            let c: String = r.get(0)?;
+            let cnt: i64 = r.get(1)?;
+            Ok((c, cnt.max(0) as usize))
+        })?;
+        let mut client_counts = Vec::new();
+        for c in client_rows {
+            client_counts.push(c?);
+        }
+
+        let plan = fixed_buckets.unwrap_or_else(|| {
+            let tomorrow_start = today_start_epoch + 86_400;
+            let earliest = earliest_epoch
+                .unwrap_or(today_start_epoch)
+                .min(today_start_epoch);
+            let raw_days = ((tomorrow_start - earliest + 86_399) / 86_400).max(1);
+            if raw_days <= 14 {
+                let days = raw_days.max(7) as usize;
+                StatsBucketPlan {
+                    start_epoch: tomorrow_start - (days as i64) * 86_400,
+                    step_secs: 86_400,
+                    count: days,
+                }
+            } else {
+                let count = 14usize;
+                let days_per_bucket = ((raw_days + count as i64 - 1) / count as i64).max(1);
+                let total_days = days_per_bucket * count as i64;
+                StatsBucketPlan {
+                    start_epoch: tomorrow_start - total_days * 86_400,
+                    step_secs: days_per_bucket * 86_400,
+                    count,
+                }
+            }
+        });
+
+        let step = plan.step_secs.max(1);
+        let bucket_count = plan.count.max(1);
+        let mut buckets: Vec<TrendBucket> = (0..bucket_count)
+            .map(|i| {
+                let s = plan.start_epoch + (i as i64) * step;
+                TrendBucket {
+                    start_epoch: s,
+                    end_epoch: s + step,
+                    ok_calls: 0,
+                    err_calls: 0,
+                }
+            })
+            .collect();
+
+        let range_end = plan.start_epoch + (bucket_count as i64) * step;
+        let mut bucket_stmt = conn.prepare(
+            "SELECT
+                CAST((unixepoch(timestamp) - ?1) / ?2 AS INTEGER) AS slot,
+                COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status_code < 200 OR status_code >= 300 THEN 1 ELSE 0 END), 0)
+             FROM request_logs
+             WHERE (?3 IS NULL OR unixepoch(timestamp) >= ?3)
+               AND unixepoch(timestamp) >= ?1
+               AND unixepoch(timestamp) < ?4
+             GROUP BY slot",
+        )?;
+        let b_rows = bucket_stmt.query_map(
+            params![plan.start_epoch, step, since_epoch, range_end],
+            |r| {
+                let slot: i64 = r.get(0)?;
+                let ok_c: i64 = r.get(1)?;
+                let err_c: i64 = r.get(2)?;
+                Ok((slot, ok_c.max(0) as usize, err_c.max(0) as usize))
+            },
+        )?;
+        for b in b_rows {
+            let (slot, ok_c, err_c) = b?;
+            if slot >= 0 && (slot as usize) < buckets.len() {
+                buckets[slot as usize].ok_calls = ok_c;
+                buckets[slot as usize].err_calls = err_c;
+            }
+        }
+
+        Ok(DashboardRawStats {
+            has_any_logs: true,
+            total_reqs: total_reqs.max(0) as usize,
+            ok_2xx: ok_2xx.max(0) as usize,
+            err_4xx: err_4xx.max(0) as usize,
+            err_5xx: err_5xx.max(0) as usize,
+            unrouted_reqs: unrouted_reqs.max(0) as usize,
+            fallback_count: fallback_count.max(0) as usize,
+            ok_latency_sum_ms: ok_latency_sum_ms.max(0),
+            ok_latency_samples: ok_latency_samples.max(0) as usize,
+            earliest_epoch,
+            route_model_slices,
+            client_counts,
+            errors: ErrorBreakdown {
+                unrouted: unrouted_reqs.max(0) as usize,
+                rate_limited_429: rate_limited_429.max(0) as usize,
+                auth_401_403: auth_401_403.max(0) as usize,
+                not_found_404: not_found_404.max(0) as usize,
+                bad_request_4xx: bad_request_4xx.max(0) as usize,
+                upstream_timeout_502_504: upstream_timeout_502_504.max(0) as usize,
+                upstream_500: upstream_500.max(0) as usize,
+                other_err,
+            },
+            buckets,
+        })
     }
 
     pub fn clear_logs(&self) -> Result<(), rusqlite::Error> {
@@ -570,15 +915,27 @@ impl Database {
         prompt_tokens: i32,
         completion_tokens: i32,
         latency_ms: i64,
-    ) -> Result<(), rusqlite::Error> {
+    ) -> Result<Option<RequestLog>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE request_logs
              SET prompt_tokens = ?1, completion_tokens = ?2, latency_ms = MAX(latency_ms, ?3)
              WHERE id = ?4",
             params![prompt_tokens, completion_tokens, latency_ms, id],
         )?;
-        Ok(())
+        if changed == 0 {
+            return Ok(None);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, method, path, client_type, incoming_model, routed_provider_id, routed_provider_name, routed_model, status_code, latency_ms, prompt_tokens, completion_tokens, error_message, is_stream, fallback_used, attempts
+             FROM request_logs WHERE id = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![id], Self::map_request_log_row)?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn save_interceptor_state(
@@ -1047,6 +1404,151 @@ mod provider_tests {
         assert_eq!(stored[0].attempts[0].status, 500);
         assert_eq!(stored[0].attempts[0].error.as_deref(), Some("upstream exploded"));
         assert_eq!(stored[0].attempts[1].latency_ms, 31);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cleans_up_legacy_fabricated_tokens_without_touching_real_usage() {
+        let path = temp_db_path("legacy_tokens");
+        let db = Database::new(path.clone()).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Simulate a row fabricated by the legacy latency formula (latency_ms = 2000 -> c = 70, p = 1500)
+        let mut fake_log = RequestLog {
+            id: "fake-1".into(),
+            timestamp: now.clone(),
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            client_type: "claude_code".into(),
+            incoming_model: "claude-sonnet-4".into(),
+            routed_provider_id: "p1".into(),
+            routed_provider_name: Some("P1".into()),
+            routed_model: "claude-sonnet-4".into(),
+            status_code: 200,
+            latency_ms: 2000,
+            prompt_tokens: 1500,
+            completion_tokens: 70,
+            error_message: None,
+            is_stream: true,
+            fallback_used: false,
+            attempts: vec![],
+        };
+        db.insert_log(&fake_log).unwrap();
+
+        // Real usage row must remain untouched
+        fake_log.id = "real-1".into();
+        fake_log.prompt_tokens = 1842;
+        fake_log.completion_tokens = 315;
+        db.insert_log(&fake_log).unwrap();
+
+        db.init_tables().unwrap();
+
+        let logs = db.get_logs(10, 0).unwrap();
+        let cleaned = logs.iter().find(|l| l.id == "fake-1").unwrap();
+        let kept = logs.iter().find(|l| l.id == "real-1").unwrap();
+        assert_eq!((cleaned.prompt_tokens, cleaned.completion_tokens), (0, 0));
+        assert_eq!((kept.prompt_tokens, kept.completion_tokens), (1842, 315));
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dashboard_stats_separate_unrouted_errors_and_ok_latency() {
+        let path = temp_db_path("dash_stats");
+        let db = Database::new(path.clone()).unwrap();
+        let now_dt = chrono::Utc::now();
+        let now_str = now_dt.to_rfc3339();
+        let now_sec = now_dt.timestamp();
+        let today_start = now_sec - (now_sec.rem_euclid(86_400));
+
+        // 1) 200 stream request updated after completion
+        db.insert_log(&RequestLog {
+            id: "ok-1".into(),
+            timestamp: now_str.clone(),
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            client_type: "claude_code".into(),
+            incoming_model: "gemini-2.5-pro".into(),
+            routed_provider_id: "ag".into(),
+            routed_provider_name: Some("Antigravity".into()),
+            routed_model: "gemini-2.5-pro".into(),
+            status_code: 200,
+            latency_ms: 120,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: None,
+            is_stream: true,
+            fallback_used: false,
+            attempts: vec![],
+        })
+        .unwrap();
+        let updated = db
+            .update_request_log_tokens("ok-1", 1000, 250, 1400)
+            .unwrap()
+            .expect("updated log returned");
+        assert_eq!(updated.prompt_tokens, 1000);
+        assert_eq!(updated.completion_tokens, 250);
+        assert_eq!(updated.latency_ms, 1400);
+
+        // 2) Unrouted 502 error (must be classified as unrouted, NOT upstream_timeout_502_504)
+        db.insert_log(&RequestLog {
+            id: "unrouted-1".into(),
+            timestamp: now_str.clone(),
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            client_type: "claude_code".into(),
+            incoming_model: "unknown-model".into(),
+            routed_provider_id: "none".into(),
+            routed_provider_name: None,
+            routed_model: "".into(),
+            status_code: 502,
+            latency_ms: 2,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some("No provider supports unknown-model".into()),
+            is_stream: true,
+            fallback_used: false,
+            attempts: vec![],
+        })
+        .unwrap();
+
+        // 3) Real upstream 504 timeout (60000ms must NOT pollute ok_latency_sum_ms)
+        db.insert_log(&RequestLog {
+            id: "timeout-1".into(),
+            timestamp: now_str,
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            client_type: "codex".into(),
+            incoming_model: "gpt-5".into(),
+            routed_provider_id: "ag".into(),
+            routed_provider_name: Some("Antigravity".into()),
+            routed_model: "gpt-5".into(),
+            status_code: 504,
+            latency_ms: 60_000,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some("Gateway timeout".into()),
+            is_stream: true,
+            fallback_used: true,
+            attempts: vec![],
+        })
+        .unwrap();
+
+        let stats = db.get_dashboard_stats(None, None, today_start).unwrap();
+        assert_eq!(stats.total_reqs, 3);
+        assert_eq!(stats.ok_2xx, 1);
+        assert_eq!(stats.unrouted_reqs, 1);
+        assert_eq!(stats.err_5xx, 1);
+        assert_eq!(stats.errors.unrouted, 1);
+        assert_eq!(stats.errors.upstream_timeout_502_504, 1);
+        assert_eq!(stats.ok_latency_samples, 1);
+        assert_eq!(stats.ok_latency_sum_ms, 1400);
+
+        let err_logs = db.get_logs_in_window(None, true, 50).unwrap();
+        assert_eq!(err_logs.len(), 2);
+
         drop(db);
         let _ = std::fs::remove_file(path);
     }
