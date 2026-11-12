@@ -367,6 +367,27 @@ mod macos {
         item
     }
 
+    unsafe fn is_gpui_main_window(win: id) -> bool {
+        if win == nil {
+            return false;
+        }
+        if let Some(gpui_cls) = Class::get("GPUIWindow") {
+            let is_gpui: BOOL = msg_send![win, isKindOfClass: gpui_cls];
+            if is_gpui == NO {
+                return false;
+            }
+        } else {
+            const NS_WINDOW_STYLE_MASK_TITLED: usize = 1 << 0;
+            let style_mask: usize = msg_send![win, styleMask];
+            let level: isize = msg_send![win, level];
+            if (style_mask & NS_WINDOW_STYLE_MASK_TITLED) == 0 || level != 0 {
+                return false;
+            }
+        }
+        let can_main: BOOL = msg_send![win, canBecomeMainWindow];
+        can_main == YES
+    }
+
     unsafe fn unhide_and_focus_app_windows() {
         let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
         if ns_app == nil {
@@ -378,15 +399,19 @@ mod macos {
             let count: usize = msg_send![windows, count];
             for i in 0..count {
                 let win: id = msg_send![windows, objectAtIndex: i];
-                if win != nil {
-                    let can_key: BOOL = msg_send![win, canBecomeKeyWindow];
-                    if can_key == YES {
-                        let is_mini: BOOL = msg_send![win, isMiniaturized];
-                        if is_mini == YES {
-                            let _: () = msg_send![win, deminiaturize: nil];
-                        }
-                        let _: () = msg_send![win, makeKeyAndOrderFront: nil];
+                if is_gpui_main_window(win) {
+                    let is_mini: BOOL = msg_send![win, isMiniaturized];
+                    if is_mini == YES {
+                        let _: () = msg_send![win, deminiaturize: nil];
                     }
+                    let is_visible: BOOL = msg_send![win, isVisible];
+                    if is_visible == NO {
+                        let view: id = msg_send![win, contentView];
+                        if view != nil {
+                            let _: () = msg_send![view, setNeedsDisplay: YES];
+                        }
+                    }
+                    let _: () = msg_send![win, makeKeyAndOrderFront: nil];
                 }
             }
         }
@@ -840,14 +865,8 @@ mod macos {
                 };
 
                 if let Some(cmd) = cmd_opt {
-                    match &cmd {
-                        TrayCommand::ShowWindow { .. } => {
-                            unhide_and_focus_app_windows();
-                        }
-                        TrayCommand::QuitApp => {
-                            mark_quitting();
-                        }
-                        _ => {}
+                    if matches!(cmd, TrayCommand::QuitApp) {
+                        mark_quitting();
                     }
                     if let Some(tx) = TRAY_TX.get() {
                         let _ = tx.send(cmd);

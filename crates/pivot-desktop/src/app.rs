@@ -474,9 +474,10 @@ impl PivotApp {
                         }
                         if open_add_provider {
                             app.pending_open_add_provider = true;
-                            cx.notify();
                         }
+                        tray::reveal_main_window();
                         cx.activate(true);
+                        cx.notify();
                     }
                     TrayCommand::ToggleClient { client_id } => {
                         if let Some(client) =
@@ -485,9 +486,9 @@ impl PivotApp {
                             if client.is_overwritten
                                 || (!client.is_intercepted && client.conflict.is_some())
                             {
-                                tray::reveal_main_window();
                                 app.switch_tab(ActiveTab::Clients, cx);
                                 app.conflict_target = Some(client);
+                                tray::reveal_main_window();
                                 cx.activate(true);
                                 cx.notify();
                             } else {
