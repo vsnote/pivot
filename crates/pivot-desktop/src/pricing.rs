@@ -1,9 +1,52 @@
 #![allow(dead_code)]
 
 use crate::i18n::Locale;
+use chrono::{Local, TimeZone, Utc};
 use pivot_core::db::RequestLog;
 use pivot_core::service;
+use pivot_core::state::AppState;
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TodayUsageSummary {
+    pub requests: usize,
+    pub tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub fn compute_today_summary_from_db(
+    state: &AppState,
+    rates: &HashMap<String, ModelRate>,
+) -> TodayUsageSummary {
+    let now_utc = Utc::now();
+    let now_sec = now_utc.timestamp();
+    let local_now = now_utc.with_timezone(&Local);
+    let today_start_epoch = local_now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .map(|dt| dt.with_timezone(&Utc).timestamp())
+        .unwrap_or_else(|| now_sec - now_sec.rem_euclid(86_400));
+
+    let Ok(raw) =
+        service::get_dashboard_stats(state, Some(today_start_epoch), None, today_start_epoch)
+    else {
+        return TodayUsageSummary::default();
+    };
+
+    let mut tokens = 0u64;
+    let mut cost_usd = 0.0f64;
+    for s in &raw.route_model_slices {
+        tokens += s.prompt_tokens + s.completion_tokens;
+        cost_usd += estimate_cost(rates, &s.model, s.prompt_tokens, s.completion_tokens);
+    }
+
+    TodayUsageSummary {
+        requests: raw.total_reqs,
+        tokens,
+        cost_usd,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelRate {

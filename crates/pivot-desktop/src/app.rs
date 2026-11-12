@@ -1,17 +1,24 @@
 use crate::components::confirm_dialog::{render_confirm_dialog, ConfirmDialogSpec, ConfirmVariant};
 use crate::components::header::render_header;
 use crate::components::icons::lucide_icon;
-use crate::i18n::Locale;
-use crate::pricing::{build_rate_map, ModelRate};
+use crate::i18n::{client_type_label, Locale};
+use crate::pricing::{
+    build_rate_map, compute_today_summary_from_db, ModelRate, TodayUsageSummary,
+};
 use crate::theme::{
     load_provider_pools, load_ui_preferences, remove_provider_pool, save_provider_pool,
     save_ui_preferences, sync_gpui_component_theme, ThemePalette, ThemePreference, UiPreferences,
 };
-use crate::tray::{self, TrayCommand};
+use crate::tray::{
+    self, TrayClientItem, TrayCommand, TrayMenuSnapshot, TrayModelOption, TrayProviderItem,
+    TrayProviderModelGroup, TrayUpdateBanner,
+};
 use crate::updater::{
     self, InstallProgressEvent, UpdateCheckState, UpdateReleaseInfo, RELEASE_LATEST_PAGE_URL,
 };
-use crate::views::clients::model_select::resolve_default_model_for_client;
+use crate::views::clients::model_select::{
+    build_grouped_models, resolve_default_model_for_client, resolve_display_label,
+};
 use crate::views::clients::{
     render_client_model_popover, render_clients_view, render_conflict_dialog,
     ClientModelSelectState,
@@ -148,6 +155,7 @@ pub struct PivotApp {
     pub universal_card_expanded: bool,
 
     pub logs: Vec<RequestLog>,
+    pub today_summary: TodayUsageSummary,
     pub dashboard_stats: DashboardRawStats,
     pub dashboard_sub_view: DashboardSubView,
     pub dashboard_range: DashboardTimeRange,
@@ -160,6 +168,7 @@ pub struct PivotApp {
     pub update_state: UpdateCheckState,
     pub update_version: Option<String>,
 
+    pub pending_open_add_provider: bool,
     pub pending_confirm: Option<PendingConfirm>,
     pub confirm_busy: bool,
     pub global_error: Option<String>,
@@ -258,6 +267,7 @@ impl PivotApp {
             client_model_select: None,
             universal_card_expanded: true,
             logs: Vec::new(),
+            today_summary: TodayUsageSummary::default(),
             dashboard_stats: DashboardRawStats::default(),
             dashboard_sub_view: DashboardSubView::Overview,
             dashboard_range: DashboardTimeRange::All,
@@ -268,17 +278,110 @@ impl PivotApp {
             settings_banner: None,
             update_state: UpdateCheckState::Idle,
             update_version: None,
+            pending_open_add_provider: false,
             pending_confirm: None,
             confirm_busy: false,
             global_error: None,
         };
 
+        app.sync_tray_snapshot();
         app.refresh_all(cx);
         app.spawn_log_listener(log_rx, cx);
         app.spawn_tray_listener(tray_rx, cx);
         app.spawn_periodic_poller(cx);
         app.check_for_updates_silently(cx);
         app
+    }
+
+    pub fn sync_tray_snapshot(&self) {
+        let locale = self.prefs.locale;
+        let grouped = build_grouped_models(&self.providers);
+
+        let model_groups: Vec<TrayProviderModelGroup> = grouped
+            .iter()
+            .map(|g| TrayProviderModelGroup {
+                provider_name: g.name.clone(),
+                models: g
+                    .models
+                    .iter()
+                    .map(|m| TrayModelOption {
+                        value: m.value.clone(),
+                        raw_id: m.label.clone(),
+                        label: m.label.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        let clients: Vec<TrayClientItem> = self
+            .interceptors
+            .iter()
+            .filter(|c| c.installed)
+            .map(|c| {
+                let fallback_default = resolve_default_model_for_client(&c.id, &self.providers);
+                let effective_model = c
+                    .model
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or(fallback_default)
+                    .unwrap_or_default();
+                let (display_model, _) = resolve_display_label(&effective_model, &grouped, "");
+                TrayClientItem {
+                    id: c.id.clone(),
+                    name: client_type_label(&c.id, locale),
+                    is_intercepted: c.is_intercepted,
+                    is_overwritten: c.is_overwritten,
+                    active_model_value: effective_model,
+                    active_model_display: display_model,
+                }
+            })
+            .collect();
+
+        let providers: Vec<TrayProviderItem> = self
+            .providers
+            .iter()
+            .map(|p| {
+                let sub_status = if is_subscription_provider(p) {
+                    self.sub_account_stats
+                        .get(&p.id)
+                        .map(|st| (st.available, st.total, st.has_auth_error))
+                } else {
+                    None
+                };
+                TrayProviderItem {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    enabled: p.enabled,
+                    sub_status,
+                }
+            })
+            .collect();
+
+        let update_banner = match &self.update_state {
+            UpdateCheckState::ReadyToRestart { version, .. } => {
+                TrayUpdateBanner::ReadyToRestart(version.clone())
+            }
+            UpdateCheckState::Available(info)
+            | UpdateCheckState::Downloading { info, .. }
+            | UpdateCheckState::Installing { info } => {
+                TrayUpdateBanner::Available(info.version.clone())
+            }
+            _ => match &self.update_version {
+                Some(ver) if !ver.is_empty() => TrayUpdateBanner::Available(ver.clone()),
+                _ => TrayUpdateBanner::None,
+            },
+        };
+
+        tray::update_tray_snapshot(TrayMenuSnapshot {
+            locale,
+            is_running: self.gateway_status.is_running,
+            port: self.gateway_status.port,
+            today: self.today_summary,
+            clients,
+            model_groups,
+            providers,
+            update_banner,
+        });
     }
 
     fn spawn_log_listener(
@@ -361,9 +464,49 @@ impl PivotApp {
             tray_rx = returned_rx;
 
             let ok = this
-                .update(cx, |_app, cx| match cmd {
-                    TrayCommand::ShowWindow => {
+                .update(cx, |app, cx| match cmd {
+                    TrayCommand::ShowWindow {
+                        tab,
+                        open_add_provider,
+                    } => {
+                        if let Some(target_tab) = tab {
+                            app.switch_tab(target_tab, cx);
+                        }
+                        if open_add_provider {
+                            app.pending_open_add_provider = true;
+                            cx.notify();
+                        }
                         cx.activate(true);
+                    }
+                    TrayCommand::ToggleClient { client_id } => {
+                        if let Some(client) =
+                            app.interceptors.iter().find(|c| c.id == client_id).cloned()
+                        {
+                            if client.is_overwritten
+                                || (!client.is_intercepted && client.conflict.is_some())
+                            {
+                                tray::reveal_main_window();
+                                app.switch_tab(ActiveTab::Clients, cx);
+                                app.conflict_target = Some(client);
+                                cx.activate(true);
+                                cx.notify();
+                            } else {
+                                let next_enable = !client.is_intercepted;
+                                app.handle_client_switch(client, next_enable, cx);
+                            }
+                        }
+                    }
+                    TrayCommand::SelectClientModel { client_id, model } => {
+                        app.select_client_model(client_id, model, cx);
+                    }
+                    TrayCommand::ToggleProvider {
+                        provider_id,
+                        enabled,
+                    } => {
+                        app.toggle_provider(provider_id, enabled, cx);
+                    }
+                    TrayCommand::CopyText(text) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                     TrayCommand::QuitApp => {
                         tray::mark_quitting();
@@ -389,11 +532,12 @@ impl PivotApp {
                     let gw = service::get_gateway_status(&st).await;
                     let inter = service::get_interceptor_status(&st).await;
                     let rates = build_rate_map();
-                    (gw, inter, rates)
+                    let today = compute_today_summary_from_db(&st, &rates);
+                    (gw, inter, rates, today)
                 })
                 .await;
 
-            let Ok((gw_res, inter_res, rates)) = poll_res else {
+            let Ok((gw_res, inter_res, rates, today)) = poll_res else {
                 break;
             };
 
@@ -415,6 +559,8 @@ impl PivotApp {
                     if !rates.is_empty() {
                         app.model_rates = rates;
                     }
+                    app.today_summary = today;
+                    app.sync_tray_snapshot();
                     cx.notify();
                 })
                 .is_ok();
@@ -445,11 +591,13 @@ impl PivotApp {
                         Ok(list) => collect_sub_stats(&state, list),
                         Err(_) => HashMap::new(),
                     };
-                    (p, i, raw_stats, l, gw, stats)
+                    let rates = build_rate_map();
+                    let today = compute_today_summary_from_db(&state, &rates);
+                    (p, i, raw_stats, l, gw, stats, rates, today)
                 })
                 .await;
 
-            if let Ok((p_res, i_res, raw_stats_res, l_res, gw_res, stats)) = res {
+            if let Ok((p_res, i_res, raw_stats_res, l_res, gw_res, stats, rates, today)) = res {
                 let _ = this.update(cx, |app, cx| {
                     if let Ok(providers) = p_res {
                         for prov in &providers {
@@ -488,8 +636,10 @@ impl PivotApp {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                     }
-                    app.model_rates = build_rate_map();
+                    app.model_rates = rates;
+                    app.today_summary = today;
                     app.initial_loaded = true;
+                    app.sync_tray_snapshot();
                     cx.notify();
                 });
             }
@@ -502,6 +652,7 @@ impl PivotApp {
         let handle = self.tokio_handle.clone();
         let range = self.dashboard_range;
         let errors_only = self.dashboard_log_filter == DashboardLogFilter::Errors;
+        let rates = self.model_rates.clone();
 
         cx.spawn(async move |this, cx| {
             let res = handle
@@ -510,11 +661,12 @@ impl PivotApp {
                     let raw_stats =
                         service::get_dashboard_stats(&state, since, buckets, today_start);
                     let logs = service::get_logs_in_window(&state, since, errors_only, 200);
-                    (raw_stats, logs)
+                    let today = compute_today_summary_from_db(&state, &rates);
+                    (raw_stats, logs, today)
                 })
                 .await;
 
-            if let Ok((stats_res, logs_res)) = res {
+            if let Ok((stats_res, logs_res, today)) = res {
                 let _ = this.update(cx, |app, cx| {
                     if let Ok(st) = stats_res {
                         resolve_display_names_for_models(
@@ -530,6 +682,8 @@ impl PivotApp {
                         );
                         app.logs = logs;
                     }
+                    app.today_summary = today;
+                    app.sync_tray_snapshot();
                     cx.notify();
                 });
             }
@@ -576,6 +730,7 @@ impl PivotApp {
                     if let Ok(interceptors) = inter_res {
                         app.interceptors = interceptors;
                     }
+                    app.sync_tray_snapshot();
                     cx.notify();
                 });
             }
@@ -747,6 +902,7 @@ impl PivotApp {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == id) {
             p.enabled = enabled;
         }
+        self.sync_tray_snapshot();
         cx.notify();
 
         let state = self.core_state.clone();
@@ -921,6 +1077,7 @@ impl PivotApp {
             let _ = this.update(cx, |app, cx| {
                 if let Ok(Ok(updated)) = res {
                     app.providers = updated;
+                    app.sync_tray_snapshot();
                 }
                 cx.notify();
             });
@@ -1922,6 +2079,7 @@ impl PivotApp {
         if let Some(c) = self.interceptors.iter_mut().find(|c| c.id == client_id) {
             c.model = Some(model.clone());
         }
+        self.sync_tray_snapshot();
         cx.notify();
 
         let state = self.core_state.clone();
@@ -1939,6 +2097,7 @@ impl PivotApp {
                         *slot = updated;
                     }
                 }
+                app.sync_tray_snapshot();
                 cx.notify();
             });
         })
@@ -2022,6 +2181,7 @@ impl PivotApp {
                         app.interceptors = list;
                     }
                 }
+                app.sync_tray_snapshot();
                 cx.notify();
             });
         })
@@ -2054,11 +2214,13 @@ impl PivotApp {
                 .await;
             let _ = this.update(cx, |app, cx| {
                 app.logs.clear();
+                app.today_summary = TodayUsageSummary::default();
                 app.dashboard_stats = DashboardRawStats::default();
                 app.expanded_log_id = None;
                 app.hovered_chart_bucket = None;
                 app.confirm_busy = false;
                 app.pending_confirm = None;
+                app.sync_tray_snapshot();
                 cx.notify();
             });
         })
@@ -2081,6 +2243,7 @@ impl PivotApp {
     pub fn set_locale_preference(&mut self, locale: Locale, cx: &mut Context<Self>) {
         self.prefs.locale = locale;
         save_ui_preferences(&self.prefs);
+        self.sync_tray_snapshot();
         cx.notify();
     }
 
@@ -2256,9 +2419,11 @@ impl PivotApp {
                             };
                             app.update_version = Some(manifest.version);
                             app.update_state = UpdateCheckState::Available(info);
+                            app.sync_tray_snapshot();
                         } else if !silent {
                             app.update_version = None;
                             app.update_state = UpdateCheckState::UpToDate;
+                            app.sync_tray_snapshot();
                         }
                     }
                     Ok(Err(err)) if !silent => {
@@ -2348,6 +2513,7 @@ impl PivotApp {
                             version: target_version,
                             app_bundle,
                         };
+                        app.sync_tray_snapshot();
                     }
                     Ok(Err(err)) => {
                         app.update_state = UpdateCheckState::Failed {
@@ -2615,6 +2781,13 @@ impl PivotApp {
 
 impl Render for PivotApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_open_add_provider {
+            self.pending_open_add_provider = false;
+            if !self.is_provider_editor_open {
+                self.open_editor(None, window, cx);
+            }
+        }
+
         let palette = ThemePalette::resolve(self.prefs.theme, window);
         sync_gpui_component_theme(palette.is_dark, Some(window), cx);
         tray::sync_macos_app_icon(palette.is_dark);
