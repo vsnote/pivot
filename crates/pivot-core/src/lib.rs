@@ -55,6 +55,7 @@ pub fn init_core(port: Option<u16>) -> Result<AppState, Box<dyn std::error::Erro
     let default_ua = format!("Pivot/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
     let http_client = reqwest::Client::builder()
         .user_agent(default_ua)
+        .connect_timeout(std::time::Duration::from_secs(15))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .tcp_keepalive(std::time::Duration::from_secs(60))
         .build()?;

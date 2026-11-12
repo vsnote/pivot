@@ -706,7 +706,7 @@ impl ProviderEditorState {
             enabled: prev.map(|p| p.enabled).unwrap_or(true),
             priority: prev.map(|p| p.priority).unwrap_or(10),
             weight: prev.map(|p| p.weight).unwrap_or(1),
-            timeout_secs: prev.map(|p| p.timeout_secs).unwrap_or(60),
+            timeout_secs: prev.map(|p| p.timeout_secs).unwrap_or(300),
             latency_ms: prev.and_then(|p| p.latency_ms),
             created_at: prev.and_then(|p| p.created_at.clone()),
             updated_at: prev.and_then(|p| p.updated_at.clone()),

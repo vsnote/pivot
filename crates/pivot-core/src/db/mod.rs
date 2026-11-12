@@ -240,7 +240,7 @@ impl Database {
                 enabled INTEGER NOT NULL DEFAULT 1,
                 priority INTEGER NOT NULL DEFAULT 0,
                 weight INTEGER NOT NULL DEFAULT 1,
-                timeout_secs INTEGER NOT NULL DEFAULT 60,
+                timeout_secs INTEGER NOT NULL DEFAULT 300,
                 latency_ms INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -335,9 +335,9 @@ impl Database {
             [],
         );
 
-        // 确保 Gemini / Antigravity 订阅池服务商超时时间至少为 180 秒，避免超大上下文与深度思考模型 60s 临界误杀
+        // 确保历史遗留 60s 默认超时的服务商提升至 300 秒，避免大上下文与深度思考模型（常需 200s+）被中途掐断
         let _ = conn.execute(
-            "UPDATE providers SET timeout_secs = 180 WHERE (protocol = 'gemini' OR preset_id = 'antigravity' OR auth_type = 'subscription_pool') AND timeout_secs < 180",
+            "UPDATE providers SET timeout_secs = 300 WHERE timeout_secs < 180",
             [],
         );
 

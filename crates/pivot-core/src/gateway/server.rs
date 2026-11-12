@@ -92,10 +92,33 @@ fn estimate_anthropic_req_prompt_tokens(req: &AnthropicMessageRequest) -> u32 {
             Value::String(s) => total += estimate_text_tokens(s),
             Value::Array(arr) => {
                 for item in arr {
-                    if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                    let block_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+                    if block_type == "image" {
+                        total += 1000;
+                    } else if let Some(t) = item.get("text").and_then(Value::as_str) {
                         total += estimate_text_tokens(t);
-                    } else if let Some(content) = item.get("content").and_then(|v| v.as_str()) {
-                        total += estimate_text_tokens(content);
+                    } else if let Some(thinking) = item.get("thinking").and_then(Value::as_str) {
+                        total += estimate_text_tokens(thinking);
+                    } else if let Some(input) = item.get("input") {
+                        total += estimate_text_tokens(&input.to_string());
+                    } else if let Some(content) = item.get("content") {
+                        match content {
+                            Value::String(s) => total += estimate_text_tokens(s),
+                            Value::Array(sub_arr) => {
+                                for sub in sub_arr {
+                                    if sub.get("type").and_then(Value::as_str) == Some("image") {
+                                        total += 1000;
+                                    } else if let Some(st) = sub.get("text").and_then(Value::as_str) {
+                                        total += estimate_text_tokens(st);
+                                    } else {
+                                        total += estimate_text_tokens(&sub.to_string());
+                                    }
+                                }
+                            }
+                            _ => total += estimate_text_tokens(&content.to_string()),
+                        }
+                    } else {
+                        total += estimate_text_tokens(&item.to_string());
                     }
                 }
             }
@@ -960,14 +983,50 @@ fn resolve_upstream_endpoint(base_url: &str, suffix: &str) -> String {
 }
 
 fn resolve_dispatch_timeout(cand: &RouteCandidate, estimated_prompt: u32) -> Duration {
-    let configured = cand.provider.timeout_secs.max(10) as u64;
-    // 对 Gemini、Antigravity 订阅池等超大上下文与深度思考模型，动态扩展超时，防止 400k~1M Token 提示词在 60s 临界被强掐
-    if cand.provider.protocol == "gemini" || cand.provider.auth_type.as_deref() == Some("subscription_pool") {
-        let base = configured.max(180);
-        let extra_scale = ((estimated_prompt as u64) / 50_000) * 15;
-        Duration::from_secs((base + extra_scale).min(600))
+    // 编程 Agent 与现代推理模型普遍伴随长上下文与深度思考阶段（实测 66k 上下文首包可达 210s+），
+    // 基础首包等待超时统一保底 300s，并随提示词体量动态扩展（自动上限 600s，若显式配置更高则尊重显式配置）；
+    // 网络连接不可达由全局 http_client 的 15s connect_timeout 快速拦截。
+    let base = cand.provider.timeout_secs.max(300) as u64;
+    let extra_scale = ((estimated_prompt as u64) / 50_000) * 15;
+    let max_cap = 600u64.max(base);
+    Duration::from_secs((base + extra_scale).min(max_cap))
+}
+
+fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut current = err.source();
+    while let Some(cause) = current {
+        let cause_str = cause.to_string();
+        if !cause_str.is_empty() && !msg.contains(&cause_str) {
+            msg.push_str(": ");
+            msg.push_str(&cause_str);
+        }
+        current = cause.source();
+    }
+    msg
+}
+
+fn map_upstream_request_error(err: &reqwest::Error, timeout: Duration) -> (StatusCode, String) {
+    let detail = format_error_chain(err);
+    if err.is_timeout() && !err.is_connect() {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "Upstream request timed out after {}s: {}",
+                timeout.as_secs(),
+                detail
+            ),
+        )
+    } else if err.is_timeout() {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("Upstream connect timed out: {}", detail),
+        )
     } else {
-        Duration::from_secs(configured)
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Upstream connection failed: {}", detail),
+        )
     }
 }
 
@@ -1012,26 +1071,17 @@ async fn dispatch_anthropic_request(
                 req_id,
             );
 
-            req_builder = apply_upstream_headers(
-                req_builder,
-                &cand.provider,
-                headers,
-                session_hint.as_deref(),
-                req_id,
-            );
-
             if let Some(key) = effective_key {
                 req_builder = req_builder
                     .header("x-api-key", key)
                     .header("authorization", format!("Bearer {}", key));
             }
 
-            let res = req_builder.json(&req_body).send().await.map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Upstream connection failed: {}", e),
-                )
-            })?;
+            let res = req_builder
+                .json(&req_body)
+                .send()
+                .await
+                .map_err(|e| map_upstream_request_error(&e, timeout))?;
 
             if !res.status().is_success() {
                 let status =
@@ -1176,12 +1226,11 @@ async fn dispatch_anthropic_request(
                 req_builder = req_builder.header("authorization", format!("Bearer {}", key));
             }
 
-            let res = req_builder.json(&openai_req).send().await.map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("OpenAI upstream connection failed: {}", e),
-                )
-            })?;
+            let res = req_builder
+                .json(&openai_req)
+                .send()
+                .await
+                .map_err(|e| map_upstream_request_error(&e, timeout))?;
 
             if !res.status().is_success() {
                 let status =
@@ -1474,17 +1523,17 @@ async fn dispatch_anthropic_request(
                 let res = match send_res {
                     Ok(r) => r,
                     Err(e) => {
-                        let is_timeout = e.is_timeout();
-                        let err_msg = format!("Gemini connection error: {}", e);
-                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_timeout {
+                        let is_req_timeout = e.is_timeout() && !e.is_connect();
+                        let (err_status, err_msg) = map_upstream_request_error(&e, timeout);
+                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_req_timeout {
                             if let Some(ref acc_id) = sub_account_id {
                                 crate::oauth::mark_account_cooldown(&state.db, acc_id, 30);
                             }
-                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", e);
-                            last_upstream_err = Some((StatusCode::BAD_GATEWAY, err_msg));
+                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", err_msg);
+                            last_upstream_err = Some((err_status, err_msg));
                             continue;
                         }
-                        return Err((StatusCode::BAD_GATEWAY, err_msg));
+                        return Err((err_status, err_msg));
                     }
                 };
 
@@ -2159,12 +2208,11 @@ async fn dispatch_chatgpt_request(
         .header("user-agent", crate::oauth::codex_user_agent())
         .header("content-type", "application/json");
 
-    let res = req_builder.json(&responses_body).send().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Upstream ChatGPT connection failed: {}", e),
-        )
-    })?;
+    let res = req_builder
+        .json(&responses_body)
+        .send()
+        .await
+        .map_err(|e| map_upstream_request_error(&e, timeout))?;
 
     if !res.status().is_success() {
         let status =
@@ -2339,12 +2387,11 @@ async fn dispatch_openai_request(
                 req_builder = req_builder.header("authorization", format!("Bearer {}", key));
             }
 
-            let res = req_builder.json(&req_body).send().await.map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Upstream connection failed: {}", e),
-                )
-            })?;
+            let res = req_builder
+                .json(&req_body)
+                .send()
+                .await
+                .map_err(|e| map_upstream_request_error(&e, timeout))?;
 
             if !res.status().is_success() {
                 let status =
@@ -2489,12 +2536,11 @@ async fn dispatch_openai_request(
                     .header("authorization", format!("Bearer {}", key));
             }
 
-            let res = req_builder.json(&anthropic_req).send().await.map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Anthropic upstream connection failed: {}", e),
-                )
-            })?;
+            let res = req_builder
+                .json(&anthropic_req)
+                .send()
+                .await
+                .map_err(|e| map_upstream_request_error(&e, timeout))?;
 
             if !res.status().is_success() {
                 let status =
@@ -2705,17 +2751,17 @@ async fn dispatch_openai_request(
                 let res = match send_res {
                     Ok(r) => r,
                     Err(e) => {
-                        let is_timeout = e.is_timeout();
-                        let err_msg = format!("Gemini upstream connection failed: {}", e);
-                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_timeout {
+                        let is_req_timeout = e.is_timeout() && !e.is_connect();
+                        let (err_status, err_msg) = map_upstream_request_error(&e, timeout);
+                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_req_timeout {
                             if let Some(ref acc_id) = sub_account_id {
                                 crate::oauth::mark_account_cooldown(&state.db, acc_id, 30);
                             }
-                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", e);
-                            last_upstream_err = Some((StatusCode::BAD_GATEWAY, err_msg));
+                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", err_msg);
+                            last_upstream_err = Some((err_status, err_msg));
                             continue;
                         }
-                        return Err((StatusCode::BAD_GATEWAY, err_msg));
+                        return Err((err_status, err_msg));
                     }
                 };
 
@@ -3282,17 +3328,17 @@ async fn dispatch_gemini_request(
                 let res = match send_res {
                     Ok(r) => r,
                     Err(e) => {
-                        let is_timeout = e.is_timeout();
-                        let err_msg = format!("Gemini upstream connection failed: {}", e);
-                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_timeout {
+                        let is_req_timeout = e.is_timeout() && !e.is_connect();
+                        let (err_status, err_msg) = map_upstream_request_error(&e, timeout);
+                        if is_subscription_pool && attempt_idx + 1 < max_account_attempts && !is_req_timeout {
                             if let Some(ref acc_id) = sub_account_id {
                                 crate::oauth::mark_account_cooldown(&state.db, acc_id, 30);
                             }
-                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", e);
-                            last_upstream_err = Some((StatusCode::BAD_GATEWAY, err_msg));
+                            tracing::warn!("Subscription account connection error ({}), trying next account in pool...", err_msg);
+                            last_upstream_err = Some((err_status, err_msg));
                             continue;
                         }
-                        return Err((StatusCode::BAD_GATEWAY, err_msg));
+                        return Err((err_status, err_msg));
                     }
                 };
 
@@ -3721,15 +3767,60 @@ mod tests {
             api_key: None,
         };
 
-        // Standard provider keeps configured timeout
-        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(60));
+        // Legacy 60s providers are elevated to at least 300s to prevent premature cutoff during thinking/long-context
+        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(300));
 
-        // Gemini protocol: base timeout defaults to at least 180s
+        // Anthropic protocol shares the same minimum 300s floor and dynamic context scaling
+        cand.provider.protocol = "anthropic".to_string();
+        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(300));
+        assert_eq!(resolve_dispatch_timeout(&cand, 200_000), Duration::from_secs(360));
+
+        // Explicit higher timeout_secs (e.g. 420s) is respected
+        cand.provider.timeout_secs = 420;
+        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(420));
+
+        // Gemini protocol: base timeout defaults to at least 300s and scales up to 600s cap
+        cand.provider.timeout_secs = 60;
         cand.provider.protocol = "gemini".to_string();
-        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(180));
+        assert_eq!(resolve_dispatch_timeout(&cand, 1000), Duration::from_secs(300));
+        assert_eq!(resolve_dispatch_timeout(&cand, 500_000), Duration::from_secs(450));
+        assert_eq!(resolve_dispatch_timeout(&cand, 2_000_000), Duration::from_secs(600));
+    }
 
-        // Large context (e.g. 500k prompt tokens) scales dynamically: 180 + (500k/50k)*15 = 180 + 150 = 330s
-        assert_eq!(resolve_dispatch_timeout(&cand, 500_000), Duration::from_secs(330));
+    #[tokio::test]
+    async fn test_map_upstream_request_error_distinguishes_timeout_and_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((_socket, _)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let timeout_err = client
+            .post(format!("http://{}/v1/messages", addr))
+            .timeout(Duration::from_millis(50))
+            .send()
+            .await
+            .unwrap_err();
+        let (status, msg) = map_upstream_request_error(&timeout_err, Duration::from_secs(180));
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(msg.contains("Upstream request timed out after 180s"), "unexpected msg: {}", msg);
+
+        // Closed port triggers connection refused -> 502 BAD_GATEWAY with underlying cause
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let conn_err = client
+            .post(format!("http://{}/v1/messages", dead_addr))
+            .send()
+            .await
+            .unwrap_err();
+        let (conn_status, conn_msg) = map_upstream_request_error(&conn_err, Duration::from_secs(180));
+        assert_eq!(conn_status, StatusCode::BAD_GATEWAY);
+        assert!(conn_msg.starts_with("Upstream connection failed:"), "unexpected msg: {}", conn_msg);
+        assert!(conn_msg.len() > "Upstream connection failed: error sending request for url ()".len());
     }
 
     #[test]
