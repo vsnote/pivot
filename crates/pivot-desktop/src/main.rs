@@ -56,6 +56,10 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
 
+            // 窗口创建前先设置 Dock 图标，避免先显示 bundle 内静态深色图标再闪变
+            let prefs = theme::load_ui_preferences();
+            tray::sync_macos_app_icon(theme::resolve_is_dark(prefs.theme, cx.window_appearance()));
+
             let tray_rx = tray::init_system_tray(app_state.port);
             let bounds = Bounds::centered(None, size(px(415.0), px(620.0)), cx);
 

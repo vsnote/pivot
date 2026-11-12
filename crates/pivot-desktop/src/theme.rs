@@ -75,13 +75,17 @@ pub fn remove_provider_pool(provider_id: &str) {
 }
 
 pub fn is_dark_appearance(pref: ThemePreference, window: &Window) -> bool {
+    resolve_is_dark(pref, window.appearance())
+}
+
+/// 按主题偏好与系统外观解析深浅色，无需窗口即可调用
+pub fn resolve_is_dark(pref: ThemePreference, system: WindowAppearance) -> bool {
     match pref {
         ThemePreference::Dark => true,
         ThemePreference::Light => false,
-        ThemePreference::System => matches!(
-            window.appearance(),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark
-        ),
+        ThemePreference::System => {
+            matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark)
+        }
     }
 }
 
