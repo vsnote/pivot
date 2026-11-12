@@ -320,7 +320,7 @@ fn render_universal_client_card(
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(palette.foreground)
-                                .child(locale.pick("OpenAI 兼容协议", "OpenAI Compatible")),
+                                .child(locale.pick("OpenAI 兼容", "OpenAI Compatible")),
                         )
                         .child(
                             div()
@@ -399,7 +399,7 @@ fn render_universal_client_card(
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(palette.foreground)
-                                .child(locale.pick("Anthropic 兼容协议", "Anthropic Compatible")),
+                                .child(locale.pick("Anthropic 兼容", "Anthropic Compatible")),
                         )
                         .child(
                             div()

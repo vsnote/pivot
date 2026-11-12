@@ -153,7 +153,7 @@ pub fn render_model_pool_section(
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(palette.foreground)
-                                .child(locale.pick("可用模型", "Models")),
+                                .child(locale.pick("模型", "Models")),
                         )
                         .child(
                             div()

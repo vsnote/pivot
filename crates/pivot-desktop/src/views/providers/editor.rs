@@ -897,7 +897,7 @@ fn render_preset_chooser(
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(palette.foreground)
                                         .truncate()
-                                        .child(locale.pick("自定义服务商", "Custom")),
+                                        .child(locale.pick("自定义", "Custom")),
                                 ),
                         );
                     }
@@ -1093,7 +1093,7 @@ fn render_api_key_fields(
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(palette.foreground)
-                                .child(locale.pick("服务商名称", "Name")),
+                                .child(locale.pick("名称", "Name")),
                         )
                         .when_some(editor.selected_preset.as_ref(), |el, pr| {
                             el.child(
@@ -1370,7 +1370,7 @@ fn render_api_key_fields(
                                         .text_size(px(10.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(palette.foreground)
-                                        .child(locale.pick("多密钥轮询", "Add Key")),
+                                        .child(locale.pick("添加密钥", "Add Key")),
                                 ),
                         ),
                 )
@@ -1617,7 +1617,7 @@ fn render_editor_footer(
         .border_color(palette.border)
         // 左侧：编辑已有服务商时展示删除按钮
         .child(if is_existing {
-            NativeButton::new(locale.pick("删除服务商", "Delete"), palette)
+            NativeButton::new(locale.pick("删除", "Delete"), palette)
                 .danger_ghost()
                 .sm()
                 .icon(IconName::Trash)

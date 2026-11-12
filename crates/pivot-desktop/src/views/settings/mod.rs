@@ -116,7 +116,7 @@ pub fn render_settings_view(
                 .flex()
                 .flex_col()
                 .child(render_section_header(
-                    locale.pick("通用偏好", "Preferences"),
+                    locale.pick("通用", "General"),
                     palette,
                 ))
                 .child(
@@ -131,7 +131,7 @@ pub fn render_settings_view(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(palette.foreground)
-                                .child(locale.pick("界面外观", "Appearance")),
+                                .child(locale.pick("外观", "Appearance")),
                         )
                         .child(render_segmented_tabs(
                             vec![
@@ -172,7 +172,7 @@ pub fn render_settings_view(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(palette.foreground)
-                                .child(locale.pick("界面语言", "Language")),
+                                .child(locale.pick("语言", "Language")),
                         )
                         .child(render_segmented_tabs(
                             vec![
@@ -206,13 +206,13 @@ pub fn render_settings_view(
                     palette,
                 ))
                 .child(render_shortcut_row(
-                    locale.pick("切换主导航标签", "Switch navigation tabs"),
+                    locale.pick("切换导航标签", "Switch navigation tabs"),
                     &["⌘", "1 ~ 4"],
                     false,
                     palette,
                 ))
                 .child(render_shortcut_row(
-                    locale.pick("新建服务商渠道", "Add new provider"),
+                    locale.pick("添加服务商", "Add provider"),
                     &["⌘", "N"],
                     true,
                     palette,
@@ -236,7 +236,7 @@ pub fn render_settings_view(
                 .flex()
                 .flex_col()
                 .child(render_section_header(
-                    locale.pick("配置备份与迁移", "Backup & Restore"),
+                    locale.pick("备份与恢复", "Backup & Restore"),
                     palette,
                 ))
                 .child(
@@ -250,7 +250,7 @@ pub fn render_settings_view(
                                 .text_size(px(11.0))
                                 .text_color(palette.muted_foreground)
                                 .child(locale.pick(
-                                    "导出或恢复所有服务商渠道、API 密钥池与模型配置 (.json)",
+                                    "导出或恢复所有服务商、API 密钥池与模型配置 (.json)",
                                     "Export or restore providers, API keys, and model pools (.json)",
                                 )),
                         )
@@ -262,7 +262,7 @@ pub fn render_settings_view(
                                 .flex_wrap()
                                 .child(
                                     NativeButton::new(
-                                        locale.pick("导出配置备份", "Export Backup"),
+                                        locale.pick("导出备份", "Export Backup"),
                                         palette,
                                     )
                                     .outline()
@@ -274,7 +274,7 @@ pub fn render_settings_view(
                                 )
                                 .child(
                                     NativeButton::new(
-                                        locale.pick("从备份文件恢复", "Restore Backup"),
+                                        locale.pick("恢复备份", "Restore Backup"),
                                         palette,
                                     )
                                     .outline()

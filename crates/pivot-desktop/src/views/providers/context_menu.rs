@@ -669,7 +669,7 @@ pub fn render_provider_context_menu(
                                 .child(if is_testing {
                                     locale.pick("正在测试延迟…", "Testing latency…")
                                 } else {
-                                    locale.pick("测试端点延迟", "Test Endpoint Latency")
+                                    locale.pick("测试延迟", "Test Latency")
                                 }),
                         )
                         .when_some(latency_ms.filter(|&ms| ms > 0), |el, ms| {
@@ -713,7 +713,7 @@ pub fn render_provider_context_menu(
                                 lucide_icon(IconName::Copy, 13.0, palette.muted_foreground)
                             })
                             .child(if is_url_copied {
-                                locale.pick("已复制接口地址", "Copied Base URL")
+                                locale.pick("已复制", "Copied")
                             } else {
                                 locale.pick("复制 Base URL", "Copy Base URL")
                             }),
@@ -744,7 +744,7 @@ pub fn render_provider_context_menu(
                             13.0,
                             palette.muted_foreground,
                         ))
-                        .child(locale.pick("编辑服务商配置...", "Edit Provider...")),
+                        .child(locale.pick("编辑服务商…", "Edit Provider…")),
                 )
                 // 删除服务商
                 .child(

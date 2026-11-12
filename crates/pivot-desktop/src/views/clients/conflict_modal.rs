@@ -300,7 +300,7 @@ pub fn render_conflict_dialog(
                                                 .child(if is_copied {
                                                     locale.pick("已复制", "Copied")
                                                 } else {
-                                                    locale.pick("复制命令", "Copy")
+                                                    locale.pick("复制", "Copy")
                                                 }),
                                         ),
                                 )

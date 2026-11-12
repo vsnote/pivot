@@ -459,7 +459,7 @@ mod macos {
                     locale.pick("网关运行中", "Gateway Running"),
                     snap.port
                 ),
-                Some(locale.pick("当前无已启用的服务商渠道", "No active providers enabled")),
+                Some(locale.pick("当前无已启用的服务商", "No active providers enabled")),
             )
         } else if has_sub_auth_error {
             (
@@ -654,11 +654,11 @@ mod macos {
 
         // 3. 服务商渠道快速启停与复制网关地址
         let providers_title = if snap.providers.is_empty() {
-            locale.pick("服务商渠道", "Providers").to_string()
+            locale.pick("服务商", "Providers").to_string()
         } else {
             format!(
                 "{} ({}/{})",
-                locale.pick("服务商渠道", "Providers"),
+                locale.pick("服务商", "Providers"),
                 enabled_providers,
                 snap.providers.len()
             )
@@ -668,7 +668,7 @@ mod macos {
             add_action_item(
                 providers_sub,
                 target,
-                locale.pick("添加服务商渠道…", "Add Provider…"),
+                locale.pick("添加服务商…", "Add Provider…"),
                 "",
                 STATE_OFF,
                 TrayCommand::ShowWindow {

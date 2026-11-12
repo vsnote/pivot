@@ -545,7 +545,7 @@ fn render_overview_body(
     );
 
     let kpi_latency = render_kpi_cell(
-        locale.pick("平均延迟", "Latency"),
+        locale.pick("延迟", "Latency"),
         if stats.ok_latency_samples > 0 {
             format_latency(avg_ok_latency)
         } else {
@@ -1071,7 +1071,7 @@ fn render_inline_trend(
 
     let title = match range {
         DashboardTimeRange::Hour => locale.pick("近 1 小时趋势", "Last 1h Trend"),
-        DashboardTimeRange::Today => locale.pick("今日调用趋势", "Today's Trend"),
+        DashboardTimeRange::Today => locale.pick("今日趋势", "Today's Trend"),
         DashboardTimeRange::Week => locale.pick("近 7 天趋势", "7-Day Trend"),
         DashboardTimeRange::All => locale.pick("调用趋势", "Traffic Trend"),
     };

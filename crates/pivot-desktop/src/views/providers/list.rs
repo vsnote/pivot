@@ -79,7 +79,7 @@ pub fn render_provider_list(
                 div()
                     .text_size(px(12.0))
                     .text_color(palette.muted_foreground)
-                    .child(locale.pick("尚未配置任何服务商渠道", "No provider channels configured yet")),
+                    .child(locale.pick("尚未添加服务商", "No providers configured yet")),
             )
             .child(
                 NativeButton::new(locale.pick("添加服务商", "Add Provider"), palette)

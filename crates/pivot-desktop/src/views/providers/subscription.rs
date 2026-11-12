@@ -159,7 +159,7 @@ pub fn render_subscription_section(
                                                 .text_size(px(10.5))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(palette.emerald_text)
-                                                .child(locale.pick("官方订阅", "Subscription")),
+                                                .child(locale.pick("订阅", "Subscription")),
                                         ),
                                 ),
                         ),
@@ -196,7 +196,7 @@ pub fn render_subscription_section(
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(palette.foreground)
-                                .child(locale.pick("账号池", "Accounts")),
+                                .child(locale.pick("账号", "Accounts")),
                         )
                         .child(if total_count > 0 {
                             div()
