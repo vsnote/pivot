@@ -204,7 +204,7 @@ pub fn render_dashboard_view(
     let app_for_sub = cx.entity();
     let app_for_range = cx.entity();
 
-    // 1. 紧凑单行顶栏：左侧「概览 | 流水」，右侧「1小时 | 今天 | 7天 | 全部」+ 清空
+    // 1. 紧凑单行顶栏：左侧「概览 | 日志」，右侧「1小时 | 今天 | 7天 | 全部」+ 清空
     let top_bar = div()
         .flex()
         .items_center()
@@ -218,7 +218,7 @@ pub fn render_dashboard_view(
                 ),
                 (
                     DashboardSubView::Logs,
-                    locale.pick("流水", "Logs").to_string(),
+                    locale.pick("日志", "Logs").to_string(),
                 ),
             ],
             sub_view,
@@ -375,7 +375,7 @@ fn render_empty_state(has_any_logs: bool, locale: Locale, palette: ThemePalette)
                     )
                 } else {
                     locale.pick(
-                        "通过已接管的客户端或通用端点发起调用后，这里将实时汇总流量与排障流水",
+                        "通过已接管的客户端或通用端点发起调用后，这里将实时汇总流量与请求日志",
                         "Traffic, costs, and request diagnostics will appear here in real time.",
                     )
                 }),
@@ -596,7 +596,7 @@ fn render_overview_body(
             cx,
         ));
 
-    // 2. 条件式异常诊断卡（仅在存在异常时渲染，点击任一错误直达异常流水）
+    // 2. 条件式异常诊断卡（仅在存在异常时渲染，点击任一错误直达异常日志）
     let diagnostics_card: Option<Div> = if err_total > 0 {
         Some(render_diagnostics_card(stats, locale, palette, cx))
     } else {
