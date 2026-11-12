@@ -1,6 +1,6 @@
 [package]
 name = "pivot-desktop"
-version = "0.3.2"
+version = "0.3.3"
 description = "Pivot High-Performance Native Desktop Client with GPUI"
 authors = ["Pivot"]
 edition = "2021"
