@@ -36,20 +36,7 @@ pub struct ClientModelSelectState {
 }
 
 fn provider_slug_prefix(name: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for ch in name.trim().to_lowercase().chars() {
-        if ch.is_whitespace() {
-            if !prev_dash {
-                out.push('-');
-                prev_dash = true;
-            }
-        } else {
-            out.push(ch);
-            prev_dash = false;
-        }
-    }
-    out
+    pivot_core::gateway::router::provider_route_prefix(name)
 }
 
 pub fn build_grouped_models(providers: &[Provider]) -> Vec<GroupedModel> {
@@ -107,72 +94,70 @@ pub fn build_grouped_models(providers: &[Provider]) -> Vec<GroupedModel> {
 }
 
 pub fn resolve_default_model_for_client(client_id: &str, providers: &[Provider]) -> Option<String> {
-    let active: Vec<&Provider> = providers
-        .iter()
-        .filter(|p| p.enabled && !p.models.is_empty())
-        .collect();
-
-    if active.is_empty() {
+    let groups = build_grouped_models(providers);
+    if groups.is_empty() {
         return None;
     }
 
+    let find_first_value = |grp: &GroupedModel| -> Option<String> {
+        grp.models.first().map(|m| m.value.clone())
+    };
+    let find_matching_value = |grp: &GroupedModel, pred: fn(&str) -> bool| -> Option<String> {
+        grp.models
+            .iter()
+            .find(|m| pred(&m.label))
+            .map(|m| m.value.clone())
+    };
+
     match client_id {
         "claude_code" => {
-            for p in &active {
-                if p.protocol == "anthropic" || p.name.to_lowercase().contains("anthropic") {
-                    if let Some(first) = p.models.first() {
-                        return Some(first.clone());
+            for grp in &groups {
+                if grp.protocol == "anthropic" || grp.name.to_lowercase().contains("anthropic") {
+                    if let Some(v) = find_first_value(grp) {
+                        return Some(v);
                     }
                 }
-                if let Some(m) = p
-                    .models
-                    .iter()
-                    .find(|name| name.to_lowercase().contains("claude"))
-                {
-                    return Some(m.clone());
+                if let Some(v) = find_matching_value(grp, |name| name.to_lowercase().contains("claude")) {
+                    return Some(v);
                 }
             }
         }
         "codex_cli" => {
-            for p in &active {
-                let lower_name = p.name.to_lowercase();
-                if p.protocol == "openai"
-                    || p.protocol == "chatgpt"
+            for grp in &groups {
+                let lower_name = grp.name.to_lowercase();
+                if grp.protocol == "openai"
+                    || grp.protocol == "chatgpt"
                     || lower_name.contains("openai")
                     || lower_name.contains("chatgpt")
                 {
-                    if let Some(first) = p.models.first() {
-                        return Some(first.clone());
+                    if let Some(v) = find_first_value(grp) {
+                        return Some(v);
                     }
                 }
-                if let Some(m) = p.models.iter().find(|name| {
+                if let Some(v) = find_matching_value(grp, |name| {
                     let lower = name.to_lowercase();
                     lower.contains("gpt") || lower.contains("codex")
                 }) {
-                    return Some(m.clone());
+                    return Some(v);
                 }
             }
         }
         "gemini_cli" => {
-            for p in &active {
-                if p.protocol == "gemini" || p.name.to_lowercase().contains("gemini") {
-                    if let Some(first) = p.models.first() {
-                        return Some(first.clone());
+            for grp in &groups {
+                if grp.protocol == "gemini" || grp.name.to_lowercase().contains("gemini") {
+                    if let Some(v) = find_first_value(grp) {
+                        return Some(v);
                     }
                 }
-                if let Some(m) = p
-                    .models
-                    .iter()
-                    .find(|name| name.to_lowercase().contains("gemini"))
-                {
-                    return Some(m.clone());
+                if let Some(v) = find_matching_value(grp, |name| name.to_lowercase().contains("gemini")) {
+                    return Some(v);
                 }
             }
         }
         _ => {}
     }
 
-    active.first().and_then(|p| p.models.first().cloned())
+    groups.first().and_then(find_first_value)
 }
 
 pub fn resolve_display_label(
@@ -437,8 +422,9 @@ pub fn render_client_model_popover(
                         );
 
                     for (m_idx, opt) in grp.models.iter().enumerate() {
+                        let has_dup = opt.value != opt.label;
                         let is_selected = cur_val == opt.value
-                            || (cur_val == opt.label && !cur_val.contains('/'));
+                            || (!has_dup && cur_val == opt.label && !cur_val.contains('/'));
                         let cid = client_id.clone();
                         let next_val = opt.value.clone();
 

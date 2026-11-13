@@ -70,27 +70,77 @@ pub fn current_platform_key() -> &'static str {
 }
 
 pub fn is_newer_semver(remote: &str, local: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.trim()
-            .trim_start_matches('v')
-            .split(['.', '-'])
-            .take(3)
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
-    };
-    let r = parse(remote);
-    let l = parse(local);
-    for i in 0..3 {
-        let rv = r.get(i).copied().unwrap_or(0);
-        let lv = l.get(i).copied().unwrap_or(0);
-        if rv > lv {
-            return true;
+    fn parse_semver(s: &str) -> Option<((u64, u64, u64), Option<String>)> {
+        let cleaned = s
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .split('+')
+            .next()
+            .unwrap_or("");
+        if cleaned.is_empty() {
+            return None;
         }
-        if rv < lv {
-            return false;
+        let (core_str, pre_str) = match cleaned.split_once('-') {
+            Some((core, pre)) if !pre.is_empty() => (core, Some(pre.to_string())),
+            Some((core, _)) => (core, None),
+            None => (cleaned, None),
+        };
+        let mut nums = [0u64; 3];
+        let parts: Vec<&str> = core_str.split('.').collect();
+        if parts.is_empty() || parts.len() > 3 {
+            return None;
+        }
+        for (idx, part) in parts.iter().enumerate() {
+            if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            nums[idx] = part.parse::<u64>().ok()?;
+        }
+        Some(((nums[0], nums[1], nums[2]), pre_str))
+    }
+
+    fn cmp_prerelease_segment(a: &str, b: &str) -> std::cmp::Ordering {
+        let a_is_num = !a.is_empty() && a.chars().all(|c| c.is_ascii_digit());
+        let b_is_num = !b.is_empty() && b.chars().all(|c| c.is_ascii_digit());
+        match (a_is_num, b_is_num) {
+            (true, true) => {
+                let an = a.parse::<u64>().unwrap_or(0);
+                let bn = b.parse::<u64>().unwrap_or(0);
+                an.cmp(&bn)
+            }
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => a.cmp(b),
         }
     }
-    false
+
+    let Some((r_core, r_pre)) = parse_semver(remote) else {
+        return false;
+    };
+    let Some((l_core, l_pre)) = parse_semver(local) else {
+        return false;
+    };
+
+    if r_core != l_core {
+        return r_core > l_core;
+    }
+
+    match (r_pre, l_pre) {
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (None, None) => false,
+        (Some(rp), Some(lp)) => {
+            let r_parts: Vec<&str> = rp.split('.').collect();
+            let l_parts: Vec<&str> = lp.split('.').collect();
+            for (ra, la) in r_parts.iter().zip(l_parts.iter()) {
+                let ord = cmp_prerelease_segment(ra, la);
+                if ord != std::cmp::Ordering::Equal {
+                    return ord == std::cmp::Ordering::Greater;
+                }
+            }
+            r_parts.len() > l_parts.len()
+        }
+    }
 }
 
 pub fn parse_manifest_for_platform(
@@ -757,5 +807,15 @@ mod tests {
         assert!(plist_installed.contains("0.3.2"));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_is_newer_semver_prerelease_and_build() {
+        assert!(is_newer_semver("1.0.0", "1.0.0-rc.1"));
+        assert!(!is_newer_semver("1.0.0-rc.1", "1.0.0"));
+        assert!(is_newer_semver("1.0.0-beta.10", "1.0.0-beta.2"));
+        assert!(is_newer_semver("1.0.0-rc.1", "1.0.0-beta.9"));
+        assert!(!is_newer_semver("v1.0.0+build.2", "1.0.0+build.1"));
+        assert!(is_newer_semver("v1.0.1", "1.0.0-alpha.1"));
     }
 }

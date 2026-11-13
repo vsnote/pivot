@@ -57,7 +57,7 @@ pub fn compute_time_window(
             let aligned_end = ((now_sec / 300) + 1) * 300;
             let start = aligned_end - 12 * 300;
             (
-                Some(now_sec - 3600),
+                Some(start),
                 Some(StatsBucketPlan {
                     start_epoch: start,
                     step_secs: 300,

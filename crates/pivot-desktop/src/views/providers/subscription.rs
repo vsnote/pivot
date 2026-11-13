@@ -37,7 +37,7 @@ fn clean_quota_label(label: &str) -> String {
 }
 
 fn is_account_auth_expired(acc: &SubscriptionAccount, quota: Option<&AccountQuota>, now_ts: i64) -> bool {
-    if acc.cooldown_until - now_ts > 3600 {
+    if acc.auth_invalid {
         return true;
     }
     if acc.refresh_token.as_deref().unwrap_or("").is_empty()

@@ -369,10 +369,11 @@ pub fn render_provider_context_menu(
                             // 当前选中账号邮箱与状态
                             .when_some(active_account.as_ref(), |col, acc| {
                                 let email_label = acc.email.clone().unwrap_or_else(|| {
+                                    let short_id: String = acc.id.chars().take(8).collect();
                                     format!(
                                         "{} {}",
                                         locale.pick("账号", "Account"),
-                                        &acc.id[..acc.id.len().min(8)]
+                                        short_id
                                     )
                                 });
                                 let is_cd = acc.cooldown_until > now_sec;

@@ -126,6 +126,9 @@ impl NativeTextInput {
             inner = inner.suffix(suf);
         }
 
+        let state_for_click = self.state.clone();
+        let disabled = self.disabled;
+
         div()
             .w_full()
             .h(px(self.height_px))
@@ -137,7 +140,18 @@ impl NativeTextInput {
             } else {
                 normal_border
             })
-            .when(self.disabled, |el| el.opacity(0.65))
+            .when(disabled, |el| el.opacity(0.65))
+            .when(!disabled, |el| {
+                el.cursor_text().on_mouse_down(
+                    MouseButton::Left,
+                    move |_, window, cx| {
+                        let fh = state_for_click.read(cx).focus_handle(cx);
+                        if !fh.contains_focused(window, cx) {
+                            fh.focus(window, cx);
+                        }
+                    },
+                )
+            })
             .flex()
             .items_center()
             .overflow_hidden()

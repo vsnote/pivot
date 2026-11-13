@@ -107,25 +107,85 @@ fn strip_date_or_latest_suffix(key: &str) -> String {
     without_latest.to_string()
 }
 
-pub fn candidate_keys(model_name: &str) -> Vec<String> {
-    let base = model_name.trim().to_lowercase();
-    let mut keys = vec![base.clone()];
-    if let Some(slash) = base.rfind('/') {
-        keys.push(base[slash + 1..].to_string());
+fn strip_bracket_suffix(key: &str) -> &str {
+    if let Some(idx) = key.find('[') {
+        if key.ends_with(']') && idx > 0 {
+            return &key[..idx];
+        }
     }
+    key
+}
+
+fn strip_reasoning_tier_suffix(key: &str) -> &str {
+    for suffix in [
+        "-thinking",
+        "-minimal",
+        "-xhigh",
+        "-medium",
+        "-high",
+        "-low",
+        "-max",
+    ] {
+        if let Some(stripped) = key.strip_suffix(suffix) {
+            if !stripped.is_empty() {
+                return stripped;
+            }
+        }
+    }
+    key
+}
+
+pub fn candidate_keys(model_name: &str) -> Vec<String> {
+    fn push_unique(keys: &mut Vec<String>, candidate: String) {
+        if !candidate.is_empty() && !keys.contains(&candidate) {
+            keys.push(candidate);
+        }
+    }
+
+    let base = model_name.trim().to_lowercase();
+    let mut keys = Vec::new();
+
+    push_unique(&mut keys, base.clone());
+    let without_bracket = strip_bracket_suffix(&base).to_string();
+    push_unique(&mut keys, without_bracket.clone());
+
+    if let Some(slash) = without_bracket.rfind('/') {
+        push_unique(&mut keys, without_bracket[slash + 1..].to_string());
+    }
+
+    let snapshot = keys.clone();
+    for k in snapshot {
+        if let Some((before_colon, _)) = k.split_once(':') {
+            push_unique(&mut keys, before_colon.to_string());
+        }
+    }
+
+    let snapshot = keys.clone();
+    for k in snapshot {
+        let no_tier = strip_reasoning_tier_suffix(&k).to_string();
+        push_unique(&mut keys, no_tier);
+    }
+
     let snapshot = keys.clone();
     for k in snapshot {
         let slim = strip_date_or_latest_suffix(&k);
-        if slim != k {
-            keys.push(slim);
-        }
+        push_unique(&mut keys, slim);
     }
+
     keys
 }
 
 pub fn lookup_rate(rates: &HashMap<String, ModelRate>, model_name: &str) -> ModelRate {
-    if model_name.trim().is_empty() {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
         return DEFAULT_RATE;
+    }
+    let lower = trimmed.to_lowercase();
+    if strip_bracket_suffix(&lower).ends_with(":free") {
+        return ModelRate {
+            prompt: 0.0,
+            completion: 0.0,
+        };
     }
     for key in candidate_keys(model_name) {
         if let Some(rate) = rates.get(&key) {
@@ -237,5 +297,42 @@ pub fn format_uptime(secs: u64, locale: Locale) -> String {
             Locale::ZhCn => format!("{}秒", secs),
             Locale::En => format!("{}s", secs),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pricing_variant_matching_and_free_models() {
+        let mut rates = HashMap::new();
+        rates.insert(
+            "claude-opus-4-6".to_string(),
+            ModelRate {
+                prompt: 15.0,
+                completion: 75.0,
+            },
+        );
+        rates.insert(
+            "gpt-5.4".to_string(),
+            ModelRate {
+                prompt: 2.5,
+                completion: 10.0,
+            },
+        );
+
+        let opus_1m = lookup_rate(&rates, "claude-opus-4-6[1m]");
+        assert_eq!(opus_1m.prompt, 15.0);
+        assert_eq!(opus_1m.completion, 75.0);
+
+        let gpt_high = lookup_rate(&rates, "openai/gpt-5.4-high");
+        assert_eq!(gpt_high.prompt, 2.5);
+        assert_eq!(gpt_high.completion, 10.0);
+
+        let free_model = lookup_rate(&rates, "openrouter/gpt-5.4:free");
+        assert_eq!(free_model.prompt, 0.0);
+        assert_eq!(free_model.completion, 0.0);
+        assert_eq!(estimate_cost(&rates, "openrouter/gpt-5.4:free", 1_000_000, 1_000_000), 0.0);
     }
 }

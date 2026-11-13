@@ -39,7 +39,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use pivot_core::db::presets::Preset;
-use pivot_core::db::{DashboardRawStats, Provider, RequestLog};
+use pivot_core::db::{DashboardRawStats, Provider, RequestLog, SubscriptionAccount};
 use pivot_core::interceptor::InterceptorInfo;
 use pivot_core::service;
 use pivot_core::state::AppState;
@@ -94,7 +94,7 @@ pub fn compute_sub_stat(accounts: &[pivot_core::db::SubscriptionAccount]) -> Sub
     let total = accounts.len();
     let has_auth_error = accounts.iter().any(|a| {
         a.enabled
-            && (a.cooldown_until - now_sec > 3600
+            && (a.auth_invalid
                 || (a.refresh_token.as_deref().unwrap_or("").is_empty()
                     && a.expires_at > 0
                     && a.expires_at <= now_sec))
@@ -103,6 +103,7 @@ pub fn compute_sub_stat(accounts: &[pivot_core::db::SubscriptionAccount]) -> Sub
         .iter()
         .filter(|a| {
             a.enabled
+                && !a.auth_invalid
                 && a.cooldown_until <= now_sec
                 && !(a.refresh_token.as_deref().unwrap_or("").is_empty()
                     && a.expires_at > 0
@@ -149,6 +150,7 @@ pub struct PivotApp {
     pub editor: Option<ProviderEditorState>,
 
     pub interceptors: Vec<InterceptorInfo>,
+    pub interceptor_op_seq: u64,
     pub toggling_interceptor_id: Option<String>,
     pub conflict_target: Option<InterceptorInfo>,
     pub client_model_select: Option<ClientModelSelectState>,
@@ -157,6 +159,7 @@ pub struct PivotApp {
     pub logs: Vec<RequestLog>,
     pub today_summary: TodayUsageSummary,
     pub dashboard_stats: DashboardRawStats,
+    pub dashboard_req_seq: u64,
     pub dashboard_sub_view: DashboardSubView,
     pub dashboard_range: DashboardTimeRange,
     pub dashboard_metric: ProviderMetricMode,
@@ -263,6 +266,7 @@ impl PivotApp {
             is_provider_editor_open: false,
             editor: None,
             interceptors: Vec::new(),
+            interceptor_op_seq: 0,
             toggling_interceptor_id: None,
             conflict_target: None,
             client_model_select: None,
@@ -270,6 +274,7 @@ impl PivotApp {
             logs: Vec::new(),
             today_summary: TodayUsageSummary::default(),
             dashboard_stats: DashboardRawStats::default(),
+            dashboard_req_seq: 0,
             dashboard_sub_view: DashboardSubView::Overview,
             dashboard_range: DashboardTimeRange::All,
             dashboard_metric: ProviderMetricMode::Calls,
@@ -528,10 +533,24 @@ impl PivotApp {
         let state = self.core_state.clone();
         let handle = self.tokio_handle.clone();
         cx.spawn(async move |this, cx| loop {
+            let sleep_res = handle
+                .spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                })
+                .await;
+            if sleep_res.is_err() {
+                break;
+            }
+
+            let Ok((inter_seq, dash_seq)) =
+                this.read_with(cx, |app, _| (app.interceptor_op_seq, app.dashboard_req_seq))
+            else {
+                break;
+            };
+
             let st = state.clone();
             let poll_res = handle
                 .spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
                     let gw = service::get_gateway_status(&st).await;
                     let inter = service::get_interceptor_status(&st).await;
                     let rates = build_rate_map();
@@ -556,13 +575,19 @@ impl PivotApp {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                     }
-                    if let Ok(interceptors) = inter_res {
-                        app.interceptors = interceptors;
+                    if app.interceptor_op_seq == inter_seq
+                        && app.toggling_interceptor_id.is_none()
+                    {
+                        if let Ok(interceptors) = inter_res {
+                            app.interceptors = interceptors;
+                        }
                     }
                     if !rates.is_empty() {
                         app.model_rates = rates;
                     }
-                    app.today_summary = today;
+                    if app.dashboard_req_seq == dash_seq {
+                        app.today_summary = today;
+                    }
                     app.sync_tray_snapshot();
                     cx.notify();
                 })
@@ -579,6 +604,8 @@ impl PivotApp {
         let handle = self.tokio_handle.clone();
         let range = self.dashboard_range;
         let errors_only = self.dashboard_log_filter == DashboardLogFilter::Errors;
+        let inter_seq = self.interceptor_op_seq;
+        let dash_seq = self.dashboard_req_seq;
 
         cx.spawn(async move |this, cx| {
             let res = handle
@@ -612,22 +639,29 @@ impl PivotApp {
                         app.providers = providers;
                     }
                     app.sub_account_stats = stats;
-                    if let Ok(interceptors) = i_res {
-                        app.interceptors = interceptors;
+                    if app.interceptor_op_seq == inter_seq
+                        && app.toggling_interceptor_id.is_none()
+                    {
+                        if let Ok(interceptors) = i_res {
+                            app.interceptors = interceptors;
+                        }
                     }
-                    if let Ok(st) = raw_stats_res {
-                        resolve_display_names_for_models(
-                            st.route_model_slices.iter().map(|s| &s.model),
-                            &mut app.model_display_names,
-                        );
-                        app.dashboard_stats = st;
-                    }
-                    if let Ok(logs) = l_res {
-                        resolve_display_names_for_models(
-                            logs.iter().flat_map(|l| [&l.routed_model, &l.incoming_model]),
-                            &mut app.model_display_names,
-                        );
-                        app.logs = logs;
+                    if app.dashboard_req_seq == dash_seq {
+                        if let Ok(st) = raw_stats_res {
+                            resolve_display_names_for_models(
+                                st.route_model_slices.iter().map(|s| &s.model),
+                                &mut app.model_display_names,
+                            );
+                            app.dashboard_stats = st;
+                        }
+                        if let Ok(logs) = l_res {
+                            resolve_display_names_for_models(
+                                logs.iter().flat_map(|l| [&l.routed_model, &l.incoming_model]),
+                                &mut app.model_display_names,
+                            );
+                            app.logs = logs;
+                        }
+                        app.today_summary = today;
                     }
                     if let Ok(val) = gw_res {
                         app.gateway_status.is_running = val
@@ -640,7 +674,6 @@ impl PivotApp {
                             .unwrap_or(0);
                     }
                     app.model_rates = rates;
-                    app.today_summary = today;
                     app.initial_loaded = true;
                     app.sync_tray_snapshot();
                     cx.notify();
@@ -651,6 +684,8 @@ impl PivotApp {
     }
 
     pub fn refresh_dashboard_data(&mut self, cx: &mut Context<Self>) {
+        self.dashboard_req_seq = self.dashboard_req_seq.wrapping_add(1);
+        let seq = self.dashboard_req_seq;
         let state = self.core_state.clone();
         let handle = self.tokio_handle.clone();
         let range = self.dashboard_range;
@@ -671,6 +706,9 @@ impl PivotApp {
 
             if let Ok((stats_res, logs_res, today)) = res {
                 let _ = this.update(cx, |app, cx| {
+                    if app.dashboard_req_seq != seq {
+                        return;
+                    }
                     if let Ok(st) = stats_res {
                         resolve_display_names_for_models(
                             st.route_model_slices.iter().map(|s| &s.model),
@@ -2169,6 +2207,8 @@ impl PivotApp {
         cx: &mut Context<Self>,
     ) {
         self.client_model_select = None;
+        self.interceptor_op_seq = self.interceptor_op_seq.wrapping_add(1);
+        let seq = self.interceptor_op_seq;
         if let Some(c) = self.interceptors.iter_mut().find(|c| c.id == client_id) {
             c.model = Some(model.clone());
         }
@@ -2185,6 +2225,9 @@ impl PivotApp {
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                if app.interceptor_op_seq != seq {
+                    return;
+                }
                 if let Ok(Ok(updated)) = res {
                     if let Some(slot) = app.interceptors.iter_mut().find(|c| c.id == updated.id) {
                         *slot = updated;
@@ -2245,6 +2288,8 @@ impl PivotApp {
             None
         };
 
+        self.interceptor_op_seq = self.interceptor_op_seq.wrapping_add(1);
+        let seq = self.interceptor_op_seq;
         self.toggling_interceptor_id = Some(client_id.clone());
         cx.notify();
 
@@ -2265,6 +2310,9 @@ impl PivotApp {
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                if app.interceptor_op_seq != seq {
+                    return;
+                }
                 app.toggling_interceptor_id = None;
                 if let Ok((toggle_res, all_res)) = res {
                     if let Err(err) = toggle_res {
@@ -2295,6 +2343,7 @@ impl PivotApp {
         if self.confirm_busy {
             return;
         }
+        self.dashboard_req_seq = self.dashboard_req_seq.wrapping_add(1);
         self.confirm_busy = true;
         cx.notify();
 
@@ -2343,6 +2392,8 @@ impl PivotApp {
     pub fn export_backup_json(&mut self, cx: &mut Context<Self>) {
         let locale = self.prefs.locale;
         let providers = self.providers.clone();
+        let state = self.core_state.clone();
+        let handle = self.tokio_handle.clone();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let default_filename = format!("pivot-backup-{}.json", today);
         let dir = dirs::download_dir()
@@ -2354,15 +2405,33 @@ impl PivotApp {
             let Ok(Ok(Some(path))) = rx.await else {
                 return;
             };
-            let payload = serde_json::json!({
-                "app": "pivot",
-                "version": 1,
-                "exportedAt": chrono::Utc::now().to_rfc3339(),
-                "providers": providers,
-            });
-            let write_res = serde_json::to_string_pretty(&payload)
+            let path_for_write = path.clone();
+            let write_res = handle
+                .spawn(async move {
+                    let mut sub_accounts: Vec<SubscriptionAccount> = Vec::new();
+                    for p in &providers {
+                        if is_subscription_provider(p) {
+                            if let Ok(accs) = state.db.get_subscription_accounts(&p.id) {
+                                sub_accounts.extend(accs);
+                            }
+                        }
+                    }
+                    let payload = serde_json::json!({
+                        "app": "pivot",
+                        "version": 2,
+                        "exportedAt": chrono::Utc::now().to_rfc3339(),
+                        "providers": providers,
+                        "subscriptionAccounts": sub_accounts,
+                    });
+                    serde_json::to_string_pretty(&payload)
+                        .map_err(|e| e.to_string())
+                        .and_then(|json| {
+                            std::fs::write(&path_for_write, json).map_err(|e| e.to_string())
+                        })
+                })
+                .await
                 .map_err(|e| e.to_string())
-                .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()));
+                .and_then(|r| r);
 
             let _ = this.update(cx, |app, cx| {
                 match write_res {
@@ -2420,10 +2489,37 @@ impl PivotApp {
                         .unwrap_or_else(|| val.clone());
                     let mut imported: Vec<Provider> =
                         serde_json::from_value(list_val).map_err(|e| e.to_string())?;
+
+                    let imported_accounts: Vec<SubscriptionAccount> = match val.get("subscriptionAccounts") {
+                        Some(acc_val) if !acc_val.is_null() => {
+                            serde_json::from_value(acc_val.clone()).map_err(|e| e.to_string())?
+                        }
+                        _ => Vec::new(),
+                    };
+
+                    let mut imported_account_providers = HashSet::new();
+                    for acc in &imported_accounts {
+                        imported_account_providers.insert(acc.provider_id.clone());
+                        state
+                            .db
+                            .save_subscription_account(acc)
+                            .map_err(|e| e.to_string())?;
+                    }
+
                     let count = imported.len();
                     for p in &mut imported {
                         p.default_model = None;
                         p.is_default = false;
+                        if is_subscription_provider(p)
+                            && !imported_account_providers.contains(&p.id)
+                            && state
+                                .db
+                                .get_subscription_accounts(&p.id)
+                                .map(|v| v.is_empty())
+                                .unwrap_or(true)
+                        {
+                            p.enabled = false;
+                        }
                         service::save_provider(&state, p.clone()).await?;
                     }
                     Ok::<usize, String>(count)
@@ -2442,7 +2538,7 @@ impl PivotApp {
                                 locale.pick("个服务商配置", "providers")
                             ),
                         });
-                        app.refresh_providers_only(cx);
+                        app.refresh_all(cx);
                     }
                     Ok(Err(err)) => {
                         app.settings_banner = Some(SettingsBanner {
@@ -2575,11 +2671,14 @@ impl PivotApp {
     pub fn start_self_update(&mut self, info: UpdateReleaseInfo, cx: &mut Context<Self>) {
         if matches!(
             self.update_state,
-            UpdateCheckState::Downloading { .. } | UpdateCheckState::Installing { .. }
+            UpdateCheckState::Downloading { .. }
+                | UpdateCheckState::Installing { .. }
+                | UpdateCheckState::ReadyToRestart { .. }
         ) {
             return;
         }
 
+        self.update_check_seq = self.update_check_seq.wrapping_add(1);
         self.update_state = UpdateCheckState::Downloading {
             info: info.clone(),
             progress: 0,
@@ -2686,6 +2785,40 @@ impl PivotApp {
 
     // ================= 键盘快捷键与通用确认弹窗处理 =================
 
+    fn has_focused_editor_input(&self, window: &Window, cx: &App) -> bool {
+        let Some(ref ed) = self.editor else {
+            return false;
+        };
+        ed.preset_search_input
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+            || ed
+                .name_input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+            || ed
+                .base_url_input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+            || ed
+                .model_search_input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+            || ed
+                .custom_model_input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+            || ed
+                .key_inputs
+                .iter()
+                .any(|k| k.read(cx).focus_handle(cx).contains_focused(window, cx))
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -2733,12 +2866,33 @@ impl PivotApp {
                 return;
             }
             if self.active_tab == ActiveTab::Providers && self.is_provider_editor_open {
+                if self.has_focused_editor_input(window, cx) {
+                    self.root_focus.focus(window, cx);
+                    cx.notify();
+                    return;
+                }
                 self.editor_handle_back(window, cx);
                 return;
             }
         }
 
         if cmd && !event.keystroke.modifiers.alt && !event.keystroke.modifiers.shift {
+            let has_modal = self.delete_provider_target.is_some()
+                || self.pending_confirm.is_some()
+                || self.conflict_target.is_some();
+            if has_modal {
+                match key {
+                    "w" | "W" => {
+                        cx.hide();
+                    }
+                    "q" | "Q" => {
+                        tray::mark_quitting();
+                        cx.quit();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match key {
                 "1" => {
                     self.switch_tab(ActiveTab::Providers, cx);
@@ -2858,13 +3012,7 @@ impl PivotApp {
                             AbandonAction::SwitchTab(tab) => {
                                 this.is_provider_editor_open = false;
                                 this.editor = None;
-                                if this.active_tab == ActiveTab::Providers
-                                    && tab != ActiveTab::Providers
-                                {
-                                    this.latencies.clear();
-                                }
-                                this.active_tab = tab;
-                                cx.notify();
+                                this.switch_tab(tab, cx);
                             }
                         }
                     }),
