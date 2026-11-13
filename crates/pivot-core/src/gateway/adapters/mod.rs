@@ -15,10 +15,69 @@ pub struct SseState {
     pub in_tool_block: bool,
     pub current_tool_id: Option<String>,
     pub current_tool_name: Option<String>,
+    pub current_tool_raw_index: Option<usize>,
     pub last_thought_signature: Option<String>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+    pub pending_stop_reason: Option<String>,
     pub stream_finished: bool,
+}
+
+#[derive(Default)]
+pub struct AnthropicToOpenAiSseState {
+    pub tool_index_map: std::collections::HashMap<usize, usize>,
+    pub next_tool_index: usize,
+}
+
+impl AnthropicToOpenAiSseState {
+    pub fn alloc_tool_index(&mut self, block_index: usize) -> usize {
+        if let Some(&idx) = self.tool_index_map.get(&block_index) {
+            idx
+        } else {
+            let idx = self.next_tool_index;
+            self.next_tool_index += 1;
+            self.tool_index_map.insert(block_index, idx);
+            idx
+        }
+    }
+}
+
+/// 跨 TCP 分块按字节累积行缓冲后再解码 UTF-8，彻底消除多字节中文/Emoji 在网络分片边界被拆断丢失的问题
+#[derive(Default)]
+pub struct SseLineBuffer {
+    buf: Vec<u8>,
+}
+
+impl SseLineBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_and_read_lines(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let mut end = pos;
+            if end > 0 && self.buf[end - 1] == b'\r' {
+                end -= 1;
+            }
+            lines.push(String::from_utf8_lossy(&self.buf[..end]).into_owned());
+            self.buf.drain(..=pos);
+        }
+        lines
+    }
+
+    pub fn finish(&mut self) -> Option<String> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        if self.buf.last() == Some(&b'\r') {
+            self.buf.pop();
+        }
+        let rest = String::from_utf8_lossy(&self.buf).into_owned();
+        self.buf.clear();
+        Some(rest)
+    }
 }
 
 impl SseState {
@@ -291,6 +350,10 @@ pub fn finish_openai_stream(state: &mut SseState, stop_reason: &str) -> Vec<Stri
         return events;
     }
     close_active_anthropic_blocks(&mut events, state);
+    let effective_stop_reason = state
+        .pending_stop_reason
+        .as_deref()
+        .unwrap_or(stop_reason);
     let mut usage_obj = json!({
         "output_tokens": state.total_output_tokens
     });
@@ -301,7 +364,7 @@ pub fn finish_openai_stream(state: &mut SseState, stop_reason: &str) -> Vec<Stri
         "event: message_delta\ndata: {}\n\n",
         json!({
             "type": "message_delta",
-            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "delta": { "stop_reason": effective_stop_reason, "stop_sequence": null },
             "usage": usage_obj
         })
     ));
@@ -337,6 +400,16 @@ pub fn parse_openai_chunk_to_anthropic_events(
         Err(_) => return events,
     };
 
+    // 捕获标准 usage 及 include_usage 独立尾包（choices 为空时也会带 usage）
+    if let Some(ref usage) = chunk.usage {
+        if usage.prompt_tokens > 0 {
+            state.total_input_tokens = usage.prompt_tokens;
+        }
+        if usage.completion_tokens > 0 {
+            state.total_output_tokens = usage.completion_tokens;
+        }
+    }
+
     // 1. Emit message_start if not started
     if !state.message_started {
         state.message_started = true;
@@ -350,7 +423,7 @@ pub fn parse_openai_chunk_to_anthropic_events(
                 "content": [],
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": { "input_tokens": 0, "output_tokens": 0 }
+                "usage": { "input_tokens": state.total_input_tokens, "output_tokens": 0 }
             }
         });
         events.push(format!("event: message_start\ndata: {}\n\n", start_event));
@@ -383,7 +456,9 @@ pub fn parse_openai_chunk_to_anthropic_events(
                         "delta": { "type": "thinking_delta", "thinking": reasoning }
                     })
                 ));
-                state.total_output_tokens += 1;
+                if chunk.usage.is_none() {
+                    state.total_output_tokens += 1;
+                }
             }
         }
 
@@ -415,25 +490,39 @@ pub fn parse_openai_chunk_to_anthropic_events(
                         "delta": { "type": "text_delta", "text": text }
                     })
                 ));
-                state.total_output_tokens += 1;
+                if chunk.usage.is_none() {
+                    state.total_output_tokens += 1;
+                }
             }
         }
 
-        // Handle Tool Calls
+        // Handle Tool Calls（防空白 id / 重复 id 将单一 tool_use 拆成多个残缺块）
         if let Some(ref tool_chunks) = choice.delta.tool_calls {
             for tc in tool_chunks {
-                if let Some(ref id) = tc.id {
-                    // Close any active block (thinking, text, or previous tool block)
-                    close_active_anthropic_blocks(&mut events, state);
+                let non_empty_id = tc
+                    .id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let raw_idx_changed = state.in_tool_block && state.current_tool_raw_index != Some(tc.index);
+                let id_changed = non_empty_id.is_some()
+                    && state.current_tool_id.as_deref() != non_empty_id;
+                let need_new_block = !state.in_tool_block || raw_idx_changed || id_changed;
 
+                if need_new_block {
+                    close_active_anthropic_blocks(&mut events, state);
+                    let id_str = non_empty_id
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("call_{}_{}", msg_id, state.current_block_index));
                     let name = tc
                         .function
                         .as_ref()
                         .and_then(|f| f.name.clone())
                         .unwrap_or_default();
                     state.in_tool_block = true;
-                    state.current_tool_id = Some(id.clone());
+                    state.current_tool_id = Some(id_str.clone());
                     state.current_tool_name = Some(name.clone());
+                    state.current_tool_raw_index = Some(tc.index);
 
                     events.push(format!(
                         "event: content_block_start\ndata: {}\n\n",
@@ -442,7 +531,7 @@ pub fn parse_openai_chunk_to_anthropic_events(
                             "index": state.current_block_index,
                             "content_block": {
                                 "type": "tool_use",
-                                "id": id,
+                                "id": id_str,
                                 "name": name
                             }
                         })
@@ -469,43 +558,29 @@ pub fn parse_openai_chunk_to_anthropic_events(
             }
         }
 
-        // Check finish_reason
+        // 仅记录 pending_stop_reason 并关闭当前内容块，延迟至 `[DONE]` 或流结束再发送 message_delta/message_stop，
+        // 避免丢弃紧随 finish_reason 之后的 stream_options.include_usage 独立尾包
         if let Some(ref finish_reason) = choice.finish_reason {
             close_active_anthropic_blocks(&mut events, state);
-
             let stop_reason = match finish_reason.as_str() {
                 "stop" => "end_turn",
                 "tool_calls" => "tool_use",
                 "length" => "max_tokens",
                 _ => "end_turn",
             };
-
-            let out_tokens = chunk
-                .usage
-                .as_ref()
-                .map(|u| u.completion_tokens)
-                .unwrap_or(state.total_output_tokens);
-            events.push(format!(
-                "event: message_delta\ndata: {}\n\n",
-                json!({
-                    "type": "message_delta",
-                    "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-                    "usage": { "output_tokens": out_tokens }
-                })
-            ));
-            events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
-            state.stream_finished = true;
+            state.pending_stop_reason = Some(stop_reason.to_string());
         }
     }
 
     events
 }
 
-/// Convert an Anthropic SSE event to OpenAI SSE chunk format (`data: {...}\n\n`)
-pub fn parse_anthropic_event_to_openai_chunks(
+/// Convert an Anthropic SSE event to OpenAI SSE chunk format (`data: {...}\n\n`) with contiguous tool_calls index state
+pub fn parse_anthropic_event_to_openai_chunks_with_state(
     raw: &str,
     msg_id: &str,
     model: &str,
+    conv_state: &mut AnthropicToOpenAiSseState,
 ) -> Vec<String> {
     let mut chunks = Vec::new();
 
@@ -529,6 +604,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
             if let Some(block) = val.get("content_block") {
                 let btype = block.get("type").and_then(Value::as_str).unwrap_or("");
                 if btype == "tool_use" {
+                    let tc_idx = conv_state.alloc_tool_index(index);
                     let id = block
                         .get("id")
                         .and_then(Value::as_str)
@@ -548,7 +624,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
                             "index": 0,
                             "delta": {
                                 "tool_calls": [{
-                                    "index": index,
+                                    "index": tc_idx,
                                     "id": id,
                                     "type": "function",
                                     "function": {
@@ -609,6 +685,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
                     .and_then(|d| d.get("partial_json"))
                     .and_then(|p| p.as_str())
                 {
+                    let tc_idx = conv_state.alloc_tool_index(index);
                     let chunk = json!({
                         "id": msg_id,
                         "object": "chat.completion.chunk",
@@ -618,7 +695,7 @@ pub fn parse_anthropic_event_to_openai_chunks(
                             "index": 0,
                             "delta": {
                                 "tool_calls": [{
-                                    "index": index,
+                                    "index": tc_idx,
                                     "function": { "arguments": partial }
                                 }]
                             },
@@ -670,6 +747,16 @@ pub fn parse_anthropic_event_to_openai_chunks(
     }
 
     chunks
+}
+
+/// Convert an Anthropic SSE event to OpenAI SSE chunk format (`data: {...}\n\n`)
+pub fn parse_anthropic_event_to_openai_chunks(
+    raw: &str,
+    msg_id: &str,
+    model: &str,
+) -> Vec<String> {
+    let mut state = AnthropicToOpenAiSseState::default();
+    parse_anthropic_event_to_openai_chunks_with_state(raw, msg_id, model, &mut state)
 }
 
 #[cfg(test)]
@@ -732,14 +819,38 @@ mod tests {
             "req-3",
             "claude-3-7-sonnet",
         );
-        assert_eq!(finish.concat().matches("event: message_stop").count(), 1);
+        // 延迟至 [DONE] 再封流，以便捕获紧随其后的 include_usage 独立尾包
+        assert_eq!(finish.concat().matches("event: message_stop").count(), 0);
+        let usage_tail = parse_openai_chunk_to_anthropic_events(
+            r#"data: {"id":"chat-1","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}"#,
+            &mut state,
+            "req-3",
+            "claude-3-7-sonnet",
+        );
+        assert!(usage_tail.concat().matches("event: message_stop").count() == 0);
         let done = parse_openai_chunk_to_anthropic_events(
             "data: [DONE]",
             &mut state,
             "req-3",
             "claude-3-7-sonnet",
         );
-        assert!(done.is_empty());
+        let done_str = done.concat();
+        assert_eq!(done_str.matches("event: message_stop").count(), 1);
+        assert!(done_str.contains(r#""output_tokens":7"#));
+        assert!(done_str.contains(r#""input_tokens":42"#));
+    }
+
+    #[test]
+    fn sse_line_buffer_reassembles_split_utf8_characters() {
+        let mut buf = SseLineBuffer::new();
+        let line = "data: {\"text\":\"你好世界🚀\"}\n";
+        let bytes = line.as_bytes();
+        // 故意在多字节中文正中间切开
+        let split_pos = bytes.iter().position(|&b| b == 0xE4).unwrap() + 1;
+        let out1 = buf.push_and_read_lines(&bytes[..split_pos]);
+        assert!(out1.is_empty());
+        let out2 = buf.push_and_read_lines(&bytes[split_pos..]);
+        assert_eq!(out2, vec!["data: {\"text\":\"你好世界🚀\"}"]);
     }
 
     #[test]
@@ -927,22 +1038,28 @@ mod tests {
         assert!(out3.contains(r#""index":1"#));
         assert!(out3.contains(r#""partial_json":"{\"cmd\":\"ls\"}""#));
 
-        // 4. Finish reason tool_calls
+        // 4. Finish reason tool_calls (deferred message_delta/message_stop until [DONE] to preserve include_usage tail)
         let chunk4 = r#"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
         let evts4 = parse_openai_chunk_to_anthropic_events(chunk4, &mut state, "req-ds", "deepseek-reasoner");
         let out4 = evts4.concat();
-        // Must close the tool_use block at index 1
+        // Must close the tool_use block at index 1 immediately and stash pending_stop_reason
         assert!(
             out4.contains(r#"{"index":1,"type":"content_block_stop"}"#)
                 || out4.contains(r#"{"type":"content_block_stop","index":1}"#)
         );
-        assert!(out4.contains(r#""stop_reason":"tool_use""#));
-        assert!(out4.contains(r#"event: message_stop"#));
+        assert!(!state.in_tool_block);
+        assert!(!state.stream_finished);
+        assert_eq!(state.pending_stop_reason.as_deref(), Some("tool_use"));
+
+        // 5. [DONE] finalizes stream once with tool_use stop_reason, then rejects duplicates
+        let evts5 = parse_openai_chunk_to_anthropic_events("data: [DONE]", &mut state, "req-ds", "deepseek-reasoner");
+        let out5 = evts5.concat();
+        assert!(out5.contains(r#""stop_reason":"tool_use""#));
+        assert!(out5.contains("event: message_stop"));
         assert!(state.stream_finished);
 
-        // 5. [DONE] arrives afterward - must not emit duplicate stops
-        let evts5 = parse_openai_chunk_to_anthropic_events("data: [DONE]", &mut state, "req-ds", "deepseek-reasoner");
-        assert!(evts5.is_empty());
+        let evts6 = parse_openai_chunk_to_anthropic_events("data: [DONE]", &mut state, "req-ds", "deepseek-reasoner");
+        assert!(evts6.is_empty());
     }
 
     #[test]

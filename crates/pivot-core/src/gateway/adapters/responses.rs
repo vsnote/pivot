@@ -244,12 +244,16 @@ impl ResponsesSseState {
                     for tc in tool_calls {
                         let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         let buf = self.tool_calls_buf.entry(idx).or_default();
-                        if let Some(id) = tc.get("id").and_then(Value::as_str) {
-                            buf.id.push_str(id);
+                        if let Some(id) = tc.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                            if buf.id.is_empty() {
+                                buf.id = id.to_string();
+                            }
                         }
                         if let Some(fn_obj) = tc.get("function") {
-                            if let Some(name) = fn_obj.get("name").and_then(Value::as_str) {
-                                buf.name.push_str(name);
+                            if let Some(name) = fn_obj.get("name").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                                if buf.name.is_empty() {
+                                    buf.name = name.to_string();
+                                }
                             }
                             if let Some(args) = fn_obj.get("arguments").and_then(Value::as_str) {
                                 buf.arguments.push_str(args);
@@ -684,7 +688,8 @@ pub fn convert_responses_req_to_chat(body: &Value) -> OpenAIChatRequest {
     let model = body
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or("gpt-4o")
+        .map(str::trim)
+        .unwrap_or("")
         .to_string();
 
     let mut messages: Vec<OpenAIMessage> = Vec::new();
@@ -1467,6 +1472,8 @@ pub struct ResponsesToChatSseParser {
     pub current_event: String,
     pub has_tool_calls: bool,
     pub completed: bool,
+    pub tool_index_map: std::collections::HashMap<u64, u64>,
+    pub next_tool_index: u64,
 }
 
 impl ResponsesToChatSseParser {
@@ -1478,6 +1485,19 @@ impl ResponsesToChatSseParser {
             current_event: String::new(),
             has_tool_calls: false,
             completed: false,
+            tool_index_map: std::collections::HashMap::new(),
+            next_tool_index: 0,
+        }
+    }
+
+    fn alloc_or_get_tool_index(&mut self, output_index: u64) -> u64 {
+        if let Some(&idx) = self.tool_index_map.get(&output_index) {
+            idx
+        } else {
+            let idx = self.next_tool_index;
+            self.next_tool_index += 1;
+            self.tool_index_map.insert(output_index, idx);
+            idx
         }
     }
 
@@ -1525,6 +1545,7 @@ impl ResponsesToChatSseParser {
                 if item.get("type").and_then(Value::as_str) == Some("function_call") {
                     self.has_tool_calls = true;
                     let out_idx = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+                    let tc_idx = self.alloc_or_get_tool_index(out_idx);
                     let call_id = item.get("call_id").or_else(|| item.get("id")).and_then(Value::as_str).unwrap_or("call_default");
                     let name = item.get("name").and_then(Value::as_str).unwrap_or("");
                     let chunk = json!({
@@ -1536,7 +1557,7 @@ impl ResponsesToChatSseParser {
                             "index": 0,
                             "delta": {
                                 "tool_calls": [{
-                                    "index": out_idx,
+                                    "index": tc_idx,
                                     "id": call_id,
                                     "type": "function",
                                     "function": {
@@ -1553,6 +1574,7 @@ impl ResponsesToChatSseParser {
             }
         } else if ev_type == "response.function_call_arguments.delta" {
             let out_idx = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            let tc_idx = self.alloc_or_get_tool_index(out_idx);
             if let Some(delta) = data.get("delta").and_then(Value::as_str) {
                 let chunk = json!({
                     "id": self.id,
@@ -1563,7 +1585,7 @@ impl ResponsesToChatSseParser {
                         "index": 0,
                         "delta": {
                             "tool_calls": [{
-                                "index": out_idx,
+                                "index": tc_idx,
                                 "function": {
                                     "arguments": delta
                                 }

@@ -99,10 +99,34 @@ pub fn convert_openai_req_to_anthropic(
                     "tool_use_id": tool_use_id,
                     "content": res_str
                 });
-                anthropic_messages.push(AnthropicMessage {
-                    role: "user".to_string(),
-                    content: Value::Array(vec![block]),
-                });
+                // 并行 tool 消息必须合并入同一条 user 消息中，否则 Anthropic / Gemini 会拒绝连续多条 user 消息
+                let appended = if let Some(last) = anthropic_messages.last_mut() {
+                    if last.role == "user" {
+                        if let Some(arr) = last.content.as_array_mut() {
+                            let all_tool_results = arr
+                                .iter()
+                                .all(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"));
+                            if all_tool_results {
+                                arr.push(block.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !appended {
+                    anthropic_messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: Value::Array(vec![block]),
+                    });
+                }
             }
             _ => {}
         }
@@ -355,5 +379,35 @@ mod tests {
         assert!(ant_37.thinking.is_some());
         assert_eq!(ant_37.thinking.unwrap().budget_tokens, Some(16384));
         assert_eq!(ant_37.temperature, None);
+    }
+
+    #[test]
+    fn test_merge_consecutive_tool_messages_into_single_user_message() {
+        let req: OpenAIChatRequest = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "Check files"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+                        {"id": "call_2", "type": "function", "function": {"name": "list", "arguments": "{}"}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "result_one"},
+                {"role": "tool", "tool_call_id": "call_2", "content": "result_two"}
+            ]
+        }))
+        .unwrap();
+
+        let ant = convert_openai_req_to_anthropic(&req, "claude-sonnet-4-6");
+        assert_eq!(ant.messages.len(), 3);
+        assert_eq!(ant.messages[2].role, "user");
+        let blocks = ant.messages[2].content.as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_1");
+        assert_eq!(blocks[1]["tool_use_id"], "call_2");
     }
 }

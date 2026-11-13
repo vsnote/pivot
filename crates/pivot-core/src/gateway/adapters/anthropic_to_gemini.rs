@@ -9,34 +9,25 @@ fn get_cache() -> &'static Mutex<HashMap<String, String>> {
     THOUGHT_SIGNATURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn store_thought_signature(tool_id: &str, tool_name: &str, signature: &str) {
-    if signature.is_empty() {
+pub fn store_thought_signature(tool_id: &str, _tool_name: &str, signature: &str) {
+    if signature.is_empty() || tool_id.is_empty() {
         return;
     }
     if let Ok(mut cache) = get_cache().lock() {
-        if cache.len() > 1000 {
+        if cache.len() >= 512 {
             cache.clear();
         }
-        if !tool_id.is_empty() {
-            cache.insert(tool_id.to_string(), signature.to_string());
-        }
-        if !tool_name.is_empty() {
-            cache.insert(tool_name.to_string(), signature.to_string());
-        }
+        cache.insert(tool_id.to_string(), signature.to_string());
     }
 }
 
-pub fn get_thought_signature(tool_id: &str, tool_name: &str) -> Option<String> {
+pub fn get_thought_signature(tool_id: &str, _tool_name: &str) -> Option<String> {
+    if tool_id.is_empty() {
+        return None;
+    }
     if let Ok(cache) = get_cache().lock() {
-        if !tool_id.is_empty() {
-            if let Some(sig) = cache.get(tool_id) {
-                return Some(sig.clone());
-            }
-        }
-        if !tool_name.is_empty() {
-            if let Some(sig) = cache.get(tool_name) {
-                return Some(sig.clone());
-            }
+        if let Some(sig) = cache.get(tool_id) {
+            return Some(sig.clone());
         }
     }
     None
@@ -334,12 +325,29 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
         }
     }
 
-    let system_instruction = req.system.as_ref().map(|sys| {
+    let system_instruction = req.system.as_ref().and_then(|sys| {
         let text = match sys {
             Value::String(s) => s.clone(),
-            other => other.to_string(),
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|item| {
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.as_str())
+                })
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            other => other
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| other.to_string()),
         };
-        GeminiContent {
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(GeminiContent {
             role: "user".to_string(),
             parts: vec![GeminiPart {
                 text: Some(text),
@@ -347,7 +355,7 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                 function_response: None,
                 thought_signature: None,
             }],
-        }
+        })
     });
 
     let tools = req.tools.as_ref().and_then(|tools| {

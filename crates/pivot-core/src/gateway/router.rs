@@ -3,7 +3,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 static RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -37,9 +37,7 @@ pub struct RoutePlan {
     pub fallbacks: Vec<PlannedCandidate>,
 }
 
-pub struct RoutingEngine {
-    session_map: Mutex<HashMap<String, usize>>, // (session_id + provider_id) -> key_index
-}
+pub struct RoutingEngine;
 
 impl Default for RoutingEngine {
     fn default() -> Self {
@@ -49,12 +47,10 @@ impl Default for RoutingEngine {
 
 impl RoutingEngine {
     pub fn new() -> Self {
-        Self {
-            session_map: Mutex::new(HashMap::new()),
-        }
+        Self
     }
 
-    /// Select API key using session affinity or round-robin
+    /// Select API key using stateless deterministic session affinity or round-robin
     pub fn select_api_key(&self, provider: &Provider, session_id: Option<&str>) -> Option<String> {
         if provider.api_keys.is_empty() {
             return None;
@@ -66,20 +62,13 @@ impl RoutingEngine {
         }
 
         if let Some(sess) = session_id {
-            let cache_key = format!("{}:{}", provider.id, sess);
-            let mut map = self.session_map.lock().unwrap();
-            if let Some(&idx) = map.get(&cache_key) {
-                if idx < key_count {
-                    return Some(provider.api_keys[idx].clone());
-                }
+            // 无状态确定性 FNV-1a 哈希：避免 session_map 随请求无限增长泄漏内存
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for b in provider.id.bytes().chain(*b":").chain(sess.bytes()) {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
             }
-            // Hash session to an index for deterministic affinity
-            let mut hash: usize = 0;
-            for b in sess.bytes() {
-                hash = hash.wrapping_mul(31).wrapping_add(b as usize);
-            }
-            let idx = hash % key_count;
-            map.insert(cache_key, idx);
+            let idx = (hash as usize) % key_count;
             return Some(provider.api_keys[idx].clone());
         }
 
@@ -199,6 +188,29 @@ fn note(
     }
 }
 
+/// 统一计算服务商名称路由前缀（全端唯一标准，确保名称含 `/` 或多空格时前后端一致可路由）
+pub fn provider_route_prefix(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.trim().chars() {
+        if ch == '/' || ch == '\\' || ch.is_whitespace() || ch == '-' {
+            if !out.is_empty() && !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        } else {
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
+            prev_dash = false;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 fn plan_route_inner(
     incoming_model: &str,
     providers: &[Provider],
@@ -216,39 +228,56 @@ fn plan_route_inner(
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    let provider_map: HashMap<&str, &Provider> = active_providers
-        .iter()
-        .map(|p| (p.id.as_str(), *p))
-        .collect();
-
-    // 1. Prefix routing (e.g. "openai/gpt-4o", "anthropic/claude-3-7-sonnet"):
-    // the model name after the prefix is forwarded as requested.
+    // 1. Prefix routing (e.g. "openai/gpt-4o", "opencode-go-plus/kimi-k2.5"):
+    // 只有当匹配服务商确实声明（或同模型归一化匹配）了 sub_model 时才命中，避免截胡 OpenRouter 等自带 "/" 的模型名
     if let Some((prefix, sub_model)) = incoming_model.split_once('/') {
         let prefix_lower = prefix.to_lowercase();
-        let matched = provider_map
-            .get(prefix_lower.as_str())
+        let prefix_slug = provider_route_prefix(prefix);
+        let matched_providers: Vec<&Provider> = active_providers
+            .iter()
             .copied()
-            .or_else(|| {
-                active_providers
-                    .iter()
-                    .find(|p| {
-                        p.name.to_lowercase() == prefix_lower
-                            || p.name.to_lowercase().replace(' ', "-") == prefix_lower
-                    })
-                    .copied()
+            .filter(|p| {
+                p.id.eq_ignore_ascii_case(prefix)
+                    || p.name.to_lowercase() == prefix_lower
+                    || (!prefix_slug.is_empty() && provider_route_prefix(&p.name) == prefix_slug)
+            })
+            .collect();
+
+        if !matched_providers.is_empty() {
+            for provider in &matched_providers {
+                if let Some(resolved_sub) = find_declared_or_normalized_model(provider, sub_model) {
+                    note(trace, "prefix", true, || {
+                        format!("前缀 {} 命中服务商 {} (目标 {})", prefix, provider.name, resolved_sub)
+                    });
+                    return Ok(RoutePlan {
+                        primary: planned(provider, &resolved_sub),
+                        fallbacks: Vec::new(),
+                    });
+                }
+            }
+
+            // 匹配了服务商前缀，但其未声明 sub_model：若其他服务商声明了完整的 incoming_model（如 openrouter 声明 "anthropic/claude-3-opus"），放行到 exact 层
+            let any_declared_full = active_providers
+                .iter()
+                .any(|p| find_declared_or_normalized_model(p, incoming_model).is_some());
+            if !any_declared_full {
+                let first_name = &matched_providers[0].name;
+                note(trace, "prefix", false, || {
+                    format!("服务商 {} 未声明模型 {}", first_name, sub_model)
+                });
+                return Err(format!(
+                    "Model '{}' is not declared by provider '{}'",
+                    sub_model, first_name
+                ));
+            }
+            note(trace, "prefix", false, || {
+                format!("前缀 {} 服务商未声明 {}，继续尝试完整模型名匹配", prefix, sub_model)
             });
-        if let Some(provider) = matched {
-            note(trace, "prefix", true, || {
-                format!("前缀 {} 直接命中服务商 {}", prefix, provider.name)
-            });
-            return Ok(RoutePlan {
-                primary: planned(provider, sub_model),
-                fallbacks: Vec::new(),
+        } else {
+            note(trace, "prefix", false, || {
+                format!("前缀 {} 不对应任何已启用的服务商", prefix)
             });
         }
-        note(trace, "prefix", false, || {
-            format!("前缀 {} 不对应任何已启用的服务商", prefix)
-        });
     } else {
         note(trace, "prefix", false, || "模型名不含服务商前缀".to_string());
     }
@@ -286,28 +315,7 @@ fn plan_route_inner(
         "没有可归一化匹配的模型".to_string()
     });
 
-    // 2.8. Provider family heuristic match (e.g. deepseek-* -> deepseek provider)
-    let lower_incoming = incoming_model.to_lowercase();
-    if lower_incoming.starts_with("deepseek-") || lower_incoming.starts_with("deepseek/") {
-        if let Some(ds_provider) = active_providers.iter().find(|p| {
-            p.name.to_lowercase().contains("deepseek") || p.preset_id.as_deref() == Some("deepseek")
-        }) {
-            let target = ds_provider
-                .models
-                .first()
-                .map(String::as_str)
-                .unwrap_or(incoming_model);
-            note(trace, "family", true, || {
-                format!("厂商家族推断：DeepSeek 模型由 {} 承接 (目标 {})", ds_provider.name, target)
-            });
-            return Ok(RoutePlan {
-                primary: planned(ds_provider, target),
-                fallbacks: Vec::new(),
-            });
-        }
-    }
-
-    // 3. Unknown model name: fail clearly without cross-model silent rewrites.
+    // 3. Unknown model name: 严格遵守铁律，绝不做跨模型家族兜底或静默改写
     note(trace, "route", false, || {
         format!("未找到支持模型 '{}' 的可用服务商", incoming_model)
     });
@@ -352,48 +360,22 @@ pub fn normalize_model_candidates(model: &str) -> Vec<String> {
         clean
     };
 
-    // 3. Strip date suffix -\d{8} or -\d{4}-\d{2}-\d{2}
-    let without_date = if let Ok(re8) = Regex::new(r"-\d{8}$") {
-        if let Some(m) = re8.find(without_latest) {
-            &without_latest[..m.start()]
-        } else if let Ok(re_iso) = Regex::new(r"-\d{4}-\d{2}-\d{2}$") {
-            if let Some(m) = re_iso.find(without_latest) {
-                &without_latest[..m.start()]
-            } else {
-                without_latest
-            }
-        } else {
-            without_latest
-        }
+    // 3. Strip date suffix -\d{8} or -\d{4}-\d{2}-\d{2} (仅做同模型去修饰归一化，禁止硬编码跨模型映射)
+    static RE_DATE_8: OnceLock<Regex> = OnceLock::new();
+    static RE_DATE_ISO: OnceLock<Regex> = OnceLock::new();
+    let re8 = RE_DATE_8.get_or_init(|| Regex::new(r"-\d{8}$").unwrap());
+    let re_iso = RE_DATE_ISO.get_or_init(|| Regex::new(r"-\d{4}-\d{2}-\d{2}$").unwrap());
+
+    let without_date = if let Some(m) = re8.find(without_latest) {
+        &without_latest[..m.start()]
+    } else if let Some(m) = re_iso.find(without_latest) {
+        &without_latest[..m.start()]
     } else {
         without_latest
     };
 
     if without_date != trimmed && !without_date.is_empty() {
         candidates.push(without_date.to_string());
-    }
-
-    // 4. Common shorthands
-    match without_date.to_lowercase().as_str() {
-        "sonnet" => {
-            candidates.push("claude-3-7-sonnet".to_string());
-            candidates.push("claude-3-5-sonnet".to_string());
-        }
-        "haiku" => {
-            candidates.push("claude-3-5-haiku".to_string());
-        }
-        "opus" => {
-            candidates.push("claude-3-opus".to_string());
-        }
-        "deepseek-chat" | "deepseek-v3" | "deepseek" => {
-            candidates.push("deepseek-flash".to_string());
-            candidates.push("deepseek-v4-pro".to_string());
-        }
-        "deepseek-reasoner" | "deepseek-r1" => {
-            candidates.push("deepseek-v4-pro".to_string());
-            candidates.push("deepseek-flash".to_string());
-        }
-        _ => {}
     }
 
     candidates
@@ -686,6 +668,41 @@ mod tests {
             .steps
             .iter()
             .any(|step| step.layer == "route" && !step.matched));
+    }
+
+    #[test]
+    fn provider_route_prefix_sanitizes_slashes_and_extra_whitespace() {
+        assert_eq!(provider_route_prefix("OpenCode Go / Plus"), "opencode-go-plus");
+        assert_eq!(provider_route_prefix("OpenAI / DeepSeek"), "openai-deepseek");
+        assert_eq!(provider_route_prefix("DeepSeek"), "deepseek");
+    }
+
+    #[test]
+    fn prefix_routing_does_not_hijack_openrouter_slash_models() {
+        let providers = vec![
+            provider("anthropic", &["claude-sonnet-4"], 20),
+            provider("openrouter", &["anthropic/claude-3-opus"], 10),
+        ];
+
+        let plan = plan_route("anthropic/claude-3-opus", &providers).unwrap();
+        assert_eq!(plan.primary.provider_id, "openrouter");
+        assert_eq!(plan.primary.model, "anthropic/claude-3-opus");
+    }
+
+    #[test]
+    fn deepseek_unknown_model_is_never_downgraded() {
+        let providers = vec![provider("deepseek", &["deepseek-chat"], 10)];
+        let err = plan_route("deepseek-reasoner", &providers).unwrap_err();
+        assert!(err.contains("deepseek-reasoner"));
+    }
+
+    #[test]
+    fn opencode_go_plus_prefix_routes_cleanly() {
+        let mut p = provider("prov_ocg", &["kimi-k2.5"], 10);
+        p.name = "OpenCode Go / Plus".to_string();
+        let plan = plan_route("opencode-go-plus/kimi-k2.5", &[p]).unwrap();
+        assert_eq!(plan.primary.provider_id, "prov_ocg");
+        assert_eq!(plan.primary.model, "kimi-k2.5");
     }
 
 }

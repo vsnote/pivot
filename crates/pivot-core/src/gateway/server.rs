@@ -1,9 +1,9 @@
 use crate::db::{Database, LogAttempt, Provider, RequestLog};
 use crate::gateway::adapters::{
     anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, finish_openai_stream,
-    openai_to_anthropic, parse_anthropic_event_to_openai_chunks,
+    openai_to_anthropic, parse_anthropic_event_to_openai_chunks_with_state,
     parse_gemini_chunk_to_anthropic_events, parse_openai_chunk_to_anthropic_events, responses,
-    SseState,
+    AnthropicToOpenAiSseState, SseLineBuffer, SseState,
 };
 use crate::gateway::router::{RouteCandidate, RoutingEngine};
 use crate::gateway::types::*;
@@ -282,12 +282,16 @@ fn sanitize_openai_tool_parameters(parameters: &mut Value, function_name: &str) 
 }
 
 /// 判断目标模型是否原生支持 OpenAI 的 reasoning_effort 调节参数
-/// 仅 OpenAI 官方推理模型（o1, o3, gpt-5, gpt-6 系列，排除 o1-preview）支持该参数；
+/// 仅 OpenAI 官方推理模型（o1, o3, o4, gpt-5, gpt-6 系列，排除 o1-preview）支持该参数；
 /// 其余非推理模型（如 gpt-4o 等）及绝大多数第三方服务商（如 DeepSeek, Qwen 等）会报 400 错误。
 fn is_openai_reasoning_effort_supported(model: &str) -> bool {
     let lower = model.to_lowercase();
     let name = lower.split('/').last().unwrap_or(&lower);
-    (name.starts_with("o1") || name.starts_with("o3") || name.starts_with("gpt-5") || name.starts_with("gpt-6"))
+    (name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+        || name.starts_with("gpt-5")
+        || name.starts_with("gpt-6"))
         && !name.contains("preview")
 }
 
@@ -298,7 +302,14 @@ fn is_openai_reasoning_effort_supported(model: &str) -> bool {
 ///    (e.g. DeepSeek rejects array content with "invalid type: sequence, expected a string").
 /// 3. Tokens & Stream: reconciles max_tokens/max_completion_tokens and strips orphaned stream_options/tools.
 fn normalize_openai_req_for_upstream(req: &mut OpenAIChatRequest) {
-    if req.max_tokens.is_none() && req.max_completion_tokens.is_some() {
+    if is_openai_reasoning_effort_supported(&req.model) {
+        // OpenAI 官方推理模型要求使用 max_completion_tokens，拒绝已废弃的 max_tokens
+        if req.max_completion_tokens.is_none() && req.max_tokens.is_some() {
+            req.max_completion_tokens = req.max_tokens.take();
+        } else if req.max_completion_tokens.is_some() {
+            req.max_tokens = None;
+        }
+    } else if req.max_tokens.is_none() && req.max_completion_tokens.is_some() {
         req.max_tokens = req.max_completion_tokens.take();
     } else if req.max_tokens.is_some() {
         req.max_completion_tokens = None;
@@ -571,7 +582,7 @@ async fn list_models(State(state): State<GatewayState>) -> Json<Value> {
                 "root": m,
                 "parent": null
             }));
-            let provider_prefix = p.name.to_lowercase().replace(' ', "-");
+            let provider_prefix = crate::gateway::router::provider_route_prefix(&p.name);
             let named_id = format!("{}/{}", provider_prefix, m);
             if named_id != *m {
                 model_list.push(json!({
@@ -640,7 +651,6 @@ fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         "x-codex-session-id",
         "conversation-id",
         "x-conversation-id",
-        "authorization",
     ] {
         if let Some(val) = headers.get(*key).and_then(|v| v.to_str().ok()) {
             if !val.is_empty() {
@@ -1038,6 +1048,7 @@ async fn send_gemini_upstream_request(
     req_body_val: &Value,
     is_subscription_pool: bool,
     is_stream: bool,
+    is_count_tokens: bool,
     timeout: Duration,
     forward_ua: &str,
     headers: &HeaderMap,
@@ -1053,6 +1064,11 @@ async fn send_gemini_upstream_request(
         let endpoint = if is_stream {
             format!(
                 "{}/models/{}:streamGenerateContent?alt=sse&key={}",
+                base, cand.target_model, api_key
+            )
+        } else if is_count_tokens {
+            format!(
+                "{}/models/{}:countTokens?key={}",
                 base, cand.target_model, api_key
             )
         } else {
@@ -1083,6 +1099,8 @@ async fn send_gemini_upstream_request(
     const MAX_ACCOUNT_ATTEMPTS: usize = 4;
     let endpoint = if is_stream {
         format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+    } else if is_count_tokens {
+        format!("{}/v1internal:countTokens", base)
     } else {
         format!("{}/v1internal:generateContent", base)
     };
@@ -1144,20 +1162,51 @@ async fn send_gemini_upstream_request(
             }
         };
 
-        // 遇到 401 时尝试原地刷新 Token 并重试一次当前账号
+        // 遇到 401 时使用单飞锁刷新 Token 并重试一次当前账号
         if res.status() == reqwest::StatusCode::UNAUTHORIZED {
-            match crate::oauth::try_refresh_subscription_account(&state.db, client, &account.id).await {
-                Ok(refreshed) => {
-                    if let Ok(retried) = send_with_token(&refreshed.access_token).await {
+            match crate::oauth::ensure_or_refresh_account_token(
+                &state.db,
+                client,
+                &account.id,
+                Some(&account.access_token),
+            )
+            .await
+            {
+                Ok(refreshed) => match send_with_token(&refreshed.access_token).await {
+                    Ok(retried) => {
                         res = retried;
+                        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+                            let _ = state.db.set_account_auth_invalid(&refreshed.id, true);
+                        }
                     }
-                }
+                    Err(retry_err) => {
+                        let (_, err_msg) = map_upstream_request_error(&retry_err, timeout);
+                        tracing::warn!(
+                            "Upstream Antigravity retry after 401 refresh hit network error for {}: {}",
+                            account.id,
+                            err_msg
+                        );
+                        crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                        excluded_accounts.push(account.id.clone());
+                        last_upstream_err = Some((
+                            StatusCode::BAD_GATEWAY,
+                            format!("Upstream retry network error: {}", err_msg),
+                        ));
+                        continue;
+                    }
+                },
                 Err(refresh_err) => {
                     tracing::warn!(
                         "Upstream Antigravity returned 401 and refresh failed for {}: {}",
                         account.id,
                         refresh_err
                     );
+                    if !crate::oauth::is_token_revoked_or_invalid(&refresh_err) {
+                        crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                    }
+                    excluded_accounts.push(account.id.clone());
+                    last_upstream_err = Some((StatusCode::UNAUTHORIZED, refresh_err));
+                    continue;
                 }
             }
         }
@@ -1171,8 +1220,7 @@ async fn send_gemini_upstream_request(
         let text = res.text().await.unwrap_or_default();
 
         if status == StatusCode::UNAUTHORIZED {
-            let now_sec = chrono::Utc::now().timestamp();
-            let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+            let _ = state.db.set_account_auth_invalid(&account.id, true);
             excluded_accounts.push(account.id.clone());
             last_upstream_err = Some((status, text));
             continue;
@@ -1201,9 +1249,9 @@ async fn send_gemini_upstream_request(
             || text.contains("MODEL_CAPACITY_EXHAUSTED");
 
         if status == StatusCode::TOO_MANY_REQUESTS {
-            crate::oauth::mark_account_cooldown(&state.db, &account.id, 300);
+            crate::oauth::mark_account_family_cooldown(&account.id, &cand.target_model, 300);
         } else if status == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
-            crate::oauth::mark_account_cooldown(&state.db, &account.id, 60);
+            crate::oauth::mark_account_family_cooldown(&account.id, &cand.target_model, 60);
         }
 
         if is_capacity_or_rate && attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
@@ -1302,46 +1350,59 @@ async fn dispatch_anthropic_request(
                 let byte_stream = res.bytes_stream();
 
                 let sse_stream = stream! {
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
                     let mut estimated_output_chars = 0usize;
 
-                    for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
-
-                                    if line.starts_with("data:") {
-                                        let payload = line.trim_start_matches("data:").trim();
-                                        if let Ok(val) = serde_json::from_str::<Value>(payload) {
-                                            if let Some(msg) = val.get("message") {
-                                                if let Some(u) = msg.get("usage") {
-                                                    if let Some(it) = u.get("input_tokens").and_then(Value::as_u64) {
-                                                        if it > 0 { final_prompt_tokens = it as u32; }
-                                                    }
-                                                }
-                                            }
-                                            if let Some(u) = val.get("usage") {
-                                                if let Some(ot) = u.get("output_tokens").and_then(Value::as_u64) {
-                                                    if ot > 0 { final_completion_tokens = ot as u32; }
-                                                }
-                                            }
-                                            if let Some(delta) = val.get("delta") {
-                                                if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                                                    estimated_output_chars += text.len();
-                                                }
-                                            }
+                    let mut parse_anth_line = |line: &str| {
+                        let line = line.trim();
+                        if line.starts_with("data:") {
+                            let payload = line.trim_start_matches("data:").trim();
+                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                if let Some(msg) = val.get("message") {
+                                    if let Some(u) = msg.get("usage") {
+                                        let it = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                            + u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                            + u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                                        if it > 0 {
+                                            final_prompt_tokens = it as u32;
                                         }
                                     }
                                 }
+                                if let Some(u) = val.get("usage") {
+                                    let it = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                        + u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                        + u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                                    if it > 0 {
+                                        final_prompt_tokens = it as u32;
+                                    }
+                                    if let Some(ot) = u.get("output_tokens").and_then(Value::as_u64) {
+                                        if ot > 0 { final_completion_tokens = ot as u32; }
+                                    }
+                                }
+                                if let Some(delta) = val.get("delta") {
+                                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                                        estimated_output_chars += text.len();
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            for line in sse_buf.push_and_read_lines(&bytes) {
+                                parse_anth_line(&line);
                             }
                             yield Ok::<_, std::io::Error>(bytes);
+                        } else {
+                            break;
                         }
+                    }
+
+                    if let Some(trailing) = sse_buf.finish() {
+                        parse_anth_line(&trailing);
                     }
 
                     if final_completion_tokens == 0 {
@@ -1383,8 +1444,12 @@ async fn dispatch_anthropic_request(
                     .and_then(|body| body.get("usage").cloned());
                 let prompt_tokens = usage
                     .as_ref()
-                    .and_then(|u| u.get("input_tokens"))
-                    .and_then(Value::as_u64)
+                    .map(|u| {
+                        u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                            + u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                            + u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                    })
+                    .filter(|&v| v > 0)
                     .map(|v| v as u32)
                     .unwrap_or(estimated_prompt);
                 let completion_tokens = usage
@@ -1453,70 +1518,72 @@ async fn dispatch_anthropic_request(
 
                 let sse_stream = stream! {
                     let mut sse_state = SseState::new();
-                    let mut byte_buffer: Vec<u8> = Vec::new();
+                    let mut sse_buf = SseLineBuffer::new();
+                    let mut stream_aborted = false;
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            byte_buffer.extend_from_slice(&bytes);
-
-                            while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
-                                let line_bytes = &byte_buffer[..pos];
-                                let line = String::from_utf8_lossy(line_bytes).trim().to_string();
-                                byte_buffer.drain(..=pos);
-
-                                if !line.is_empty() {
-                                    if line.starts_with("data:") && !line.contains("[DONE]") {
-                                        let payload = line.trim_start_matches("data:").trim();
-                                        if let Ok(val) = serde_json::from_str::<Value>(payload) {
-                                            if let Some(usage) = val.get("usage") {
-                                                if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
-                                                    if pt > 0 { final_prompt_tokens = pt as u32; }
-                                                }
-                                                if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
-                                                    if ct > 0 { final_completion_tokens = ct as u32; }
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    let line = raw_line.trim();
+                                    if !line.is_empty() {
+                                        if line.starts_with("data:") && !line.contains("[DONE]") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                if let Some(usage) = val.get("usage") {
+                                                    if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                    }
+                                                    if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    let events = parse_openai_chunk_to_anthropic_events(
-                                        &line,
-                                        &mut sse_state,
-                                        &req_id_str,
-                                        &model_str,
-                                    );
-                                    for ev in events {
-                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                        let events = parse_openai_chunk_to_anthropic_events(
+                                            line,
+                                            &mut sse_state,
+                                            &req_id_str,
+                                            &model_str,
+                                        );
+                                        for ev in events {
+                                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
-
-                    // Flush any trailing line in byte_buffer that didn't end with '\n'
-                    if !byte_buffer.is_empty() {
-                        let line = String::from_utf8_lossy(&byte_buffer).trim().to_string();
-                        byte_buffer.clear();
-                        if !line.is_empty() {
-                            let events = parse_openai_chunk_to_anthropic_events(
-                                &line,
-                                &mut sse_state,
-                                &req_id_str,
-                                &model_str,
-                            );
-                            for ev in events {
-                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                            Err(_) => {
+                                stream_aborted = true;
+                                break;
                             }
                         }
                     }
 
-                    // Safeguard: Ensure stream is cleanly closed with content_block_stop & message_stop
-                    if !sse_state.stream_finished {
-                        let final_events = finish_openai_stream(&mut sse_state, "end_turn");
-                        for ev in final_events {
-                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                    if !stream_aborted {
+                        if let Some(raw_line) = sse_buf.finish() {
+                            let line = raw_line.trim();
+                            if !line.is_empty() {
+                                let events = parse_openai_chunk_to_anthropic_events(
+                                    line,
+                                    &mut sse_state,
+                                    &req_id_str,
+                                    &model_str,
+                                );
+                                for ev in events {
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                }
+                            }
+                        }
+
+                        // Safeguard: 仅当上游正常结束时补齐 content_block_stop & message_stop
+                        if !sse_state.stream_finished {
+                            let final_events = finish_openai_stream(&mut sse_state, "end_turn");
+                            for ev in final_events {
+                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                            }
                         }
                     }
 
@@ -1578,24 +1645,46 @@ async fn dispatch_anthropic_request(
                 anthropic_to_openai::convert_anthropic_req_to_openai(req, &cand.target_model);
             normalize_openai_req_for_upstream(&mut openai_req);
             let dispatch_res =
-                dispatch_chatgpt_request(state, &openai_req, cand, req_id, is_stream).await?;
+                dispatch_chatgpt_request(state, &openai_req, cand, req_id, is_stream, false).await?;
             if is_stream {
                 let stream_id = format!("chatgpt_sub_{}", req_id.replace('-', ""));
+                let req_id_str = req_id.to_string();
                 let byte_stream = dispatch_res.response.into_body().into_data_stream();
                 let model_str = req.model.clone();
+                let db_clone = state.db.clone();
+                let log_sender_clone = state.log_sender.clone();
+                let stats_clone = state.stats.clone();
+                let start_time_clone = Instant::now();
+                let initial_prompt = dispatch_res.prompt_tokens;
+
                 let anthropic_stream = stream! {
                     let mut sse_state = crate::gateway::adapters::SseState::new();
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
+                    let mut stream_aborted = false;
+                    let mut final_prompt_tokens = initial_prompt;
+                    let mut final_completion_tokens = 0u32;
+
                     for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    let line = raw_line.trim();
                                     if line.starts_with("data:") {
+                                        if !line.contains("[DONE]") {
+                                            let payload = line.trim_start_matches("data:").trim();
+                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                                if let Some(usage) = val.get("usage") {
+                                                    if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                                    }
+                                                    if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         let events = crate::gateway::adapters::parse_openai_chunk_to_anthropic_events(
-                                            &line,
+                                            line,
                                             &mut sse_state,
                                             &stream_id,
                                             &model_str,
@@ -1606,8 +1695,65 @@ async fn dispatch_anthropic_request(
                                     }
                                 }
                             }
+                            Err(_) => {
+                                stream_aborted = true;
+                                break;
+                            }
                         }
                     }
+
+                    if !stream_aborted {
+                        if let Some(raw_line) = sse_buf.finish() {
+                            let line = raw_line.trim();
+                            if line.starts_with("data:") {
+                                if !line.contains("[DONE]") {
+                                    let payload = line.trim_start_matches("data:").trim();
+                                    if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                        if let Some(usage) = val.get("usage") {
+                                            if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                                if pt > 0 { final_prompt_tokens = pt as u32; }
+                                            }
+                                            if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                                if ct > 0 { final_completion_tokens = ct as u32; }
+                                            }
+                                        }
+                                    }
+                                }
+                                let events = crate::gateway::adapters::parse_openai_chunk_to_anthropic_events(
+                                    line,
+                                    &mut sse_state,
+                                    &stream_id,
+                                    &model_str,
+                                );
+                                for ev in events {
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                }
+                            }
+                        }
+
+                        if !sse_state.stream_finished {
+                            for ev in finish_openai_stream(&mut sse_state, "end_turn") {
+                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                            }
+                        }
+                    }
+
+                    if final_completion_tokens == 0 {
+                        final_completion_tokens = sse_state.total_output_tokens.max(1);
+                    }
+                    let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                    finalize_stream_log(
+                        &db_clone,
+                        &log_sender_clone,
+                        &req_id_str,
+                        final_prompt_tokens as i32,
+                        final_completion_tokens as i32,
+                        stream_latency,
+                    );
+                    if final_prompt_tokens > initial_prompt {
+                        stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - initial_prompt) as u64, Ordering::Relaxed);
+                    }
+                    stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
                 };
                 Ok(DispatchResult {
                     response: Response::builder()
@@ -1658,6 +1804,7 @@ async fn dispatch_anthropic_request(
                 &req_body_val,
                 is_subscription_pool,
                 is_stream,
+                false,
                 timeout,
                 &forward_ua,
                 headers,
@@ -1678,17 +1825,16 @@ async fn dispatch_anthropic_request(
 
                 let sse_stream = stream! {
                     let mut sse_state = SseState::new();
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
+                    let mut stream_aborted = false;
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    let line = raw_line.trim();
                                     if !line.is_empty() {
                                         if line.starts_with("data:") {
                                             let payload = line.trim_start_matches("data:").trim();
@@ -1706,7 +1852,7 @@ async fn dispatch_anthropic_request(
                                         }
 
                                         let events = parse_gemini_chunk_to_anthropic_events(
-                                            &line,
+                                            line,
                                             &mut sse_state,
                                             &req_id_str,
                                             &model_str,
@@ -1717,28 +1863,37 @@ async fn dispatch_anthropic_request(
                                     }
                                 }
                             }
+                            Err(_) => {
+                                stream_aborted = true;
+                                break;
+                            }
                         }
                     }
 
-                    if !buffer.trim().is_empty() {
-                        let events = parse_gemini_chunk_to_anthropic_events(
-                            buffer.trim(),
-                            &mut sse_state,
-                            &req_id_str,
-                            &model_str,
-                        );
-                        for event in events {
+                    if !stream_aborted {
+                        if let Some(raw_line) = sse_buf.finish() {
+                            let line = raw_line.trim();
+                            if !line.is_empty() {
+                                let events = parse_gemini_chunk_to_anthropic_events(
+                                    line,
+                                    &mut sse_state,
+                                    &req_id_str,
+                                    &model_str,
+                                );
+                                for event in events {
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
+                                }
+                            }
+                        }
+
+                        let final_stop_reason = if sse_state.current_tool_id.is_some() {
+                            "tool_use"
+                        } else {
+                            "end_turn"
+                        };
+                        for event in finish_gemini_stream(&mut sse_state, final_stop_reason) {
                             yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
                         }
-                    }
-
-                    let final_stop_reason = if sse_state.current_tool_id.is_some() {
-                        "tool_use"
-                    } else {
-                        "end_turn"
-                    };
-                    for event in finish_gemini_stream(&mut sse_state, final_stop_reason) {
-                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(event));
                     }
 
                     if final_completion_tokens == 0 {
@@ -2043,6 +2198,21 @@ async fn handle_responses(
     let req = responses::convert_responses_req_to_chat(&body);
     let is_stream = req.stream.unwrap_or(true);
 
+    if req.model.trim().is_empty() {
+        state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+        state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "Missing required parameter: 'model'",
+                    "type": "invalid_request_error"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     let route_match = match state
         .router
         .resolve_route(&req.model, session_id.as_deref(), &providers)
@@ -2162,31 +2332,42 @@ async fn handle_responses(
 
                     let responses_stream = stream! {
                         let mut sse_state = responses::ResponsesSseState::new_full(&response_id, &model_str, is_compaction, custom_tools_clone);
-                        let mut buffer = String::new();
+                        let mut sse_buf = SseLineBuffer::new();
+                        let mut stream_aborted = false;
 
                         for await chunk_res in byte_stream {
-                            if let Ok(bytes) = chunk_res {
-                                if let Ok(s) = std::str::from_utf8(&bytes) {
-                                    buffer.push_str(s);
-
-                                    while let Some(pos) = buffer.find('\n') {
-                                        let line = buffer[..pos].trim().to_string();
-                                        buffer = buffer[pos + 1..].to_string();
-
+                            match chunk_res {
+                                Ok(bytes) => {
+                                    for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                        let line = raw_line.trim();
                                         if !line.is_empty() {
-                                            let events = sse_state.process_line(&line);
+                                            let events = sse_state.process_line(line);
                                             for ev in events {
                                                 yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
                                             }
                                         }
                                     }
                                 }
+                                Err(_) => {
+                                    stream_aborted = true;
+                                    break;
+                                }
                             }
                         }
 
-                        let trailing = sse_state.finish();
-                        for ev in trailing {
-                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                        if !stream_aborted {
+                            if let Some(raw_line) = sse_buf.finish() {
+                                let line = raw_line.trim();
+                                if !line.is_empty() {
+                                    for ev in sse_state.process_line(line) {
+                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                    }
+                                }
+                            }
+                            let trailing = sse_state.finish();
+                            for ev in trailing {
+                                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                            }
                         }
                     };
 
@@ -2268,6 +2449,7 @@ async fn dispatch_chatgpt_request(
     cand: &RouteCandidate,
     req_id: &str,
     is_stream: bool,
+    finalize_log: bool,
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let client = &state.http_client;
     let estimated_prompt = estimate_openai_req_prompt_tokens(req);
@@ -2332,20 +2514,51 @@ async fn dispatch_chatgpt_request(
             }
         };
 
-        // 上游返回 401 时尝试刷新 Token 并立即重试当前账号一次
+        // 上游返回 401 时使用单飞锁刷新 Token 并立即重试当前账号一次
         if res.status() == reqwest::StatusCode::UNAUTHORIZED {
-            match crate::oauth::try_refresh_subscription_account(&state.db, client, &account.id).await {
-                Ok(refreshed) => {
-                    if let Ok(retried) = send_with_token(&refreshed.access_token).await {
+            match crate::oauth::ensure_or_refresh_account_token(
+                &state.db,
+                client,
+                &account.id,
+                Some(&account.access_token),
+            )
+            .await
+            {
+                Ok(refreshed) => match send_with_token(&refreshed.access_token).await {
+                    Ok(retried) => {
                         res = retried;
+                        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+                            let _ = state.db.set_account_auth_invalid(&refreshed.id, true);
+                        }
                     }
-                }
+                    Err(retry_err) => {
+                        let (_, err_msg) = map_upstream_request_error(&retry_err, timeout);
+                        tracing::warn!(
+                            "Upstream ChatGPT retry after 401 refresh hit network error for {}: {}",
+                            account.id,
+                            err_msg
+                        );
+                        crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                        excluded_accounts.push(account.id.clone());
+                        last_upstream_err = Some((
+                            StatusCode::BAD_GATEWAY,
+                            format!("Upstream retry network error: {}", err_msg),
+                        ));
+                        continue;
+                    }
+                },
                 Err(refresh_err) => {
                     tracing::warn!(
                         "Upstream ChatGPT returned 401 and refresh failed for {}: {}",
                         account.id,
                         refresh_err
                     );
+                    if !crate::oauth::is_token_revoked_or_invalid(&refresh_err) {
+                        crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                    }
+                    excluded_accounts.push(account.id.clone());
+                    last_upstream_err = Some((StatusCode::UNAUTHORIZED, refresh_err));
+                    continue;
                 }
             }
         }
@@ -2359,8 +2572,7 @@ async fn dispatch_chatgpt_request(
         let text = res.text().await.unwrap_or_default();
 
         if status == StatusCode::UNAUTHORIZED {
-            let now_sec = chrono::Utc::now().timestamp();
-            let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+            let _ = state.db.set_account_auth_invalid(&account.id, true);
             excluded_accounts.push(account.id.clone());
             last_upstream_err = Some((status, text));
             continue;
@@ -2419,30 +2631,89 @@ async fn dispatch_chatgpt_request(
         let req_id_str = req_id.to_string();
         let byte_stream = res.bytes_stream();
         let model_str = cand.target_model.clone();
+        let db_clone = state.db.clone();
+        let log_sender_clone = state.log_sender.clone();
+        let stats_clone = state.stats.clone();
+        let start_time_clone = Instant::now();
+        let initial_prompt = estimated_prompt;
 
         let sse_stream = stream! {
             let mut parser = responses::ResponsesToChatSseParser::new(&req_id_str, &model_str);
-            let mut buffer = String::new();
+            let mut sse_buf = SseLineBuffer::new();
+            let mut stream_aborted = false;
+            let mut final_prompt_tokens = initial_prompt;
+            let mut final_completion_tokens = 0u32;
+            let mut generated_chunks = 0u32;
+
+            let mut collect_chunk_stats = |cl: &str| {
+                let trimmed = cl.trim();
+                if trimmed.starts_with("data:") && !trimmed.contains("[DONE]") {
+                    if let Ok(val) = serde_json::from_str::<Value>(trimmed.trim_start_matches("data:").trim()) {
+                        if let Some(u) = val.get("usage") {
+                            if let Some(pt) = u.get("prompt_tokens").and_then(Value::as_u64) {
+                                if pt > 0 { final_prompt_tokens = pt as u32; }
+                            }
+                            if let Some(ct) = u.get("completion_tokens").and_then(Value::as_u64) {
+                                if ct > 0 { final_completion_tokens = ct as u32; }
+                            }
+                        }
+                        if val["choices"][0]["delta"]["content"].as_str().is_some()
+                            || val["choices"][0]["delta"]["tool_calls"].is_array()
+                        {
+                            generated_chunks += 1;
+                        }
+                    }
+                }
+            };
 
             for await chunk_res in byte_stream {
-                if let Ok(bytes) = chunk_res {
-                    if let Ok(s) = std::str::from_utf8(&bytes) {
-                        buffer.push_str(s);
-                        while let Some(pos) = buffer.find('\n') {
-                            let line = buffer[..pos].trim().to_string();
-                            buffer = buffer[pos + 1..].to_string();
-                            let chat_lines = parser.process_line(&line);
+                match chunk_res {
+                    Ok(bytes) => {
+                        for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                            let chat_lines = parser.process_line(raw_line.trim());
                             for cl in chat_lines {
+                                collect_chunk_stats(&cl);
                                 yield Ok::<_, std::io::Error>(axum::body::Bytes::from(cl));
                             }
                         }
                     }
+                    Err(_) => {
+                        stream_aborted = true;
+                        break;
+                    }
                 }
             }
 
-            let finish_lines = parser.finish();
-            for fl in finish_lines {
-                yield Ok::<_, std::io::Error>(axum::body::Bytes::from(fl));
+            if !stream_aborted {
+                if let Some(raw_line) = sse_buf.finish() {
+                    for cl in parser.process_line(raw_line.trim()) {
+                        collect_chunk_stats(&cl);
+                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(cl));
+                    }
+                }
+                let finish_lines = parser.finish();
+                for fl in finish_lines {
+                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(fl));
+                }
+            }
+
+            if finalize_log {
+                if final_completion_tokens == 0 {
+                    final_completion_tokens = generated_chunks.max(1);
+                }
+                let stream_latency = start_time_clone.elapsed().as_millis() as i64;
+                finalize_stream_log(
+                    &db_clone,
+                    &log_sender_clone,
+                    &req_id_str,
+                    final_prompt_tokens as i32,
+                    final_completion_tokens as i32,
+                    stream_latency,
+                );
+                if final_prompt_tokens > initial_prompt {
+                    stats_clone.total_prompt_tokens.fetch_add((final_prompt_tokens - initial_prompt) as u64, Ordering::Relaxed);
+                }
+                stats_clone.total_completion_tokens.fetch_add(final_completion_tokens as u64, Ordering::Relaxed);
             }
         };
 
@@ -2453,7 +2724,7 @@ async fn dispatch_chatgpt_request(
                 .header("connection", "keep-alive")
                 .body(Body::from_stream(sse_stream))
                 .unwrap(),
-            prompt_tokens: estimated_prompt as u32,
+            prompt_tokens: estimated_prompt,
             completion_tokens: 0,
         })
     } else {
@@ -2462,38 +2733,114 @@ async fn dispatch_chatgpt_request(
         let model_str = cand.target_model.clone();
 
         let mut parser = responses::ResponsesToChatSseParser::new(&req_id_str, &model_str);
-        let mut buffer = String::new();
+        let mut sse_buf = SseLineBuffer::new();
         let mut full_content = String::new();
-        let mut prompt_tokens = estimated_prompt as u32;
+        let mut tool_calls_map: std::collections::BTreeMap<u64, (String, String, String)> =
+            std::collections::BTreeMap::new();
+        let mut finish_reason = "stop".to_string();
+        let mut prompt_tokens = estimated_prompt;
         let mut completion_tokens = 0u32;
+        let mut stream_abort_err: Option<String> = None;
 
-        use tokio_stream::StreamExt;
-        tokio::pin!(byte_stream);
-        while let Some(chunk_res) = byte_stream.next().await {
-            if let Ok(bytes) = chunk_res {
-                if let Ok(s) = std::str::from_utf8(&bytes) {
-                    buffer.push_str(s);
-                    while let Some(pos) = buffer.find('\n') {
-                        let line = buffer[..pos].trim().to_string();
-                        buffer = buffer[pos + 1..].to_string();
-                        let chat_lines = parser.process_line(&line);
-                        for cl in chat_lines {
-                            let trimmed = cl.trim();
-                            if trimmed.starts_with("data:") && !trimmed.contains("[DONE]") {
-                                if let Ok(val) = serde_json::from_str::<Value>(trimmed.trim_start_matches("data:").trim()) {
-                                    if let Some(c) = val["choices"][0]["delta"]["content"].as_str() {
-                                        full_content.push_str(c);
+        let mut consume_chat_lines = |chat_lines: Vec<String>| {
+            for cl in chat_lines {
+                let trimmed = cl.trim();
+                if trimmed.starts_with("data:") && !trimmed.contains("[DONE]") {
+                    if let Ok(val) = serde_json::from_str::<Value>(trimmed.trim_start_matches("data:").trim()) {
+                        if let Some(choice) = val.get("choices").and_then(Value::as_array).and_then(|a| a.first()) {
+                            if let Some(c) = choice["delta"]["content"].as_str() {
+                                full_content.push_str(c);
+                            }
+                            if let Some(tc_arr) = choice["delta"]["tool_calls"].as_array() {
+                                for tc in tc_arr {
+                                    let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
+                                    let entry = tool_calls_map.entry(idx).or_insert_with(|| {
+                                        (String::new(), String::new(), String::new())
+                                    });
+                                    if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                                        if !id.is_empty() {
+                                            entry.0 = id.to_string();
+                                        }
                                     }
-                                    if let Some(u) = val.get("usage") {
-                                        prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(prompt_tokens as u64) as u32;
-                                        completion_tokens = u["completion_tokens"].as_u64().unwrap_or(completion_tokens as u64) as u32;
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) = func.get("name").and_then(Value::as_str) {
+                                            if !name.is_empty() {
+                                                entry.1 = name.to_string();
+                                            }
+                                        }
+                                        if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                                            entry.2.push_str(args);
+                                        }
                                     }
                                 }
                             }
+                            if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
+                                finish_reason = fr.to_string();
+                            }
+                        }
+                        if let Some(u) = val.get("usage") {
+                            prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(prompt_tokens as u64) as u32;
+                            completion_tokens = u["completion_tokens"].as_u64().unwrap_or(completion_tokens as u64) as u32;
                         }
                     }
                 }
             }
+        };
+
+        use tokio_stream::StreamExt;
+        tokio::pin!(byte_stream);
+        while let Some(chunk_res) = byte_stream.next().await {
+            match chunk_res {
+                Ok(bytes) => {
+                    for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                        consume_chat_lines(parser.process_line(raw_line.trim()));
+                    }
+                }
+                Err(e) => {
+                    stream_abort_err = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        if stream_abort_err.is_none() {
+            if let Some(raw_line) = sse_buf.finish() {
+                consume_chat_lines(parser.process_line(raw_line.trim()));
+            }
+            consume_chat_lines(parser.finish());
+        }
+        drop(consume_chat_lines);
+
+        if let Some(err) = stream_abort_err {
+            if full_content.is_empty() && tool_calls_map.is_empty() {
+                return Err((StatusCode::BAD_GATEWAY, format!("Upstream stream interrupted: {}", err)));
+            }
+        }
+
+        let tool_calls_json: Vec<Value> = tool_calls_map
+            .into_iter()
+            .map(|(_, (id, name, arguments))| {
+                json!({
+                    "id": if id.is_empty() { format!("call_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]) } else { id },
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments
+                    }
+                })
+            })
+            .collect();
+
+        let mut msg_obj = json!({
+            "role": "assistant",
+            "content": if !tool_calls_json.is_empty() && full_content.is_empty() {
+                Value::Null
+            } else {
+                Value::String(full_content)
+            }
+        });
+        if !tool_calls_json.is_empty() {
+            msg_obj["tool_calls"] = Value::Array(tool_calls_json);
+            finish_reason = "tool_calls".to_string();
         }
 
         let resp_json = json!({
@@ -2503,11 +2850,8 @@ async fn dispatch_chatgpt_request(
             "model": model_str,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": full_content
-                },
-                "finish_reason": "stop"
+                "message": msg_obj,
+                "finish_reason": finish_reason
             }],
             "usage": {
                 "prompt_tokens": prompt_tokens,
@@ -2548,7 +2892,7 @@ async fn dispatch_openai_request(
 
     match cand.provider.protocol.as_str() {
         "chatgpt" => {
-            dispatch_chatgpt_request(state, &req_body, cand, req_id, is_stream).await
+            dispatch_chatgpt_request(state, &req_body, cand, req_id, is_stream, true).await
         }
         "openai" | "openrouter" | "ollama" => {
             let url = resolve_upstream_endpoint(&cand.provider.base_url, "/chat/completions");
@@ -2593,46 +2937,50 @@ async fn dispatch_openai_request(
                 let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
                     let mut generated_tokens = 0u32;
 
-                    for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
-
-                                    if line.starts_with("data:") && !line.contains("[DONE]") {
-                                        let payload = line.trim_start_matches("data:").trim();
-                                        if let Ok(val) = serde_json::from_str::<Value>(payload) {
-                                            if let Some(usage) = val.get("usage") {
-                                                if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
-                                                    if pt > 0 { final_prompt_tokens = pt as u32; }
-                                                }
-                                                if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
-                                                    if ct > 0 { final_completion_tokens = ct as u32; }
-                                                }
-                                            }
-                                            if let Some(choices) = val.get("choices").and_then(Value::as_array) {
-                                                if let Some(c0) = choices.first() {
-                                                    if let Some(d) = c0.get("delta") {
-                                                        if d.get("content").is_some() || d.get("reasoning_content").is_some() {
-                                                            generated_tokens += 1;
-                                                        }
-                                                    }
-                                                }
+                    let mut parse_oai_line = |raw_line: &str| {
+                        let line = raw_line.trim();
+                        if line.starts_with("data:") && !line.contains("[DONE]") {
+                            let payload = line.trim_start_matches("data:").trim();
+                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                if let Some(usage) = val.get("usage") {
+                                    if let Some(pt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                    }
+                                    if let Some(ct) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                    }
+                                }
+                                if let Some(choices) = val.get("choices").and_then(Value::as_array) {
+                                    if let Some(c0) = choices.first() {
+                                        if let Some(d) = c0.get("delta") {
+                                            if d.get("content").is_some() || d.get("reasoning_content").is_some() {
+                                                generated_tokens += 1;
                                             }
                                         }
                                     }
                                 }
                             }
-                            yield Ok::<_, std::io::Error>(bytes);
                         }
+                    };
+
+                    for await chunk_res in byte_stream {
+                        if let Ok(bytes) = chunk_res {
+                            for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                parse_oai_line(&raw_line);
+                            }
+                            yield Ok::<_, std::io::Error>(bytes);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if let Some(trailing) = sse_buf.finish() {
+                        parse_oai_line(&trailing);
                     }
 
                     if final_completion_tokens == 0 {
@@ -2743,32 +3091,35 @@ async fn dispatch_openai_request(
                 let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
+                    let mut anth_state = AnthropicToOpenAiSseState::default();
+                    let mut stream_aborted = false;
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
                     let mut generated_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
-
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    let line = raw_line.trim();
                                     if !line.is_empty() {
                                         if line.starts_with("data:") {
                                             let payload = line.trim_start_matches("data:").trim();
                                             if let Ok(val) = serde_json::from_str::<Value>(payload) {
                                                 if let Some(msg) = val.get("message") {
                                                     if let Some(u) = msg.get("usage") {
-                                                        if let Some(it) = u.get("input_tokens").and_then(Value::as_u64) {
-                                                            if it > 0 { final_prompt_tokens = it as u32; }
-                                                        }
+                                                        let it = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                                            + u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                                            + u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                                                        if it > 0 { final_prompt_tokens = it as u32; }
                                                     }
                                                 }
                                                 if let Some(u) = val.get("usage") {
+                                                    let it = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                                        + u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                                        + u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                                                    if it > 0 { final_prompt_tokens = it as u32; }
                                                     if let Some(ot) = u.get("output_tokens").and_then(Value::as_u64) {
                                                         if ot > 0 { final_completion_tokens = ot as u32; }
                                                     }
@@ -2781,15 +3132,37 @@ async fn dispatch_openai_request(
                                             }
                                         }
 
-                                        let chunks = parse_anthropic_event_to_openai_chunks(
-                                            &line,
+                                        let chunks = parse_anthropic_event_to_openai_chunks_with_state(
+                                            line,
                                             &req_id_str,
                                             &model_str,
+                                            &mut anth_state,
                                         );
                                         for c in chunks {
                                             yield Ok::<_, std::io::Error>(axum::body::Bytes::from(c));
                                         }
                                     }
+                                }
+                            }
+                            Err(_) => {
+                                stream_aborted = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !stream_aborted {
+                        if let Some(raw_line) = sse_buf.finish() {
+                            let line = raw_line.trim();
+                            if !line.is_empty() {
+                                let chunks = parse_anthropic_event_to_openai_chunks_with_state(
+                                    line,
+                                    &req_id_str,
+                                    &model_str,
+                                    &mut anth_state,
+                                );
+                                for c in chunks {
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(c));
                                 }
                             }
                         }
@@ -2867,6 +3240,7 @@ async fn dispatch_openai_request(
                 &req_body_val,
                 is_subscription_pool,
                 is_stream,
+                false,
                 timeout,
                 &forward_ua,
                 headers,
@@ -2886,21 +3260,19 @@ async fn dispatch_openai_request(
                 let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
                     let mut sse_state = SseState::new();
+                    let mut anth_state = AnthropicToOpenAiSseState::default();
+                    let mut stream_aborted = false;
                     sse_state.total_input_tokens = estimated_prompt;
                     let mut final_prompt_tokens = estimated_prompt;
                     let mut final_completion_tokens = 0u32;
 
                     for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
-
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    let line = raw_line.trim();
                                     if !line.is_empty() {
                                         if line.starts_with("data:") {
                                             let payload = line.trim_start_matches("data:").trim();
@@ -2918,16 +3290,17 @@ async fn dispatch_openai_request(
                                         }
 
                                         let anthropic_events = parse_gemini_chunk_to_anthropic_events(
-                                            &line,
+                                            line,
                                             &mut sse_state,
                                             &req_id_str,
                                             &model_str,
                                         );
                                         for a_evt in anthropic_events {
-                                            let oai_chunks = parse_anthropic_event_to_openai_chunks(
+                                            let oai_chunks = parse_anthropic_event_to_openai_chunks_with_state(
                                                 &a_evt,
                                                 &req_id_str,
                                                 &model_str,
+                                                &mut anth_state,
                                             );
                                             for o_chunk in oai_chunks {
                                                 yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
@@ -2936,49 +3309,62 @@ async fn dispatch_openai_request(
                                     }
                                 }
                             }
+                            Err(_) => {
+                                stream_aborted = true;
+                                break;
+                            }
                         }
                     }
 
-                    if !buffer.trim().is_empty() {
-                        let anthropic_events = parse_gemini_chunk_to_anthropic_events(
-                            buffer.trim(),
-                            &mut sse_state,
-                            &req_id_str,
-                            &model_str,
-                        );
-                        for a_evt in anthropic_events {
-                            let oai_chunks = parse_anthropic_event_to_openai_chunks(
+                    if !stream_aborted {
+                        if let Some(raw_line) = sse_buf.finish() {
+                            let line = raw_line.trim();
+                            if !line.is_empty() {
+                                let anthropic_events = parse_gemini_chunk_to_anthropic_events(
+                                    line,
+                                    &mut sse_state,
+                                    &req_id_str,
+                                    &model_str,
+                                );
+                                for a_evt in anthropic_events {
+                                    let oai_chunks = parse_anthropic_event_to_openai_chunks_with_state(
+                                        &a_evt,
+                                        &req_id_str,
+                                        &model_str,
+                                        &mut anth_state,
+                                    );
+                                    for o_chunk in oai_chunks {
+                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
+                                    }
+                                }
+                            }
+                        }
+
+                        if final_completion_tokens == 0 {
+                            final_completion_tokens = sse_state.total_output_tokens.max(1);
+                        }
+                        if final_prompt_tokens == 0 {
+                            final_prompt_tokens = sse_state.total_input_tokens;
+                        }
+
+                        let final_stop_reason = if sse_state.current_tool_id.is_some() {
+                            "tool_use"
+                        } else {
+                            "end_turn"
+                        };
+                        for a_evt in finish_gemini_stream(&mut sse_state, final_stop_reason) {
+                            let oai_chunks = parse_anthropic_event_to_openai_chunks_with_state(
                                 &a_evt,
                                 &req_id_str,
                                 &model_str,
+                                &mut anth_state,
                             );
                             for o_chunk in oai_chunks {
                                 yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
                             }
                         }
-                    }
-
-                    if final_completion_tokens == 0 {
+                    } else if final_completion_tokens == 0 {
                         final_completion_tokens = sse_state.total_output_tokens.max(1);
-                    }
-                    if final_prompt_tokens == 0 {
-                        final_prompt_tokens = sse_state.total_input_tokens;
-                    }
-
-                    let final_stop_reason = if sse_state.current_tool_id.is_some() {
-                        "tool_use"
-                    } else {
-                        "end_turn"
-                    };
-                    for a_evt in finish_gemini_stream(&mut sse_state, final_stop_reason) {
-                        let oai_chunks = parse_anthropic_event_to_openai_chunks(
-                            &a_evt,
-                            &req_id_str,
-                            &model_str,
-                        );
-                        for o_chunk in oai_chunks {
-                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(o_chunk));
-                        }
                     }
                     let stream_latency = start_time_clone.elapsed().as_millis() as i64;
                     finalize_stream_log(
@@ -3272,7 +3658,7 @@ async fn dispatch_gemini_request(
     cand: &RouteCandidate,
     req_id: &str,
     is_stream: bool,
-    _method: &str,
+    method: &str,
     client_key: Option<&str>,
     client_ua: Option<&str>,
     client_type: &str,
@@ -3280,6 +3666,7 @@ async fn dispatch_gemini_request(
 ) -> Result<DispatchResult, (StatusCode, String)> {
     let timeout = resolve_dispatch_timeout(cand, 0);
     let forward_ua = resolve_forward_user_agent(client_ua, client_type);
+    let is_count_tokens = method == "countTokens";
     let session_hint = req_body
         .get("contents")
         .and_then(|c| c.as_array())
@@ -3325,6 +3712,7 @@ async fn dispatch_gemini_request(
                 &req_body_val,
                 is_subscription_pool,
                 is_stream,
+                is_count_tokens,
                 timeout,
                 &forward_ua,
                 headers,
@@ -3343,46 +3731,52 @@ async fn dispatch_gemini_request(
                 let start_time_clone = Instant::now();
 
                 let sse_stream = stream! {
-                    let mut buffer = String::new();
+                    let mut sse_buf = SseLineBuffer::new();
                     let mut final_prompt_tokens = 0u32;
                     let mut final_completion_tokens = 0u32;
 
+                    let mut handle_gemini_line = |raw_line: &str| -> Option<String> {
+                        let line = raw_line.trim();
+                        if line.is_empty() {
+                            return None;
+                        }
+                        if line.starts_with("data:") {
+                            let payload = line.trim_start_matches("data:").trim();
+                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
+                                let actual_val = val.get("response").unwrap_or(&val);
+                                if let Some(usage) = actual_val.get("usageMetadata") {
+                                    if let Some(pt) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+                                        if pt > 0 { final_prompt_tokens = pt as u32; }
+                                    }
+                                    if let Some(ct) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+                                        if ct > 0 { final_completion_tokens = ct as u32; }
+                                    }
+                                }
+                                if val.get("response").is_some() {
+                                    return Some(format!("data: {}\n\n", serde_json::to_string(actual_val).unwrap_or_default()));
+                                }
+                            }
+                            return Some(format!("{}\n\n", line));
+                        }
+                        Some(format!("{}\n", line))
+                    };
+
                     for await chunk_res in byte_stream {
-                        if let Ok(bytes) = chunk_res {
-                            if let Ok(s) = std::str::from_utf8(&bytes) {
-                                buffer.push_str(s);
-
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].trim().to_string();
-                                    buffer = buffer[pos + 1..].to_string();
-
-                                    if !line.is_empty() {
-                                        if line.starts_with("data:") {
-                                            let payload = line.trim_start_matches("data:").trim();
-                                            if let Ok(val) = serde_json::from_str::<Value>(payload) {
-                                                let actual_val = val.get("response").unwrap_or(&val);
-                                                if let Some(usage) = actual_val.get("usageMetadata") {
-                                                    if let Some(pt) = usage.get("promptTokenCount").and_then(Value::as_u64) {
-                                                        if pt > 0 { final_prompt_tokens = pt as u32; }
-                                                    }
-                                                    if let Some(ct) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
-                                                        if ct > 0 { final_completion_tokens = ct as u32; }
-                                                    }
-                                                }
-
-                                                if val.get("response").is_some() {
-                                                    let clean_line = format!("data: {}\n\n", serde_json::to_string(actual_val).unwrap_or_default());
-                                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(clean_line));
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        let out_line = format!("{}\n", line);
-                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(out_line));
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    if let Some(out) = handle_gemini_line(&raw_line) {
+                                        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(out));
                                     }
                                 }
                             }
+                            Err(_) => break,
+                        }
+                    }
+
+                    if let Some(trailing) = sse_buf.finish() {
+                        if let Some(out) = handle_gemini_line(&trailing) {
+                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(out));
                         }
                     }
 
@@ -3650,13 +4044,13 @@ mod tests {
         normalize_openai_req_for_upstream(&mut non_reasoning_req);
         assert_eq!(non_reasoning_req.reasoning_effort, None);
 
-        // 6. reasoning_effort on supported models (e.g. o3-mini) preserved and normalized
+        // 6. reasoning_effort on supported models (e.g. o3-mini, o4-mini) preserved and normalized
         let mut reasoning_req = OpenAIChatRequest {
             model: "o3-mini".to_string(),
             messages: vec![],
             temperature: None,
             max_tokens: None,
-            max_completion_tokens: None,
+            max_completion_tokens: Some(2048),
             reasoning_effort: Some("ultra".to_string()),
             tools: None,
             tool_choice: None,
@@ -3665,6 +4059,25 @@ mod tests {
         };
         normalize_openai_req_for_upstream(&mut reasoning_req);
         assert_eq!(reasoning_req.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(reasoning_req.max_completion_tokens, Some(2048));
+        assert_eq!(reasoning_req.max_tokens, None);
+
+        let mut o4_req = OpenAIChatRequest {
+            model: "o4-mini".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: Some(1024),
+            max_completion_tokens: None,
+            reasoning_effort: Some("medium".to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            stream_options: None,
+        };
+        normalize_openai_req_for_upstream(&mut o4_req);
+        assert_eq!(o4_req.max_completion_tokens, Some(1024));
+        assert_eq!(o4_req.max_tokens, None);
+        assert_eq!(o4_req.reasoning_effort.as_deref(), Some("medium"));
     }
 
     #[test]
