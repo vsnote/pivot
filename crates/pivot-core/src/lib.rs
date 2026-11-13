@@ -78,10 +78,7 @@ pub fn start_gateway(
     log_sender: Option<tokio::sync::broadcast::Sender<db::RequestLog>>,
 ) {
     let interceptor_mgr = interceptor::InterceptorManager::new(state.db.clone(), state.port);
-    let _ = interceptor_mgr.sync_codex_catalog_if_intercepted();
-    let _ = interceptor_mgr.sync_claude_settings_if_intercepted();
-    let _ = interceptor_mgr.sync_pi_models_if_intercepted();
-    let _ = interceptor_mgr.sync_opencode_models_if_intercepted();
+    let _ = interceptor_mgr.sync_all_if_intercepted();
 
     let gw_state = gateway::server::GatewayState {
         db: state.db.clone(),

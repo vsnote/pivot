@@ -45,6 +45,159 @@ impl InterceptorManager {
         }
     }
 
+    /// 识别 URL 是否指向 Pivot 本地网关端口范围 (16888..=16899)
+    pub fn is_pivot_local_endpoint(url: &str) -> bool {
+        let lower = url.trim().trim_end_matches('/').to_lowercase();
+        let rest = if let Some(r) = lower.strip_prefix("http://127.0.0.1:") {
+            r
+        } else if let Some(r) = lower.strip_prefix("http://localhost:") {
+            r
+        } else {
+            return false;
+        };
+        let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(port) = port_str.parse::<u16>() {
+            (16888..=16899).contains(&port)
+        } else {
+            false
+        }
+    }
+
+    fn contains_pivot_local_endpoint(content: &str) -> bool {
+        let lower = content.to_lowercase();
+        for prefix in ["http://127.0.0.1:", "http://localhost:"] {
+            let mut search_from = 0;
+            while let Some(pos) = lower[search_from..].find(prefix) {
+                let after = &lower[search_from + pos + prefix.len()..];
+                let port_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if (16888..=16899).contains(&port) {
+                        return true;
+                    }
+                }
+                search_from += pos + prefix.len();
+            }
+        }
+        false
+    }
+
+    /// 安全解析 JSON/JSONC（保留字符串字面量内的 `//` / `/* */`，剥离字符串外注释与尾随逗号）；
+    /// 若剥离后仍无法解析则显式返回 Err，绝不静默清空用户配置。
+    pub fn parse_jsonc_preserving_safety(raw: &str) -> Result<Value, String> {
+        if raw.trim().is_empty() {
+            return Ok(json!({}));
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(raw) {
+            return Ok(v);
+        }
+
+        // 第一遍：剥离字符串外部的 `//` 单行注释与 `/* ... */` 块注释
+        let chars: Vec<char> = raw.chars().collect();
+        let mut no_comments = String::with_capacity(raw.len());
+        let mut i = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+
+        while i < chars.len() {
+            let ch = chars[i];
+            if in_string {
+                no_comments.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+
+            if ch == '"' {
+                in_string = true;
+                no_comments.push(ch);
+                i += 1;
+                continue;
+            }
+
+            if ch == '/' && i + 1 < chars.len() {
+                let next = chars[i + 1];
+                if next == '/' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if next == '*' {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        if chars[i] == '\n' {
+                            no_comments.push('\n');
+                        }
+                        i += 1;
+                    }
+                    if i + 1 < chars.len() {
+                        i += 2;
+                    } else {
+                        i = chars.len();
+                    }
+                    continue;
+                }
+            }
+
+            no_comments.push(ch);
+            i += 1;
+        }
+
+        // 第二遍：剥离字符串外部在 `}` 或 `]` 之前的尾随逗号
+        let nc_chars: Vec<char> = no_comments.chars().collect();
+        let mut cleaned = String::with_capacity(no_comments.len());
+        in_string = false;
+        escaped = false;
+        let mut j = 0;
+        while j < nc_chars.len() {
+            let ch = nc_chars[j];
+            if in_string {
+                cleaned.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                j += 1;
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+                cleaned.push(ch);
+                j += 1;
+                continue;
+            }
+            if ch == ',' {
+                let mut k = j + 1;
+                while k < nc_chars.len() && nc_chars[k].is_whitespace() {
+                    k += 1;
+                }
+                if k < nc_chars.len() && (nc_chars[k] == '}' || nc_chars[k] == ']') {
+                    j += 1;
+                    continue;
+                }
+            }
+            cleaned.push(ch);
+            j += 1;
+        }
+
+        serde_json::from_str::<Value>(&cleaned).map_err(|e| {
+            format!(
+                "配置文件包含无法解析的 JSON/JSONC 语法，为保护现有配置已中止写入: {}",
+                e
+            )
+        })
+    }
+
     fn home_dir() -> Option<PathBuf> {
         dirs::home_dir()
     }
@@ -85,12 +238,14 @@ impl InterceptorManager {
                 let settings_path = Self::claude_settings_path();
                 if settings_path.exists() {
                     if let Ok(content) = fs::read_to_string(&settings_path) {
-                        if !content.contains(&self.gateway_url) {
-                            if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                                if let Some(env_obj) = v.get("env").and_then(|e| e.as_object()) {
-                                    if let Some(url) = env_obj.get("ANTHROPIC_BASE_URL").and_then(|u| u.as_str()) {
+                        if let Ok(v) = Self::parse_jsonc_preserving_safety(&content) {
+                            if let Some(env_obj) = v.get("env").and_then(|e| e.as_object()) {
+                                if let Some(url) = env_obj.get("ANTHROPIC_BASE_URL").and_then(|u| u.as_str()) {
+                                    if !url.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(url) {
                                         ep_opt = Some(url.to_string());
                                     }
+                                }
+                                if ep_opt.is_some() {
                                     token = env_obj
                                         .get("ANTHROPIC_AUTH_TOKEN")
                                         .or_else(|| env_obj.get("ANTHROPIC_API_KEY"))
@@ -113,8 +268,10 @@ impl InterceptorManager {
                                         }
                                     }
                                 }
-                                if ep_opt.is_none() {
-                                    if let Some(url) = v.get("anthropicBaseUrl").and_then(|u| u.as_str()) {
+                            }
+                            if ep_opt.is_none() {
+                                if let Some(url) = v.get("anthropicBaseUrl").and_then(|u| u.as_str()) {
+                                    if !url.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(url) {
                                         ep_opt = Some(url.to_string());
                                     }
                                 }
@@ -128,25 +285,25 @@ impl InterceptorManager {
                     let config_path = Self::claude_config_path();
                     if config_path.exists() {
                         if let Ok(content) = fs::read_to_string(&config_path) {
-                            if !content.contains(&self.gateway_url) {
-                                if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                                    let url = v
-                                        .get("anthropicBaseUrl")
-                                        .and_then(|u| u.as_str())
-                                        .or_else(|| {
-                                            v.get("env")
-                                                .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
-                                                .and_then(|u| u.as_str())
-                                        });
-                                    if let Some(u) = url {
+                            if let Ok(v) = Self::parse_jsonc_preserving_safety(&content) {
+                                let url = v
+                                    .get("anthropicBaseUrl")
+                                    .and_then(|u| u.as_str())
+                                    .or_else(|| {
+                                        v.get("env")
+                                            .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
+                                            .and_then(|u| u.as_str())
+                                    });
+                                if let Some(u) = url {
+                                    if !u.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(u) {
                                         ep_opt = Some(u.to_string());
-                                    }
-                                    if token.is_none() {
-                                        token = v
-                                            .get("primaryApiKey")
-                                            .or_else(|| v.get("apiKey"))
-                                            .and_then(|t| t.as_str())
-                                            .map(|s| s.to_string());
+                                        if token.is_none() {
+                                            token = v
+                                                .get("primaryApiKey")
+                                                .or_else(|| v.get("apiKey"))
+                                                .and_then(|t| t.as_str())
+                                                .map(|s| s.to_string());
+                                        }
                                     }
                                 }
                             }
@@ -156,7 +313,10 @@ impl InterceptorManager {
 
                 let raw_ep = ep_opt?;
                 let clean_ep = raw_ep.trim().trim_end_matches('/').to_string();
-                if clean_ep.is_empty() || clean_ep == "https://api.anthropic.com" {
+                if clean_ep.is_empty()
+                    || clean_ep == "https://api.anthropic.com"
+                    || Self::is_pivot_local_endpoint(&clean_ep)
+                {
                     return None;
                 }
 
@@ -226,6 +386,8 @@ impl InterceptorManager {
                 if clean_ep.is_empty()
                     || clean_ep == "https://api.openai.com"
                     || clean_ep == "https://api.openai.com/v1"
+                    || clean_ep.contains(&self.gateway_url)
+                    || Self::is_pivot_local_endpoint(&clean_ep)
                 {
                     return None;
                 }
@@ -300,9 +462,9 @@ impl InterceptorManager {
                     let config_path = Self::gemini_config_path();
                     if config_path.exists() {
                         if let Ok(content) = fs::read_to_string(&config_path) {
-                            if !content.contains(&self.gateway_url) {
-                                if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                                    if let Some(url) = v.get("baseUrl").and_then(|u| u.as_str()) {
+                            if let Ok(v) = Self::parse_jsonc_preserving_safety(&content) {
+                                if let Some(url) = v.get("baseUrl").and_then(|u| u.as_str()) {
+                                    if !url.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(url) {
                                         ep_opt = Some(url.to_string());
                                     }
                                 }
@@ -313,7 +475,11 @@ impl InterceptorManager {
 
                 let raw_ep = ep_opt?;
                 let clean_ep = raw_ep.trim().trim_end_matches('/').to_string();
-                if clean_ep.is_empty() || clean_ep.contains("googleapis.com") {
+                if clean_ep.is_empty()
+                    || clean_ep.contains("googleapis.com")
+                    || clean_ep.contains(&self.gateway_url)
+                    || Self::is_pivot_local_endpoint(&clean_ep)
+                {
                     return None;
                 }
 
@@ -344,7 +510,7 @@ impl InterceptorManager {
                     return None;
                 }
                 let content = fs::read_to_string(&models_path).ok()?;
-                let val = serde_json::from_str::<Value>(&content).ok()?;
+                let val = Self::parse_jsonc_preserving_safety(&content).ok()?;
                 let providers_obj = val.get("providers").and_then(|p| p.as_object())?;
 
                 for (p_id, p_val) in providers_obj {
@@ -353,7 +519,10 @@ impl InterceptorManager {
                     }
                     let ep = p_val.get("baseUrl").and_then(|u| u.as_str())?;
                     let clean_ep = ep.trim().trim_end_matches('/').to_string();
-                    if clean_ep.is_empty() || clean_ep.contains(&self.gateway_url) {
+                    if clean_ep.is_empty()
+                        || clean_ep.contains(&self.gateway_url)
+                        || Self::is_pivot_local_endpoint(&clean_ep)
+                    {
                         continue;
                     }
 
@@ -416,7 +585,7 @@ impl InterceptorManager {
 
                 if config_path.exists() {
                     if let Ok(content) = fs::read_to_string(&config_path) {
-                        if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                        if let Ok(v) = Self::parse_jsonc_preserving_safety(&content) {
                             if let Some(providers_obj) = v.get("provider").and_then(|p| p.as_object()) {
                                 for (p_id, p_val) in providers_obj {
                                     if p_id == "pivot" {
@@ -429,7 +598,10 @@ impl InterceptorManager {
                                         .and_then(|u| u.as_str());
                                     if let Some(endpoint) = ep {
                                         let clean_ep = endpoint.trim().trim_end_matches('/').to_string();
-                                        if !clean_ep.is_empty() && !clean_ep.contains(&self.gateway_url) {
+                                        if !clean_ep.is_empty()
+                                            && !clean_ep.contains(&self.gateway_url)
+                                            && !Self::is_pivot_local_endpoint(&clean_ep)
+                                        {
                                             ep_opt = Some(clean_ep);
                                             if let Some(models_obj) = p_val.get("models").and_then(|m| m.as_object()) {
                                                 for m_k in models_obj.keys() {
@@ -587,14 +759,18 @@ impl InterceptorManager {
         let mut file_intercepted = false;
         if settings_path.exists() {
             if let Ok(content) = fs::read_to_string(&settings_path) {
-                if content.contains(&self.gateway_url) {
+                if content.contains(&self.gateway_url)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
         }
         if !file_intercepted && config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
-                if content.contains(&self.gateway_url) {
+                if content.contains(&self.gateway_url)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
@@ -625,16 +801,6 @@ impl InterceptorManager {
         let third_party = self.get_third_party_config("claude_code");
         let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
 
-        if is_intercepted {
-            let missing_picker = settings_path.exists()
-                && fs::read_to_string(&settings_path)
-                    .map(|c| !c.contains("replaceBuiltInOptions"))
-                    .unwrap_or(false);
-            if missing_picker {
-                let _ = self.do_sync_claude_settings();
-            }
-        }
-
         InterceptorInfo {
             id: "claude_code".to_string(),
             name: "Claude Code CLI".to_string(),
@@ -659,23 +825,55 @@ impl InterceptorManager {
         if enable {
             // 获取之前已保存的 orig_ep，或提取当前配置的第三方端点
             let saved_state = self.db.get_interceptor_state("claude_code").ok().flatten();
+            let prev_backup = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
             let orig_ep = saved_state
-                .and_then(|s| s.2)
+                .as_ref()
+                .and_then(|s| s.2.clone())
                 .or_else(|| self.detect_third_party_endpoint("claude_code"));
 
             // 1. 接管 ~/.claude/settings.json (现代 Claude Code 全局官方环境变量配置)
             let mut orig_settings = String::new();
             if settings_path.exists() {
-                orig_settings = fs::read_to_string(&settings_path).unwrap_or_default();
+                orig_settings = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
             } else if let Some(p) = settings_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
 
-            let mut settings_val: Value =
-                serde_json::from_str(&orig_settings).unwrap_or_else(|_| json!({}));
+            let mut settings_val = Self::parse_jsonc_preserving_safety(&orig_settings)?;
             if !settings_val.is_object() {
                 settings_val = json!({});
             }
+
+            // 捕获开启前的原始凭据与模型配置，便于关闭时无痕还原
+            let (orig_auth_token, orig_env_model, orig_top_model) =
+                if prev_backup.as_ref().and_then(|b| b.get("captured")).and_then(|v| v.as_bool()) == Some(true) {
+                    (
+                        prev_backup.as_ref().and_then(|b| b.get("orig_auth_token")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        prev_backup.as_ref().and_then(|b| b.get("orig_env_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        prev_backup.as_ref().and_then(|b| b.get("orig_top_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    )
+                } else {
+                    let cur_token = settings_val
+                        .get("env")
+                        .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN"))
+                        .and_then(|t| t.as_str())
+                        .filter(|s| *s != "pivot")
+                        .map(|s| s.to_string());
+                    let cur_env_model = settings_val
+                        .get("env")
+                        .and_then(|e| e.get("ANTHROPIC_MODEL"))
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string());
+                    let cur_top_model = settings_val
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string());
+                    (cur_token, cur_env_model, cur_top_model)
+                };
+
             if !settings_val["env"].is_object() {
                 settings_val["env"] = json!({});
             }
@@ -722,20 +920,19 @@ impl InterceptorManager {
             }
 
             if let Ok(new_settings) = serde_json::to_string_pretty(&settings_val) {
-                let _ = atomic_write(&settings_path, &new_settings);
+                atomic_write(&settings_path, &new_settings).map_err(|e| e.to_string())?;
             }
 
             // 2. 同步微创接管 ~/.claude.json (如果文件存在)
             if config_path.exists() {
-                let orig_config = fs::read_to_string(&config_path).unwrap_or_default();
-                if let Ok(mut config_val) = serde_json::from_str::<Value>(&orig_config) {
-                    config_val["anthropicBaseUrl"] = json!(self.gateway_url);
-                    if let Some(env_obj) = config_val.get_mut("env").and_then(|e| e.as_object_mut()) {
-                        env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(self.gateway_url));
-                    }
-                    if let Ok(new_config) = serde_json::to_string_pretty(&config_val) {
-                        let _ = atomic_write(&config_path, &new_config);
-                    }
+                let orig_config = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+                let mut config_val = Self::parse_jsonc_preserving_safety(&orig_config)?;
+                config_val["anthropicBaseUrl"] = json!(self.gateway_url);
+                if let Some(env_obj) = config_val.get_mut("env").and_then(|e| e.as_object_mut()) {
+                    env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(self.gateway_url));
+                }
+                if let Ok(new_config) = serde_json::to_string_pretty(&config_val) {
+                    let _ = atomic_write(&config_path, &new_config);
                 }
             }
 
@@ -743,35 +940,71 @@ impl InterceptorManager {
             let _ = fs::remove_file(&settings_backup_path);
             let _ = fs::remove_file(&backup_path);
 
+            let backup_info = json!({
+                "captured": true,
+                "orig_auth_token": orig_auth_token,
+                "orig_env_model": orig_env_model,
+                "orig_top_model": orig_top_model,
+            });
             let _ = self.db.save_interceptor_state(
                 "claude_code",
                 true,
-                None,
+                Some(&backup_info.to_string()),
                 orig_ep.as_deref(),
             );
         } else {
-            let orig_ep = self
-                .db
-                .get_interceptor_state("claude_code")
-                .ok()
-                .flatten()
-                .and_then(|s| s.2);
+            let saved_state = self.db.get_interceptor_state("claude_code").ok().flatten();
+            let orig_ep = saved_state.as_ref().and_then(|s| s.2.clone());
+            let backup_val = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
 
             // 方案 B：微创增量还原 ~/.claude/settings.json
             // 重新读取磁盘当前最新内容，绝不覆盖回滚用户在接管期间新授权的命令、hooks 或修改的配置
             if settings_path.exists() {
                 if let Ok(content) = fs::read_to_string(&settings_path) {
-                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut v) = Self::parse_jsonc_preserving_safety(&content) {
                         if let Some(obj) = v.as_object_mut() {
                             obj.remove("anthropicBaseUrl");
                             obj.remove("modelPicker");
+                            if let Some(ref b) = backup_val {
+                                if let Some(orig_tm) = b.get("orig_top_model").and_then(|m| m.as_str()) {
+                                    obj.insert("model".to_string(), json!(orig_tm));
+                                } else {
+                                    obj.remove("model");
+                                }
+                            }
                             if let Some(env_obj) =
                                 obj.get_mut("env").and_then(|e| e.as_object_mut())
                             {
-                                if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                if let Some(ref ep) = orig_ep
+                                    .as_deref()
+                                    .filter(|s| !s.is_empty() && !s.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(s))
+                                {
                                     env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(ep));
                                 } else {
                                     env_obj.remove("ANTHROPIC_BASE_URL");
+                                }
+
+                                if env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|t| t.as_str()) == Some("pivot") {
+                                    if let Some(orig_tok) = backup_val
+                                        .as_ref()
+                                        .and_then(|b| b.get("orig_auth_token"))
+                                        .and_then(|t| t.as_str())
+                                    {
+                                        env_obj.insert("ANTHROPIC_AUTH_TOKEN".to_string(), json!(orig_tok));
+                                    } else {
+                                        env_obj.remove("ANTHROPIC_AUTH_TOKEN");
+                                    }
+                                }
+
+                                if let Some(ref b) = backup_val {
+                                    if let Some(orig_em) = b.get("orig_env_model").and_then(|m| m.as_str()) {
+                                        env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(orig_em));
+                                    } else {
+                                        env_obj.remove("ANTHROPIC_MODEL");
+                                    }
                                 }
                             }
                         }
@@ -785,11 +1018,14 @@ impl InterceptorManager {
             // 同样微创还原 ~/.claude.json
             if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut v) = Self::parse_jsonc_preserving_safety(&content) {
                         if let Some(obj) = v.as_object_mut() {
                             let has_env = obj.get("env").and_then(|e| e.as_object()).is_some();
                             if !has_env {
-                                if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                if let Some(ref ep) = orig_ep
+                                    .as_deref()
+                                    .filter(|s| !s.is_empty() && !s.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(s))
+                                {
                                     obj.insert("anthropicBaseUrl".to_string(), json!(ep));
                                 } else {
                                     obj.remove("anthropicBaseUrl");
@@ -801,7 +1037,10 @@ impl InterceptorManager {
                             if let Some(env_obj) =
                                 obj.get_mut("env").and_then(|e| e.as_object_mut())
                             {
-                                if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                                if let Some(ref ep) = orig_ep
+                                    .as_deref()
+                                    .filter(|s| !s.is_empty() && !s.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(s))
+                                {
                                     env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(ep));
                                 } else {
                                     env_obj.remove("ANTHROPIC_BASE_URL");
@@ -828,38 +1067,58 @@ impl InterceptorManager {
 
     fn do_sync_claude_settings(&self) -> Result<(), String> {
         let settings_path = Self::claude_settings_path();
-        if !settings_path.exists() {
-            return Ok(());
-        }
-        let content = fs::read_to_string(&settings_path).unwrap_or_default();
-        let mut v: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
-        if !v.is_object() {
-            return Ok(());
-        }
-        let providers = self.db.get_providers().map_err(|e| e.to_string())?;
-        v["modelPicker"] = generate_claude_model_picker(&providers);
-        if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
-            env_obj.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
-            env_obj.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
-            env_obj.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
-            env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
-        }
-        let selected_model = self.get_effective_tool_model("claude_code");
-        if let Some(ref m) = selected_model {
-            v["model"] = json!(m);
-            if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
-                env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
+        if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+            let mut v = Self::parse_jsonc_preserving_safety(&content)?;
+            if v.is_object() {
+                if !v["env"].is_object() {
+                    v["env"] = json!({});
+                }
+                v["env"]["ANTHROPIC_BASE_URL"] = json!(self.gateway_url);
+
+                let providers = self.db.get_providers().map_err(|e| e.to_string())?;
+                v["modelPicker"] = generate_claude_model_picker(&providers);
+                if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
+                    env_obj.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+                    env_obj.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
+                    env_obj.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
+                    env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+                }
+                let selected_model = self.get_effective_tool_model("claude_code");
+                if let Some(ref m) = selected_model {
+                    v["model"] = json!(m);
+                    if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
+                        env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
+                    }
+                } else {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.remove("model");
+                    }
+                    if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
+                        env_obj.remove("ANTHROPIC_MODEL");
+                    }
+                }
+                if let Ok(updated) = serde_json::to_string_pretty(&v) {
+                    atomic_write(&settings_path, &updated).map_err(|e| e.to_string())?;
+                }
             }
-        } else {
-            if let Some(obj) = v.as_object_mut() {
-                obj.remove("model");
-            }
-            if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
-                env_obj.remove("ANTHROPIC_MODEL");
-            }
         }
-        if let Ok(updated) = serde_json::to_string_pretty(&v) {
-            let _ = atomic_write(&settings_path, &updated);
+
+        let config_path = Self::claude_config_path();
+        if config_path.exists() {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if Self::contains_pivot_local_endpoint(&content) {
+                    if let Ok(mut cv) = Self::parse_jsonc_preserving_safety(&content) {
+                        cv["anthropicBaseUrl"] = json!(self.gateway_url);
+                        if let Some(env_obj) = cv.get_mut("env").and_then(|e| e.as_object_mut()) {
+                            env_obj.insert("ANTHROPIC_BASE_URL".to_string(), json!(self.gateway_url));
+                        }
+                        if let Ok(updated) = serde_json::to_string_pretty(&cv) {
+                            let _ = atomic_write(&config_path, &updated);
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -915,7 +1174,10 @@ impl InterceptorManager {
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
                 let target_endpoint = format!("{}/v1", self.gateway_url);
-                if content.contains(&self.gateway_url) || content.contains(&target_endpoint) {
+                if content.contains(&self.gateway_url)
+                    || content.contains(&target_endpoint)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
@@ -928,18 +1190,6 @@ impl InterceptorManager {
         };
 
         let is_overwritten = db_is_intercepted && !file_intercepted;
-
-        if is_intercepted {
-            let catalog_path = Self::codex_catalog_path();
-            let missing_catalog = !catalog_path.exists();
-            let missing_config_entry = config_path.exists()
-                && fs::read_to_string(&config_path)
-                    .map(|c| !c.contains(Self::CODEX_CATALOG_FILENAME))
-                    .unwrap_or(false);
-            if missing_catalog || missing_config_entry {
-                let _ = self.do_sync_codex_catalog();
-            }
-        }
 
         let third_party = self.get_third_party_config("codex_cli");
         let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
@@ -1015,8 +1265,13 @@ impl InterceptorManager {
 
         if enable {
             let saved_state = self.db.get_interceptor_state("codex_cli").ok().flatten();
+            let prev_backup = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
             let orig_ep = saved_state
-                .and_then(|s| s.2)
+                .as_ref()
+                .and_then(|s| s.2.clone())
                 .or_else(|| self.detect_third_party_endpoint("codex_cli"));
 
             let mut original_content = String::new();
@@ -1025,6 +1280,45 @@ impl InterceptorManager {
             } else if let Some(p) = config_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
+
+            let (orig_model, orig_model_provider) = if prev_backup
+                .as_ref()
+                .and_then(|b| b.get("captured"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                (
+                    prev_backup
+                        .as_ref()
+                        .and_then(|b| b.get("orig_model"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    prev_backup
+                        .as_ref()
+                        .and_then(|b| b.get("orig_model_provider"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                )
+            } else if let Ok(toml::Value::Table(tbl)) = toml::from_str::<toml::Value>(&original_content) {
+                let m = tbl
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let raw_mp = tbl
+                    .get("model_provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let is_pivot_custom = raw_mp.as_deref() == Some("custom")
+                    && tbl
+                        .get("model_providers")
+                        .and_then(|v| v.get("custom"))
+                        .and_then(|v| v.get("name"))
+                        .and_then(|v| v.as_str())
+                        == Some("Pivot");
+                (m, if is_pivot_custom { None } else { raw_mp })
+            } else {
+                (None, None)
+            };
 
             // 生成并写入 catalog 文件
             let providers = self.db.get_providers().unwrap_or_default();
@@ -1050,24 +1344,43 @@ impl InterceptorManager {
             atomic_write(&config_path, &new_content).map_err(|e| e.to_string())?;
 
             let _ = fs::remove_file(&backup_path);
-            let _ = self
-                .db
-                .save_interceptor_state("codex_cli", true, None, orig_ep.as_deref());
+            let backup_info = json!({
+                "captured": true,
+                "orig_model": orig_model,
+                "orig_model_provider": orig_model_provider,
+            });
+            let _ = self.db.save_interceptor_state(
+                "codex_cli",
+                true,
+                Some(&backup_info.to_string()),
+                orig_ep.as_deref(),
+            );
         } else {
-            let orig_ep = self
-                .db
-                .get_interceptor_state("codex_cli")
-                .ok()
-                .flatten()
-                .and_then(|s| s.2);
+            let saved_state = self.db.get_interceptor_state("codex_cli").ok().flatten();
+            let orig_ep = saved_state.as_ref().and_then(|s| s.2.clone());
+            let backup_val = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
+            let orig_model = backup_val
+                .as_ref()
+                .and_then(|b| b.get("orig_model"))
+                .and_then(|v| v.as_str());
+            let orig_model_provider = backup_val
+                .as_ref()
+                .and_then(|b| b.get("orig_model_provider"))
+                .and_then(|v| v.as_str());
 
             // 方案 B：微创增量还原 ~/.codex/config.toml
             if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if let Ok(cleaned) = restore_codex_config_toml(
+                    if let Ok(cleaned) = restore_codex_config_toml_with_backup(
                         &content,
                         orig_ep.as_deref(),
                         Self::CODEX_CATALOG_FILENAME,
+                        orig_model,
+                        orig_model_provider,
+                        backup_val.is_some(),
                     ) {
                         let _ = atomic_write(&config_path, &cleaned);
                     }
@@ -1152,14 +1465,18 @@ impl InterceptorManager {
         let mut file_intercepted = false;
         if env_path.exists() {
             if let Ok(content) = fs::read_to_string(&env_path) {
-                if content.contains(&self.gateway_url) {
+                if content.contains(&self.gateway_url)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
         }
         if !file_intercepted && config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
-                if content.contains(&self.gateway_url) {
+                if content.contains(&self.gateway_url)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
@@ -1207,8 +1524,13 @@ impl InterceptorManager {
 
         if enable {
             let saved_state = self.db.get_interceptor_state("gemini_cli").ok().flatten();
+            let prev_backup = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
             let orig_ep = saved_state
-                .and_then(|s| s.2)
+                .as_ref()
+                .and_then(|s| s.2.clone())
                 .or_else(|| self.detect_third_party_endpoint("gemini_cli"));
 
             // 1. 接管 ~/.gemini/.env (Gemini CLI 官方真实环境变量文件)
@@ -1218,6 +1540,18 @@ impl InterceptorManager {
             } else if let Some(p) = env_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
+
+            let orig_env_model = if prev_backup.as_ref().and_then(|b| b.get("captured")).and_then(|v| v.as_bool()) == Some(true) {
+                prev_backup.as_ref().and_then(|b| b.get("orig_env_model")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                orig_env.lines().find_map(|line| {
+                    line.trim()
+                        .strip_prefix("GEMINI_MODEL=")
+                        .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
+                        .filter(|s| !s.is_empty())
+                })
+            };
+
             let selected_model = self.get_effective_tool_model("gemini_cli");
             let new_env = update_gemini_env_with_model(&orig_env, &self.gateway_url, selected_model.as_deref());
             let _ = atomic_write(&env_path, &new_env);
@@ -1225,13 +1559,17 @@ impl InterceptorManager {
             // 2. 同时维护 config.json (兼容旧配置和测试用例)
             let mut parsed: Value = json!({});
             if config_path.exists() {
-                let original_content = fs::read_to_string(&config_path).unwrap_or_default();
-                if let Ok(v) = serde_json::from_str::<Value>(&original_content) {
-                    parsed = v;
-                }
+                let original_content = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+                parsed = Self::parse_jsonc_preserving_safety(&original_content)?;
             } else if let Some(p) = config_path.parent() {
                 let _ = fs::create_dir_all(p);
             }
+            let orig_json_model = if prev_backup.as_ref().and_then(|b| b.get("captured")).and_then(|v| v.as_bool()) == Some(true) {
+                prev_backup.as_ref().and_then(|b| b.get("orig_json_model")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                parsed.get("model").and_then(|m| m.as_str()).map(|s| s.to_string())
+            };
+
             parsed["baseUrl"] = json!(self.gateway_url);
             if let Some(ref m) = selected_model {
                 parsed["model"] = json!(m);
@@ -1245,21 +1583,39 @@ impl InterceptorManager {
             let _ = fs::remove_file(&env_backup_path);
             let _ = fs::remove_file(&backup_path);
 
-            let _ = self
-                .db
-                .save_interceptor_state("gemini_cli", true, None, orig_ep.as_deref());
+            let backup_info = json!({
+                "captured": true,
+                "orig_env_model": orig_env_model,
+                "orig_json_model": orig_json_model,
+            });
+            let _ = self.db.save_interceptor_state(
+                "gemini_cli",
+                true,
+                Some(&backup_info.to_string()),
+                orig_ep.as_deref(),
+            );
         } else {
-            let orig_ep = self
-                .db
-                .get_interceptor_state("gemini_cli")
-                .ok()
-                .flatten()
-                .and_then(|s| s.2);
+            let saved_state = self.db.get_interceptor_state("gemini_cli").ok().flatten();
+            let orig_ep = saved_state.as_ref().and_then(|s| s.2.clone());
+            let backup_val = saved_state
+                .as_ref()
+                .and_then(|s| s.1.as_deref())
+                .and_then(|b| serde_json::from_str::<Value>(b).ok());
+            let orig_env_model = backup_val
+                .as_ref()
+                .and_then(|b| b.get("orig_env_model"))
+                .and_then(|v| v.as_str());
 
             // 方案 B：微创增量还原 ~/.gemini/.env
             if env_path.exists() {
                 if let Ok(content) = fs::read_to_string(&env_path) {
-                    let cleaned = restore_gemini_env(&content, orig_ep.as_deref(), &self.gateway_url);
+                    let cleaned = restore_gemini_env(
+                        &content,
+                        orig_ep.as_deref(),
+                        &self.gateway_url,
+                        orig_env_model,
+                        backup_val.is_some(),
+                    );
                     let _ = atomic_write(&env_path, &cleaned);
                 }
             }
@@ -1267,12 +1623,22 @@ impl InterceptorManager {
             // 恢复 config.json
             if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut v) = Self::parse_jsonc_preserving_safety(&content) {
                         if let Some(obj) = v.as_object_mut() {
-                            if let Some(ref ep) = orig_ep.as_deref().filter(|s| !s.is_empty() && !s.contains(&self.gateway_url)) {
+                            if let Some(ref ep) = orig_ep
+                                .as_deref()
+                                .filter(|s| !s.is_empty() && !s.contains(&self.gateway_url) && !Self::is_pivot_local_endpoint(s))
+                            {
                                 obj.insert("baseUrl".to_string(), json!(ep));
                             } else {
                                 obj.remove("baseUrl");
+                            }
+                            if let Some(ref b) = backup_val {
+                                if let Some(orig_jm) = b.get("orig_json_model").and_then(|m| m.as_str()) {
+                                    obj.insert("model".to_string(), json!(orig_jm));
+                                } else {
+                                    obj.remove("model");
+                                }
                             }
                         }
                         if let Ok(updated) = serde_json::to_string_pretty(&v) {
@@ -1351,7 +1717,9 @@ impl InterceptorManager {
         let mut file_intercepted = false;
         if models_path.exists() {
             if let Ok(content) = fs::read_to_string(&models_path) {
-                if content.contains(&self.gateway_url) {
+                if content.contains(&self.gateway_url)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
@@ -1364,10 +1732,6 @@ impl InterceptorManager {
         };
 
         let is_overwritten = db_is_intercepted && !file_intercepted;
-
-        if is_intercepted {
-            let _ = self.do_sync_pi_models();
-        }
 
         let third_party = self.get_third_party_config("pi");
         let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
@@ -1397,7 +1761,11 @@ impl InterceptorManager {
             return Ok(());
         }
         let content = fs::read_to_string(&models_path).unwrap_or_default();
-        let mut v: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        let mut v: Value = if content.trim().is_empty() {
+            json!({})
+        } else {
+            Self::parse_jsonc_preserving_safety(&content)?
+        };
         if !v.is_object() || !v["providers"].is_object() {
             return Ok(());
         }
@@ -1423,7 +1791,7 @@ impl InterceptorManager {
         let settings_path = Self::pi_settings_path();
         if settings_path.exists() {
             if let Ok(content) = fs::read_to_string(&settings_path) {
-                if let Ok(mut sv) = serde_json::from_str::<Value>(&content) {
+                if let Ok(mut sv) = Self::parse_jsonc_preserving_safety(&content) {
                     if sv.get("defaultProvider").and_then(|p| p.as_str()) == Some("pivot") {
                         let selected_model = self.get_effective_tool_model("pi");
                         let effective_model = selected_model.or(preferred_model);
@@ -1469,7 +1837,11 @@ impl InterceptorManager {
             // 1. 读取或初始化 models.json
             let mut models_val: Value = if models_path.exists() {
                 let content = fs::read_to_string(&models_path).unwrap_or_default();
-                serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+                if content.trim().is_empty() {
+                    json!({})
+                } else {
+                    Self::parse_jsonc_preserving_safety(&content)?
+                }
             } else {
                 json!({})
             };
@@ -1514,7 +1886,11 @@ impl InterceptorManager {
 
             let mut settings_val: Value = if settings_path.exists() {
                 let content = fs::read_to_string(&settings_path).unwrap_or_default();
-                serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+                if content.trim().is_empty() {
+                    json!({})
+                } else {
+                    Self::parse_jsonc_preserving_safety(&content)?
+                }
             } else {
                 json!({})
             };
@@ -1567,7 +1943,7 @@ impl InterceptorManager {
             // 1. 还原 models.json
             if models_path.exists() {
                 if let Ok(content) = fs::read_to_string(&models_path) {
-                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut v) = Self::parse_jsonc_preserving_safety(&content) {
                         if let Some(providers_obj) = v.get_mut("providers").and_then(|p| p.as_object_mut()) {
                             providers_obj.remove("pivot");
                         }
@@ -1589,7 +1965,7 @@ impl InterceptorManager {
             // 2. 还原 settings.json
             if settings_path.exists() {
                 if let Ok(content) = fs::read_to_string(&settings_path) {
-                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut v) = Self::parse_jsonc_preserving_safety(&content) {
                         if v.get("defaultProvider").and_then(|p| p.as_str()) == Some("pivot") {
                             if let Some(ref b) = backup_val {
                                 if let Some(orig_p) = b.get("orig_default_provider").and_then(|p| p.as_str()) {
@@ -1672,7 +2048,9 @@ impl InterceptorManager {
         let mut file_intercepted = false;
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
-                if content.contains(&self.gateway_url) {
+                if content.contains(&self.gateway_url)
+                    || Self::contains_pivot_local_endpoint(&content)
+                {
                     file_intercepted = true;
                 }
             }
@@ -1685,10 +2063,6 @@ impl InterceptorManager {
         };
 
         let is_overwritten = db_is_intercepted && !file_intercepted;
-
-        if is_intercepted {
-            let _ = self.do_sync_opencode_models();
-        }
 
         let third_party = self.get_third_party_config("opencode");
         let original_endpoint = third_party.as_ref().map(|tp| tp.endpoint.clone()).or(original_endpoint);
@@ -1718,7 +2092,11 @@ impl InterceptorManager {
             return Ok(());
         }
         let content = fs::read_to_string(&config_path).unwrap_or_default();
-        let mut v: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        let mut v: Value = if content.trim().is_empty() {
+            json!({})
+        } else {
+            Self::parse_jsonc_preserving_safety(&content)?
+        };
         if !v.is_object() || !v["provider"].is_object() {
             return Ok(());
         }
@@ -1783,7 +2161,9 @@ impl InterceptorManager {
 
             if config_path.exists() && !backup_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if !content.contains(&self.gateway_url) {
+                    if !content.contains(&self.gateway_url)
+                        && !Self::contains_pivot_local_endpoint(&content)
+                    {
                         let _ = fs::copy(&config_path, &backup_path);
                     }
                 }
@@ -1791,7 +2171,11 @@ impl InterceptorManager {
 
             let mut config_val: Value = if config_path.exists() {
                 let content = fs::read_to_string(&config_path).unwrap_or_default();
-                serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+                if content.trim().is_empty() {
+                    json!({ "$schema": "https://opencode.ai/config.json" })
+                } else {
+                    Self::parse_jsonc_preserving_safety(&content)?
+                }
             } else {
                 json!({ "$schema": "https://opencode.ai/config.json" })
             };
@@ -1850,7 +2234,7 @@ impl InterceptorManager {
                 let _ = fs::remove_file(&backup_path);
             } else if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if let Ok(mut v) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut v) = Self::parse_jsonc_preserving_safety(&content) {
                         if let Some(providers_obj) = v.get_mut("provider").and_then(|p| p.as_object_mut()) {
                             providers_obj.remove("pivot");
                         }
@@ -1937,6 +2321,26 @@ impl InterceptorManager {
 
         self.get_tool_status(id)
     }
+
+    /// 启动时全量检查 5 个客户端：凡是已被 Pivot 接管的，同步其端点到当前动态端口与最新模型列表
+    pub fn sync_all_if_intercepted(&self) -> Result<(), String> {
+        if self.get_claude_code_status().is_intercepted {
+            let _ = self.do_sync_claude_settings();
+        }
+        if self.get_codex_status().is_intercepted {
+            let _ = self.do_sync_codex_catalog();
+        }
+        if self.get_gemini_cli_status().is_intercepted {
+            let _ = self.toggle_gemini_cli(true);
+        }
+        if self.get_pi_status().is_intercepted {
+            let _ = self.do_sync_pi_models();
+        }
+        if self.get_opencode_status().is_intercepted {
+            let _ = self.do_sync_opencode_models();
+        }
+        Ok(())
+    }
 }
 
 /// Update Codex config.toml while preserving all sections, comments, and modern model_providers tables
@@ -2006,7 +2410,7 @@ fn update_codex_config_toml(
                             toml::Value::Boolean(false),
                         );
                     } else if let Some(bu) = p_tbl.get("base_url").and_then(|v| v.as_str()) {
-                        if bu.contains("127.0.0.1:16888") || bu.contains("localhost:16888") {
+                        if InterceptorManager::is_pivot_local_endpoint(bu) {
                             p_tbl.insert(
                                 "supports_websockets".to_string(),
                                 toml::Value::Boolean(false),
@@ -2032,10 +2436,22 @@ fn update_codex_config_toml(
 }
 
 /// Restore Codex config.toml while preserving all other user modifications
+#[allow(dead_code)]
 fn restore_codex_config_toml(
     content: &str,
     original_endpoint: Option<&str>,
     catalog_filename: &str,
+) -> Result<String, String> {
+    restore_codex_config_toml_with_backup(content, original_endpoint, catalog_filename, None, None, false)
+}
+
+fn restore_codex_config_toml_with_backup(
+    content: &str,
+    original_endpoint: Option<&str>,
+    catalog_filename: &str,
+    orig_model: Option<&str>,
+    orig_model_provider: Option<&str>,
+    has_backup: bool,
 ) -> Result<String, String> {
     if content.trim().is_empty() {
         return Ok(String::new());
@@ -2052,40 +2468,66 @@ fn restore_codex_config_toml(
         }
 
         // 2. 还原或移除 base_url
-        if let Some(ep) = original_endpoint.filter(|s| !s.trim().is_empty()) {
+        if let Some(ep) = original_endpoint
+            .filter(|s| !s.trim().is_empty() && !InterceptorManager::is_pivot_local_endpoint(s))
+        {
             map.insert("base_url".to_string(), toml::Value::String(ep.to_string()));
         } else {
             map.remove("base_url");
         }
 
-        // 3. 还原 model_providers
+        // 3. 按备份还原或清理注入的 model
+        if has_backup {
+            if let Some(m) = orig_model.filter(|s| !s.trim().is_empty()) {
+                map.insert("model".to_string(), toml::Value::String(m.to_string()));
+            } else {
+                map.remove("model");
+            }
+        }
+
+        // 4. 还原 model_providers 与悬空的 model_provider
         let current_provider = map
             .get("model_provider")
             .and_then(|v| v.as_str())
             .unwrap_or("custom")
             .to_string();
 
+        let mut removed_current_provider = false;
+        let mut providers_empty = false;
         if let Some(toml::Value::Table(ref mut providers_map)) = map.get_mut("model_providers") {
-            let mut remove_provider = false;
             if let Some(toml::Value::Table(ref mut p_map)) = providers_map.get_mut(&current_provider) {
-                if let Some(ep) = original_endpoint.filter(|s| !s.trim().is_empty()) {
+                if let Some(ep) = original_endpoint
+                    .filter(|s| !s.trim().is_empty() && !InterceptorManager::is_pivot_local_endpoint(s))
+                {
                     p_map.insert("base_url".to_string(), toml::Value::String(ep.to_string()));
                 } else {
                     p_map.remove("base_url");
                 }
                 // 如果这是 Pivot 自动创建的临时 custom provider 且没有 base_url，清理它
                 if p_map.get("name").and_then(|v| v.as_str()) == Some("Pivot") {
-                    remove_provider = true;
+                    removed_current_provider = true;
                 }
             }
-            if remove_provider {
+            if removed_current_provider {
                 providers_map.remove(&current_provider);
             }
-            if providers_map.is_empty() {
-                map.remove("model_providers");
-                if map.get("model_provider").and_then(|v| v.as_str()) == Some("custom") {
+            providers_empty = providers_map.is_empty();
+        }
+
+        if providers_empty {
+            map.remove("model_providers");
+        }
+        if removed_current_provider {
+            if map.get("model_provider").and_then(|v| v.as_str()) == Some(current_provider.as_str()) {
+                if let Some(mp) = orig_model_provider.filter(|s| !s.trim().is_empty()) {
+                    map.insert("model_provider".to_string(), toml::Value::String(mp.to_string()));
+                } else {
                     map.remove("model_provider");
                 }
+            }
+        } else if has_backup && map.get("model_provider").and_then(|v| v.as_str()) == Some("custom") {
+            if let Some(mp) = orig_model_provider.filter(|s| !s.trim().is_empty()) {
+                map.insert("model_provider".to_string(), toml::Value::String(mp.to_string()));
             }
         }
     }
@@ -2217,17 +2659,26 @@ pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Opti
         return None;
     }
 
+    let model_counts = count_model_providers(providers);
+    let format_selected = |p: &Provider, m: &str| -> String {
+        if model_counts.get(m).copied().unwrap_or(0) > 1 && !m.contains('/') {
+            format!("{}/{}", crate::gateway::router::provider_route_prefix(&p.name), m)
+        } else {
+            m.to_string()
+        }
+    };
+
     match tool_id {
         "claude_code" => {
             // 优先匹配 Anthropic 协议/名称的服务商首个模型，或包含 claude 的模型
             for p in &active_providers {
                 if p.protocol == "anthropic" || p.name.to_lowercase().contains("anthropic") {
                     if let Some(m) = p.models.first() {
-                        return Some(m.clone());
+                        return Some(format_selected(p, m));
                     }
                 }
                 if let Some(m) = p.models.iter().find(|m| m.to_lowercase().contains("claude")) {
-                    return Some(m.clone());
+                    return Some(format_selected(p, m));
                 }
             }
         }
@@ -2241,14 +2692,14 @@ pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Opti
                     || lower_name.contains("chatgpt")
                 {
                     if let Some(m) = p.models.first() {
-                        return Some(m.clone());
+                        return Some(format_selected(p, m));
                     }
                 }
                 if let Some(m) = p.models.iter().find(|m| {
                     let lower = m.to_lowercase();
                     lower.contains("gpt") || lower.contains("codex")
                 }) {
-                    return Some(m.clone());
+                    return Some(format_selected(p, m));
                 }
             }
         }
@@ -2257,11 +2708,11 @@ pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Opti
             for p in &active_providers {
                 if p.protocol == "gemini" || p.name.to_lowercase().contains("gemini") {
                     if let Some(m) = p.models.first() {
-                        return Some(m.clone());
+                        return Some(format_selected(p, m));
                     }
                 }
                 if let Some(m) = p.models.iter().find(|m| m.to_lowercase().contains("gemini")) {
-                    return Some(m.clone());
+                    return Some(format_selected(p, m));
                 }
             }
         }
@@ -2269,7 +2720,9 @@ pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Opti
     }
 
     // 未命中家族匹配时，一律回退到排在第一位的已启用服务商的首个模型
-    active_providers.first().and_then(|p| p.models.first()).cloned()
+    active_providers
+        .first()
+        .and_then(|p| p.models.first().map(|m| format_selected(p, m)))
 }
 
 /// 获取服务商已声明的全部模型（去重）
@@ -2305,7 +2758,7 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
 
     for provider in providers.iter().filter(|p| p.enabled) {
         let all_models = provider_declared_models(provider);
-        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+        let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
         for model_name in all_models {
             let is_duplicate = model_provider_count
                 .get(&model_name)
@@ -2454,7 +2907,7 @@ pub fn generate_claude_model_picker(
     // 所有已启用服务商的所有可用模型
     for provider in providers.iter().filter(|p| p.enabled) {
         let provider_models = provider_declared_models(provider);
-        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+        let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
 
         for model_name in provider_models {
             let behaves_as = resolve_claude_behaves_as(&model_name);
@@ -2513,7 +2966,7 @@ pub fn generate_pi_models_list(
 
     for provider in providers.iter().filter(|p| p.enabled) {
         let provider_models = provider_declared_models(provider);
-        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+        let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
 
         for model_name in provider_models {
             let is_duplicate = model_provider_count
@@ -2563,7 +3016,7 @@ pub fn generate_opencode_models_map(
 
     for provider in providers.iter().filter(|p| p.enabled) {
         let provider_models = provider_declared_models(provider);
-        let provider_prefix = provider.name.to_lowercase().replace(' ', "-");
+        let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
 
         for model_name in provider_models {
             let is_duplicate = model_provider_count
@@ -2819,9 +3272,20 @@ fn update_gemini_env_with_model(original: &str, gateway_url: &str, model: Option
 }
 
 /// Restore Gemini CLI official .env file while preserving user API keys and all other variables
-fn restore_gemini_env(content: &str, original_endpoint: Option<&str>, gateway_url: &str) -> String {
+fn restore_gemini_env(
+    content: &str,
+    original_endpoint: Option<&str>,
+    gateway_url: &str,
+    orig_model: Option<&str>,
+    has_backup: bool,
+) -> String {
     let mut lines = Vec::new();
-    let clean_orig = original_endpoint.filter(|s| !s.trim().is_empty() && !s.contains(gateway_url));
+    let clean_orig = original_endpoint.filter(|s| {
+        !s.trim().is_empty()
+            && !s.contains(gateway_url)
+            && !InterceptorManager::is_pivot_local_endpoint(s)
+    });
+    let mut wrote_model = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -2834,12 +3298,27 @@ fn restore_gemini_env(content: &str, original_endpoint: Option<&str>, gateway_ur
                 }
             }
             // 若原先没有配置，则直接移除，恢复为官方默认直连
+        } else if has_backup && trimmed.starts_with("GEMINI_MODEL=") {
+            if let Some(m) = orig_model.filter(|s| !s.trim().is_empty()) {
+                lines.push(format!("GEMINI_MODEL={}", m));
+                wrote_model = true;
+            }
         } else {
             lines.push(line.to_string());
         }
     }
 
-    lines.join("\n") + "\n"
+    if has_backup && !wrote_model {
+        if let Some(m) = orig_model.filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("GEMINI_MODEL={}", m));
+        }
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
 }
 
 /// Safely write to file via a temporary file + rename to guarantee atomicity and crash-safety
@@ -3462,6 +3941,82 @@ followUpQueueMode = "queue"
         assert!(map.contains_key("deepseek-reasoner"));
         assert!(map.contains_key("kimi-k1.5"));
         assert_eq!(map["deepseek-reasoner"]["name"], "deepseek-reasoner · OpenCode");
+    }
+
+    #[test]
+    fn test_parse_jsonc_preserving_safety_comments_and_rejects_broken() {
+        let jsonc = r#"{
+            // line comment
+            "env": {
+                "FOO": "bar", /* inline comment */
+            },
+        }"#;
+        let parsed = InterceptorManager::parse_jsonc_preserving_safety(jsonc).unwrap();
+        assert_eq!(parsed["env"]["FOO"], "bar");
+
+        let invalid = r#"{ "env": { "FOO": "#;
+        assert!(InterceptorManager::parse_jsonc_preserving_safety(invalid).is_err());
+    }
+
+    #[test]
+    fn test_resolve_default_tool_model_adds_prefix_on_duplicate() {
+        let make_provider = |id: &str, name: &str| Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            protocol: "anthropic".to_string(),
+            base_url: "https://example.com".to_string(),
+            preset_id: None,
+            auth_type: None,
+            api_keys: vec!["sk-test".to_string()],
+            models: vec!["claude-sonnet-4-6".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 1,
+            weight: 1,
+            timeout_secs: 30,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let p1 = make_provider("1", "My Proxy One");
+        let p2 = make_provider("2", "Backup Proxy");
+        let selected = resolve_default_tool_model("claude_code", &[p1, p2]);
+        assert_eq!(selected, Some("my-proxy-one/claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_restore_codex_config_toml_cleans_dangling_model_provider() {
+        let intercepted = r#"
+model = "pivot-slug"
+model_provider = "custom"
+model_catalog_json = "pivot_models.json"
+
+[model_providers.custom]
+name = "Pivot"
+base_url = "http://127.0.0.1:16888/v1"
+
+[model_providers.other]
+name = "Other"
+base_url = "https://api.other.com/v1"
+"#;
+        let restored = restore_codex_config_toml_with_backup(
+            intercepted,
+            None,
+            "pivot_models.json",
+            Some("o3"),
+            None,
+            true,
+        )
+        .unwrap();
+        let val: toml::Value = toml::from_str(&restored).unwrap();
+        let tbl = val.as_table().unwrap();
+        assert_eq!(tbl.get("model").and_then(|v| v.as_str()), Some("o3"));
+        assert!(!tbl.contains_key("model_provider"));
+        assert!(!tbl.contains_key("model_catalog_json"));
+        let providers = tbl.get("model_providers").unwrap().as_table().unwrap();
+        assert!(!providers.contains_key("custom"));
+        assert!(providers.contains_key("other"));
     }
 }
 
