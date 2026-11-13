@@ -126,6 +126,46 @@ pub fn parse_manifest_for_platform(
     }
 }
 
+/// 从 `latest.json` 的 `notes` 文本中提取并清洗单条更新说明。
+pub fn extract_release_note_items(notes: Option<&str>) -> Vec<String> {
+    let Some(raw) = notes else {
+        return Vec::new();
+    };
+
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed == "---"
+                || trimmed.starts_with('#')
+                || (trimmed.starts_with("Pivot ") && trimmed.contains("原生 Rust + GPUI 桌面版"))
+            {
+                return None;
+            }
+
+            let mut text = trimmed
+                .strip_prefix(['•', '·'])
+                .or_else(|| trimmed.strip_prefix("- "))
+                .or_else(|| trimmed.strip_prefix("* "))
+                .unwrap_or(trimmed)
+                .trim();
+
+            if let Some(idx) = text.rfind(" ([") {
+                let tail = &text[idx..];
+                if tail.contains("](http") && tail.ends_with("))") {
+                    text = text[..idx].trim();
+                }
+            }
+
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        })
+        .collect()
+}
+
 /// 根据可执行文件路径定位可原地更新的 macOS `.app` Bundle 路径。
 /// 排除 `/Volumes/`（只读 DMG 镜像直接运行）与 `/AppTranslocation/`（Gatekeeper 随机只读转位目录）。
 pub fn resolve_updatable_app_bundle_from_exe(exe_path: &Path) -> Option<PathBuf> {
@@ -573,6 +613,24 @@ mod tests {
         assert_eq!(
             x64.asset_url.as_deref(),
             Some("https://github.com/vsnote/pivot/releases/download/v0.3.1/Pivot_0.3.1_x64.dmg")
+        );
+    }
+
+    #[test]
+    fn test_extract_release_note_items() {
+        assert!(extract_release_note_items(None).is_empty());
+        assert!(extract_release_note_items(Some("   \n\t  ")).is_empty());
+        assert!(extract_release_note_items(Some("Pivot v0.3.7 — 原生 Rust + GPUI 桌面版")).is_empty());
+
+        let mixed = "\n### 🚀 新功能\n---\n• 支持多订阅等级账号混绑\n- 修复推理首包等待超时 ([aa8e1af](https://github.com/vsnote/pivot/commit/aa8e1af))\n* 优化托盘菜单布局\n· 统一统计页流水文案\n";
+        assert_eq!(
+            extract_release_note_items(Some(mixed)),
+            vec![
+                "支持多订阅等级账号混绑",
+                "修复推理首包等待超时",
+                "优化托盘菜单布局",
+                "统一统计页流水文案",
+            ]
         );
     }
 

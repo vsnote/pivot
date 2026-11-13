@@ -2,7 +2,7 @@ use crate::components::button::{render_segmented_tabs, NativeButton, SegmentedTa
 use crate::components::icons::{lucide_icon, lucide_spinner, render_pivot_app_icon};
 use crate::i18n::Locale;
 use crate::theme::{ThemePalette, ThemePreference};
-use crate::updater::{UpdateCheckState, RELEASE_LATEST_PAGE_URL};
+use crate::updater::{extract_release_note_items, UpdateCheckState, RELEASE_LATEST_PAGE_URL};
 use crate::PivotApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder;
@@ -552,7 +552,8 @@ fn render_update_panel(
     match state {
         UpdateCheckState::Available(info) => {
             let ver = info.version.clone();
-            let notes = info.notes.clone().filter(|s| !s.trim().is_empty());
+            let note_items = extract_release_note_items(info.notes.as_deref());
+            let release_url = info.release_url.clone();
             let action_btn = if info.can_self_update() {
                 let info_for_click = info.clone();
                 NativeButton::new(locale.pick("立即更新", "Update Now"), palette)
@@ -591,24 +592,60 @@ fn render_update_panel(
                             .gap(px(8.0))
                             .child(
                                 div()
+                                    .id("open_release_notes_link")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .cursor_pointer()
                                     .text_size(px(11.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(palette.blue_text)
+                                    .on_mouse_down(MouseButton::Left, move |_, _, app_cx| {
+                                        app_cx.open_url(&release_url);
+                                    })
                                     .child(format!(
                                         "{} v{}",
                                         locale.pick("发现新版本", "New release available:"),
                                         ver
+                                    ))
+                                    .child(lucide_icon(
+                                        IconName::ExternalLink,
+                                        11.0,
+                                        palette.blue_text,
                                     )),
                             )
                             .child(action_btn),
                     )
-                    .when_some(notes, |box_el, body| {
-                        box_el.child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(palette.muted_foreground)
-                                .child(body),
-                        )
+                    .when(!note_items.is_empty(), |box_el| {
+                        let mut list = div()
+                            .pt(px(2.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0));
+                        for item in note_items {
+                            list = list.child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap(px(6.0))
+                                    .text_size(px(11.5))
+                                    .line_height(rems(1.4))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(palette.blue_text)
+                                            .child("•"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_color(palette.secondary_foreground)
+                                            .child(item),
+                                    ),
+                            );
+                        }
+                        box_el.child(list)
                     })
                     .into_any_element(),
             )

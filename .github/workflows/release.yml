@@ -36,6 +36,7 @@ jobs:
       release_id: ${{ steps.prepare_release.outputs.release_id }}
       tag_name: ${{ steps.prepare_release.outputs.tag_name }}
       version: ${{ steps.prepare_release.outputs.version }}
+      notes_b64: ${{ steps.prepare_release.outputs.notes_b64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -71,30 +72,38 @@ jobs:
 
             const isPrerelease = process.env.PRERELEASE === 'true';
 
-            function generateGitChangelog(tag) {
+            function buildReleaseLogs(tag) {
+              let targetRef = 'HEAD';
+              try {
+                execSync(`git rev-parse --verify "${tag}^{commit}" 2>/dev/null`, { encoding: 'utf8' });
+                targetRef = tag;
+              } catch (e) {
+                targetRef = 'HEAD';
+              }
+
               let prevTag = '';
               try {
-                prevTag = execSync(`git describe --tags --abbrev=0 "${tag}^" 2>/dev/null`, { encoding: 'utf8' }).trim();
+                prevTag = execSync(`git describe --tags --abbrev=0 "${targetRef}^" 2>/dev/null`, { encoding: 'utf8' }).trim();
               } catch (e) {
                 prevTag = '';
               }
 
-              const range = prevTag ? `${prevTag}..${tag}` : (tag || 'HEAD');
+              const range = prevTag ? `${prevTag}..${targetRef}` : targetRef;
               let rawLog = '';
               try {
                 rawLog = execSync(`git log ${range} --pretty=format:"%h|%s" --no-merges`, { encoding: 'utf8' }).trim();
               } catch (e) {
-                return '';
+                return { markdownChangelog: '', plainNotes: '' };
               }
-              if (!rawLog) return '';
+              if (!rawLog) return { markdownChangelog: '', plainNotes: '' };
 
               const categories = {
-                features: { title: '### 🚀 新功能 (Features)', items: [] },
-                fixes: { title: '### 🐛 漏洞修复 (Bug Fixes)', items: [] },
-                perf: { title: '### ⚡ 优化与重构 (Refactoring & Performance)', items: [] },
-                ui: { title: '### 💄 界面与体验 (UI & Styling)', items: [] },
-                maintenance: { title: '### 🔧 工具与构建 (Tooling & Maintenance)', items: [] },
-                others: { title: '### 📦 其他更新 (Other Changes)', items: [] },
+                features: { title: '### 🚀 新功能 (Features)', items: [], plainItems: [] },
+                fixes: { title: '### 🐛 漏洞修复 (Bug Fixes)', items: [], plainItems: [] },
+                perf: { title: '### ⚡ 优化与重构 (Refactoring & Performance)', items: [], plainItems: [] },
+                ui: { title: '### 💄 界面与体验 (UI & Styling)', items: [], plainItems: [] },
+                maintenance: { title: '### 🔧 工具与构建 (Tooling & Maintenance)', items: [], plainItems: [] },
+                others: { title: '### 📦 其他更新 (Other Changes)', items: [], plainItems: [] },
               };
 
               const lines = rawLog.split('\n').filter(Boolean);
@@ -104,22 +113,30 @@ jobs:
                 const hash = line.slice(0, sepIndex).trim();
                 const msg = line.slice(sepIndex + 1).trim();
                 if (!msg) continue;
+                if (/^(chore\s*\(\s*release\s*\)|release)\s*:/i.test(msg)) continue;
 
                 const lower = msg.toLowerCase();
                 const item = `- ${msg} ([${hash}](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${hash}))`;
+                const plainText = msg.replace(/^[a-z]+(\([^)]*\))?!?\s*:\s*/i, '').trim() || msg;
 
                 if (lower.startsWith('feat')) {
                   categories.features.items.push(item);
+                  categories.features.plainItems.push(plainText);
                 } else if (lower.startsWith('fix')) {
                   categories.fixes.items.push(item);
+                  categories.fixes.plainItems.push(plainText);
                 } else if (lower.startsWith('perf') || lower.startsWith('refactor')) {
                   categories.perf.items.push(item);
+                  categories.perf.plainItems.push(plainText);
                 } else if (lower.startsWith('style') || lower.startsWith('ui')) {
                   categories.ui.items.push(item);
+                  categories.ui.plainItems.push(plainText);
                 } else if (lower.startsWith('chore') || lower.startsWith('ci') || lower.startsWith('build')) {
                   categories.maintenance.items.push(item);
+                  categories.maintenance.plainItems.push(plainText);
                 } else {
                   categories.others.items.push(item);
+                  categories.others.plainItems.push(plainText);
                 }
               }
 
@@ -131,10 +148,32 @@ jobs:
                 }
               }
 
-              return sections.join('\n\n');
+              const plainCollected = [];
+              const seenPlain = new Set();
+              for (const key of ['features', 'fixes', 'perf', 'ui', 'others']) {
+                for (const text of categories[key].plainItems) {
+                  if (text && !seenPlain.has(text)) {
+                    seenPlain.add(text);
+                    plainCollected.push(`• ${text}`);
+                  }
+                }
+              }
+              if (plainCollected.length === 0) {
+                for (const text of categories.maintenance.plainItems) {
+                  if (text && !seenPlain.has(text)) {
+                    seenPlain.add(text);
+                    plainCollected.push(`• ${text}`);
+                  }
+                }
+              }
+
+              return {
+                markdownChangelog: sections.join('\n\n'),
+                plainNotes: plainCollected.join('\n'),
+              };
             }
 
-            const gitChangelog = generateGitChangelog(tagName);
+            const { markdownChangelog: gitChangelog, plainNotes: gitPlainNotes } = buildReleaseLogs(tagName);
 
             let apiNotes = '';
             try {
@@ -147,6 +186,23 @@ jobs:
               apiNotes = notesRes.data.body || '';
             } catch (notesErr) {
               console.log('generateReleaseNotes warning:', notesErr.message);
+            }
+
+            let finalPlainNotes = gitPlainNotes;
+            if (!finalPlainNotes && apiNotes) {
+              const fallbackItems = [];
+              for (const rawLine of apiNotes.split('\n')) {
+                const trimmed = rawLine.trim();
+                if (!trimmed.startsWith('* ') && !trimmed.startsWith('- ')) continue;
+                const cleaned = trimmed
+                  .slice(2)
+                  .replace(/\s+by\s+@\S+\s+in\s+https?:\/\/\S+$/i, '')
+                  .trim();
+                if (cleaned && !/^(chore\s*\(\s*release\s*\)|release)\s*:/i.test(cleaned)) {
+                  fallbackItems.push(`• ${cleaned}`);
+                }
+              }
+              finalPlainNotes = fallbackItems.join('\n');
             }
 
             const macosNotice = [
@@ -212,6 +268,7 @@ jobs:
             core.setOutput('release_id', release.id.toString());
             core.setOutput('tag_name', tagName);
             core.setOutput('version', cleanVersion);
+            core.setOutput('notes_b64', Buffer.from(finalPlainNotes, 'utf8').toString('base64'));
 
   build-macos:
     name: Build macOS (${{ matrix.name }})
@@ -304,11 +361,15 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
           VERSION: ${{ needs.create-release.outputs.version }}
+          NOTES_B64: ${{ needs.create-release.outputs.notes_b64 || '' }}
         with:
           script: |
             const releaseId = parseInt(process.env.RELEASE_ID, 10);
             const tagName = process.env.TAG_NAME;
             const version = process.env.VERSION;
+            const notes = process.env.NOTES_B64
+              ? Buffer.from(process.env.NOTES_B64, 'base64').toString('utf8').trim()
+              : '';
             const downloadBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tagName}`;
 
             const { data: assets } = await github.rest.repos.listReleaseAssets({
@@ -328,7 +389,7 @@ jobs:
 
             const manifest = {
               version,
-              notes: `Pivot ${tagName} — 原生 Rust + GPUI 桌面版`,
+              notes,
               pub_date: new Date().toISOString(),
               platforms: {
                 'darwin-aarch64': {
