@@ -11,7 +11,8 @@ else
   DEFAULT_TARGET="x86_64-apple-darwin"
 fi
 
-TARGET="${1:-${DEFAULT_TARGET}}"
+EXPLICIT_TARGET="${1:-}"
+TARGET="${EXPLICIT_TARGET:-${DEFAULT_TARGET}}"
 VERSION="${2:-$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pivot-desktop/Cargo.toml | head -n 1)}"
 VERSION="${VERSION#v}"
 
@@ -30,9 +31,8 @@ esac
 
 BIN_PATH="${ROOT_DIR}/target/${TARGET}/release/pivot"
 if [[ ! -f "${BIN_PATH}" ]]; then
-  FALLBACK_BIN="${ROOT_DIR}/target/release/pivot"
-  if [[ -f "${FALLBACK_BIN}" ]]; then
-    BIN_PATH="${FALLBACK_BIN}"
+  if [[ -z "${EXPLICIT_TARGET}" && -f "${ROOT_DIR}/target/release/pivot" ]]; then
+    BIN_PATH="${ROOT_DIR}/target/release/pivot"
   else
     echo "Release binary not found at ${BIN_PATH}. Run: cargo build --release --target ${TARGET} -p pivot-desktop" >&2
     exit 1

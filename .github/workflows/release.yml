@@ -194,11 +194,17 @@ jobs:
               for (const rawLine of apiNotes.split('\n')) {
                 const trimmed = rawLine.trim();
                 if (!trimmed.startsWith('* ') && !trimmed.startsWith('- ')) continue;
-                const cleaned = trimmed
+                const withoutMeta = trimmed
                   .slice(2)
                   .replace(/\s+by\s+@\S+\s+in\s+https?:\/\/\S+$/i, '')
                   .trim();
-                if (cleaned && !/^(chore\s*\(\s*release\s*\)|release)\s*:/i.test(cleaned)) {
+                if (!withoutMeta || /^(chore\s*\(\s*release\s*\)|release)\s*:/i.test(withoutMeta)) {
+                  continue;
+                }
+                const cleaned = withoutMeta
+                  .replace(/^[a-z]+(\([^)]+\))?!?:\s*/i, '')
+                  .trim();
+                if (cleaned) {
                   fallbackItems.push(`• ${cleaned}`);
                 }
               }
@@ -237,12 +243,19 @@ jobs:
             const finalBody = `${macosNotice}${changelogContent}\n\n---\n**完整提交历史**: https://github.com/${context.repo.owner}/${context.repo.repo}/commits/${tagName}\n`;
 
             let release;
-            const { data: allReleases } = await github.rest.repos.listReleases({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 30,
-            });
-            const existing = allReleases.find((r) => r.tag_name === tagName);
+            let existing = null;
+            try {
+              const resp = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tagName,
+              });
+              existing = resp.data;
+            } catch (err) {
+              if (err.status !== 404) {
+                throw err;
+              }
+            }
             if (existing) {
               const updated = await github.rest.repos.updateRelease({
                 owner: context.repo.owner,
@@ -287,6 +300,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag_name }}
+
+      - name: Verify Crate Versions Match Tag
+        run: |
+          EXPECTED="${{ needs.create-release.outputs.version }}"
+          DESKTOP_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pivot-desktop/Cargo.toml | head -n 1)"
+          CORE_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pivot-core/Cargo.toml | head -n 1)"
+          if [ "${DESKTOP_VER}" != "${EXPECTED}" ] || [ "${CORE_VER}" != "${EXPECTED}" ]; then
+            echo "Version mismatch: tag=${EXPECTED}, desktop=${DESKTOP_VER}, core=${CORE_VER}" >&2
+            exit 1
+          fi
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

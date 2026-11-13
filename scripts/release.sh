@@ -4,16 +4,34 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-BUMP_ARG="${1:-patch}"
+BUMP_ARG=""
 NO_PUSH=false
 DRY_RUN=false
 
-for arg in "$@"; do
-  case "${arg}" in
-    --no-push) NO_PUSH=true ;;
-    --dry-run) DRY_RUN=true ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-push)
+      NO_PUSH=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "${BUMP_ARG}" ]]; then
+        echo "Unexpected extra version argument: $1" >&2
+        exit 1
+      fi
+      BUMP_ARG="$1"
+      ;;
   esac
+  shift
 done
+
+BUMP_ARG="${BUMP_ARG:-patch}"
 
 CURRENT_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pivot-desktop/Cargo.toml | head -n 1)"
 if [[ -z "${CURRENT_VER}" ]]; then
@@ -31,9 +49,6 @@ case "${BUMP_ARG}" in
     NEW_VER="${MAJOR}.$((MINOR + 1)).0"
     ;;
   patch)
-    NEW_VER="${MAJOR}.${MINOR}.$((PATCH + 1))"
-    ;;
-  --*)
     NEW_VER="${MAJOR}.${MINOR}.$((PATCH + 1))"
     ;;
   *)
