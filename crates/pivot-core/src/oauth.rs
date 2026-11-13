@@ -565,8 +565,8 @@ pub fn get_local_codex_cached_models() -> Option<Vec<String>> {
     Some(entries.into_iter().map(|e| e.1).collect())
 }
 
-/// 获取 ChatGPT 可用模型列表
-pub async fn fetch_chatgpt_models(
+/// 严格从上游 ChatGPT 接口拉取当前账号真实可用的模型列表（不回退本地缓存或硬编码兜底）
+pub async fn fetch_chatgpt_account_models(
     client: &reqwest::Client,
     access_token: &str,
 ) -> Result<Vec<String>, String> {
@@ -582,9 +582,58 @@ pub async fn fetch_chatgpt_models(
         .header("authorization", format!("Bearer {}", access_token))
         .header("user-agent", &ua)
         .send()
-        .await;
+        .await
+        .map_err(|e| format!("请求 ChatGPT 可用模型失败: {}", e))?;
 
-    let fallback_models = vec![
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("ChatGPT 返回错误 ({}): {}", status, err_body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 ChatGPT 模型列表失败: {}", e))?;
+
+    let arr = json["models"]
+        .as_array()
+        .ok_or_else(|| "ChatGPT 模型列表响应缺少 models 字段".to_string())?;
+
+    let mut entries = Vec::new();
+    for m in arr {
+        if let Some(slug) = m["slug"].as_str() {
+            let trimmed = slug.trim();
+            if trimmed.is_empty() || trimmed == "codex-auto-review" {
+                continue;
+            }
+            let priority = m["priority"].as_i64().unwrap_or(999);
+            entries.push((priority, trimmed.to_string()));
+        }
+    }
+
+    if entries.is_empty() {
+        return Err("ChatGPT 未返回任何可用模型".to_string());
+    }
+
+    entries.sort_by_key(|e| e.0);
+    Ok(entries.into_iter().map(|e| e.1).collect())
+}
+
+/// 获取 ChatGPT 可用模型列表（带本地缓存与预设兜底）
+pub async fn fetch_chatgpt_models(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<Vec<String>, String> {
+    if let Ok(models) = fetch_chatgpt_account_models(client, access_token).await {
+        return Ok(models);
+    }
+
+    if let Some(local) = get_local_codex_cached_models() {
+        return Ok(local);
+    }
+
+    Ok(vec![
         "gpt-6.1-sol".to_string(),
         "gpt-6-astra".to_string(),
         "gpt-6.1-terra".to_string(),
@@ -594,55 +643,84 @@ pub async fn fetch_chatgpt_models(
         "gpt-5.6-sol".to_string(),
         "gpt-5.6-terra".to_string(),
         "gpt-5.6-luna".to_string(),
-    ];
+    ])
+}
 
-    match resp {
-        Ok(res) if res.status().is_success() => {
+/// 规范化 ChatGPT 订阅套餐类型标识
+pub fn format_chatgpt_plan_type(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = match trimmed.to_lowercase().as_str() {
+        "pro" => "Pro".to_string(),
+        "prolite" | "pro_lite" | "pro-lite" => "Pro Lite".to_string(),
+        "plus" => "Plus".to_string(),
+        "team" => "Team".to_string(),
+        "enterprise" => "Enterprise".to_string(),
+        "edu" => "Edu".to_string(),
+        "free" => "Free".to_string(),
+        _ => trimmed.to_string(),
+    };
+    Some(normalized)
+}
+
+/// 探测 ChatGPT 账号当前的订阅套餐类型
+pub async fn fetch_chatgpt_plan_type(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Option<String> {
+    if let Ok(res) = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", codex_user_agent())
+        .header("accept", "application/json")
+        .send()
+        .await
+    {
+        if res.status().is_success() {
             if let Ok(json) = res.json::<serde_json::Value>().await {
-                if let Some(arr) = json["models"].as_array() {
-                    let mut entries = Vec::new();
-                    for m in arr {
-                        if let Some(slug) = m["slug"].as_str() {
-                            if slug == "codex-auto-review" {
-                                continue;
-                            }
-                            let priority = m["priority"].as_i64().unwrap_or(999);
-                            entries.push((priority, slug.to_string()));
-                        }
-                    }
-                    if !entries.is_empty() {
-                        entries.sort_by_key(|e| e.0);
-                        return Ok(entries.into_iter().map(|e| e.1).collect());
-                    }
+                if let Some(pt) = json["plan_type"].as_str().and_then(format_chatgpt_plan_type) {
+                    return Some(pt);
                 }
-            }
-            if let Some(local) = get_local_codex_cached_models() {
-                return Ok(local);
-            }
-            Ok(fallback_models)
-        }
-        _ => {
-            if let Some(local) = get_local_codex_cached_models() {
-                Ok(local)
-            } else {
-                Ok(fallback_models)
             }
         }
     }
+
+    if let Ok(res) = client
+        .get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", codex_user_agent())
+        .send()
+        .await
+    {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(accs) = json["accounts"].as_object() {
+                    if let Some(first) = accs.values().next() {
+                        if let Some(pt) = first["account"]["plan_type"]
+                            .as_str()
+                            .and_then(format_chatgpt_plan_type)
+                        {
+                            return Some(pt);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// 解析 ChatGPT / Codex 官方 /wham/usage 额度响应
 pub fn parse_chatgpt_usage_json(json: &serde_json::Value) -> Vec<QuotaBucket> {
     let mut buckets = Vec::new();
 
-    let plan_label = match json["plan_type"].as_str() {
-        Some("pro") => "Pro",
-        Some("prolite") => "Pro Lite",
-        Some("plus") => "Plus",
-        Some("team") => "Team",
-        Some(other) => other,
-        None => "",
-    };
+    let plan_label = json["plan_type"]
+        .as_str()
+        .and_then(format_chatgpt_plan_type)
+        .unwrap_or_default();
 
     let rate_limit = &json["rate_limit"];
     let limit_reached = rate_limit["limit_reached"].as_bool().unwrap_or(false);
@@ -710,12 +788,12 @@ pub fn parse_chatgpt_usage_json(json: &serde_json::Value) -> Vec<QuotaBucket> {
     buckets
 }
 
-/// 获取 ChatGPT 订阅状态、配额与限流重置卡
+/// 获取 ChatGPT 订阅状态、配额、限流重置卡与套餐等级
 pub async fn fetch_chatgpt_quota(
     client: &reqwest::Client,
     access_token: &str,
-) -> Result<(Vec<QuotaBucket>, Vec<ResetCredit>), String> {
-    // 1. 尝试直接请求 Codex 官方额度接口 /wham/usage 获取真实可用额度
+) -> Result<(Vec<QuotaBucket>, Vec<ResetCredit>, Option<String>), String> {
+    // 1. 尝试直接请求 Codex 官方额度接口 /wham/usage 获取真实可用额度与套餐类型
     let usage_resp = client
         .get("https://chatgpt.com/backend-api/wham/usage")
         .header("authorization", format!("Bearer {}", access_token))
@@ -725,9 +803,13 @@ pub async fn fetch_chatgpt_quota(
         .await;
 
     let mut buckets = Vec::new();
+    let mut detected_plan_type = None;
     if let Ok(res) = usage_resp {
         if res.status().is_success() {
             if let Ok(json) = res.json::<serde_json::Value>().await {
+                detected_plan_type = json["plan_type"]
+                    .as_str()
+                    .and_then(format_chatgpt_plan_type);
                 buckets = parse_chatgpt_usage_json(&json);
             }
         }
@@ -766,7 +848,7 @@ pub async fn fetch_chatgpt_quota(
     // 按过期时间从小到大排序（最先过期的排最前）
     reset_credits.sort_by(|a, b| a.expires_at.cmp(&b.expires_at));
 
-    if buckets.is_empty() {
+    if buckets.is_empty() || detected_plan_type.is_none() {
         // 兜底回退：通过账号状态检查接口读取套餐类型
         let resp = client
             .get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27")
@@ -781,14 +863,14 @@ pub async fn fetch_chatgpt_quota(
                 if let Ok(json) = res.json::<serde_json::Value>().await {
                     if let Some(accs) = json["accounts"].as_object() {
                         if let Some(first) = accs.values().next() {
-                            if let Some(pt) = first["account"]["plan_type"].as_str() {
-                                plan_name = match pt {
-                                    "pro" => "ChatGPT Pro 订阅 (有效)".to_string(),
-                                    "prolite" => "ChatGPT Pro Lite 订阅 (有效)".to_string(),
-                                    "plus" => "ChatGPT Plus 订阅 (有效)".to_string(),
-                                    "team" => "ChatGPT Team 订阅 (有效)".to_string(),
-                                    other => format!("ChatGPT {} 订阅 (有效)", other),
-                                };
+                            if let Some(pt_norm) = first["account"]["plan_type"]
+                                .as_str()
+                                .and_then(format_chatgpt_plan_type)
+                            {
+                                plan_name = format!("ChatGPT {} 订阅 (有效)", pt_norm);
+                                if detected_plan_type.is_none() {
+                                    detected_plan_type = Some(pt_norm);
+                                }
                             }
                         }
                     }
@@ -796,16 +878,18 @@ pub async fn fetch_chatgpt_quota(
             }
         }
 
-        buckets.push(QuotaBucket {
-            id: "chatgpt_subscription_status".to_string(),
-            label: plan_name,
-            remaining_fraction: 1.0,
-            reset_time: None,
-            is_exhausted: false,
-        });
+        if buckets.is_empty() {
+            buckets.push(QuotaBucket {
+                id: "chatgpt_subscription_status".to_string(),
+                label: plan_name,
+                remaining_fraction: 1.0,
+                reset_time: None,
+                is_exhausted: false,
+            });
+        }
     }
 
-    Ok((buckets, reset_credits))
+    Ok((buckets, reset_credits, detected_plan_type))
 }
 
 /// 消耗一张限流重置卡立即重置限流
@@ -837,11 +921,45 @@ pub async fn consume_chatgpt_reset_credit(
         .map_err(|e| format!("解析重置响应失败: {}", e))
 }
 
-/// 为指定 provider 获取一个可用的订阅账号（自动轮询、检查冷却、自动续期 Token、单账号失败自动转移下一个账号）
-pub async fn acquire_subscription_account(
+/// 判断某个订阅账号是否支持指定模型；尚未探测的旧数据（supported_models 为 None）视为默认兼容
+pub fn account_supports_model(account: &crate::db::SubscriptionAccount, target_model: &str) -> bool {
+    let target = target_model.trim();
+    if target.is_empty() {
+        return true;
+    }
+    let Some(ref supported) = account.supported_models else {
+        return true;
+    };
+
+    if supported.iter().any(|m| m.eq_ignore_ascii_case(target)) {
+        return true;
+    }
+
+    let target_candidates = crate::gateway::router::normalize_model_candidates(target);
+    for candidate in &target_candidates {
+        if supported.iter().any(|m| m.eq_ignore_ascii_case(candidate)) {
+            return true;
+        }
+    }
+
+    for declared in supported {
+        for candidate in crate::gateway::router::normalize_model_candidates(declared) {
+            if candidate.eq_ignore_ascii_case(target) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// 从指定 provider 获取一个可用的订阅账号（支持按目标模型过滤、排除失败账号、自动轮询、检查冷却、自动续期 Token）
+pub async fn acquire_subscription_account_for_model(
     db: &crate::db::Database,
     http_client: &reqwest::Client,
     provider_id: &str,
+    target_model: Option<&str>,
+    exclude_account_ids: &[String],
 ) -> Result<crate::db::SubscriptionAccount, (axum::http::StatusCode, String)> {
     let accounts = db.get_subscription_accounts(provider_id).map_err(|e| {
         (
@@ -850,17 +968,61 @@ pub async fn acquire_subscription_account(
         )
     })?;
 
-    let now_sec = chrono::Utc::now().timestamp();
-    let available: Vec<_> = accounts
+    let enabled_accounts: Vec<_> = accounts.into_iter().filter(|a| a.enabled).collect();
+    if enabled_accounts.is_empty() {
+        return Err((
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "当前订阅账号池中没有可用账号（尚未绑定或全部已禁用）".to_string(),
+        ));
+    }
+
+    let model_trimmed = target_model.map(str::trim).filter(|m| !m.is_empty());
+    let model_matched: Vec<_> = if let Some(model) = model_trimmed {
+        let matched: Vec<_> = enabled_accounts
+            .into_iter()
+            .filter(|a| account_supports_model(a, model))
+            .collect();
+        if matched.is_empty() {
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                format!(
+                    "当前已启用的订阅账号等级均不支持模型 '{}'，请连接支持该模型的订阅账号或在客户端切换其他模型",
+                    model
+                ),
+            ));
+        }
+        matched
+    } else {
+        enabled_accounts
+    };
+
+    let after_exclude: Vec<_> = model_matched
         .into_iter()
-        .filter(|a| a.enabled && a.cooldown_until <= now_sec)
+        .filter(|a| !exclude_account_ids.iter().any(|ex| ex == &a.id))
+        .collect();
+    if after_exclude.is_empty() {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "当前订阅账号池中无更多支持该模型的候选账号".to_string(),
+        ));
+    }
+
+    let now_sec = chrono::Utc::now().timestamp();
+    let available: Vec<_> = after_exclude
+        .into_iter()
+        .filter(|a| a.cooldown_until <= now_sec)
         .collect();
 
     if available.is_empty() {
-        return Err((
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "当前订阅账号池中没有可用账号（全部在冷却中或尚未绑定账号）".to_string(),
-        ));
+        let msg = if let Some(model) = model_trimmed {
+            format!(
+                "支持模型 '{}' 的订阅账号当前均在配额冷却中，请稍后重试",
+                model
+            )
+        } else {
+            "当前订阅账号池中没有可用账号（全部在冷却中或尚未绑定账号）".to_string()
+        };
+        return Err((axum::http::StatusCode::TOO_MANY_REQUESTS, msg));
     }
 
     static SUB_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -946,6 +1108,15 @@ pub async fn acquire_subscription_account(
     ))
 }
 
+/// 为指定 provider 获取一个可用的订阅账号（兼容无模型过滤的调用方）
+pub async fn acquire_subscription_account(
+    db: &crate::db::Database,
+    http_client: &reqwest::Client,
+    provider_id: &str,
+) -> Result<crate::db::SubscriptionAccount, (axum::http::StatusCode, String)> {
+    acquire_subscription_account_for_model(db, http_client, provider_id, None, &[]).await
+}
+
 /// 当上游返回 401 Unauthorized 时，强制尝试使用 refresh_token 刷新账号凭据
 pub async fn try_refresh_subscription_account(
     db: &crate::db::Database,
@@ -1013,6 +1184,120 @@ pub fn is_token_revoked_or_invalid(err: &str) -> bool {
 pub fn mark_account_cooldown(db: &crate::db::Database, account_id: &str, cooldown_seconds: i64) {
     let until = chrono::Utc::now().timestamp() + cooldown_seconds;
     let _ = db.set_account_cooldown(account_id, until);
+}
+
+/// 识别上游错误是否属于“当前账号订阅等级不支持/无权使用该模型”
+pub fn is_model_unsupported_for_account(status: axum::http::StatusCode, body: &str) -> bool {
+    if !matches!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST
+            | axum::http::StatusCode::FORBIDDEN
+            | axum::http::StatusCode::NOT_FOUND
+    ) {
+        return false;
+    }
+
+    let lower = body.to_lowercase();
+    // 排除限流、容量耗尽、上下文超长与认证失效错误，避免误删账号模型权限
+    for excluded in [
+        "rate_limit",
+        "quota",
+        "resource_exhausted",
+        "capacity_exhausted",
+        "context_length",
+        "too many tokens",
+        "maximum context",
+        "unauthenticated",
+        "invalid_grant",
+        "invalid_refresh_token",
+    ] {
+        if lower.contains(excluded) {
+            return false;
+        }
+    }
+
+    if lower.contains("model_not_found")
+        || lower.contains("unsupported_model")
+        || lower.contains("model is not supported")
+        || lower.contains("invalid model")
+        || lower.contains("unknown model")
+        || lower.contains("do not have access")
+        || lower.contains("does not have access")
+        || lower.contains("not authorized to use")
+    {
+        return true;
+    }
+
+    if lower.contains("plan")
+        && (lower.contains("not supported")
+            || lower.contains("not available")
+            || lower.contains("upgrade")
+            || lower.contains("only available"))
+    {
+        return true;
+    }
+
+    if lower.contains("tier")
+        && (lower.contains("not supported")
+            || lower.contains("not available")
+            || lower.contains("upgrade")
+            || lower.contains("entitle"))
+    {
+        return true;
+    }
+
+    if status == axum::http::StatusCode::NOT_FOUND
+        && lower.contains("model")
+        && (lower.contains("not found")
+            || lower.contains("not_found")
+            || lower.contains("does not exist"))
+    {
+        return true;
+    }
+
+    if status == axum::http::StatusCode::FORBIDDEN
+        && lower.contains("permission_denied")
+        && lower.contains("model")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// 当上游判定某账号无权调用指定模型时，动态从该账号的支持列表中移除该模型（不冷却整个账号）
+pub fn handle_account_model_unsupported(
+    db: &crate::db::Database,
+    http_client: &reqwest::Client,
+    account: &crate::db::SubscriptionAccount,
+    unsupported_model: &str,
+    base_url: &str,
+) {
+    if account.supported_models.is_some() {
+        let _ = db.remove_model_from_account(&account.id, unsupported_model);
+        return;
+    }
+
+    // 存量未探测账号（supported_models 为 None）：后台拉取真实模型列表并剔除失败模型
+    let db_clone = db.clone();
+    let client_clone = http_client.clone();
+    let acc_clone = account.clone();
+    let model_clone = unsupported_model.to_string();
+    let base_clone = base_url.to_string();
+
+    tokio::spawn(async move {
+        let fetched_res = if acc_clone.account_type == "chatgpt" {
+            fetch_chatgpt_account_models(&client_clone, &acc_clone.access_token).await
+        } else {
+            fetch_antigravity_models(&client_clone, &acc_clone.access_token, &base_clone).await
+        };
+        if let Ok(mut models) = fetched_res {
+            models.retain(|m| !m.eq_ignore_ascii_case(&model_clone));
+            if !models.is_empty() {
+                let _ = db_clone.update_account_supported_models(&acc_clone.id, &models);
+            }
+        }
+    });
 }
 
 /// 向 Google Antigravity / Cloud Code 请求当前账号可用的模型列表
@@ -1168,6 +1453,8 @@ pub struct AccountQuota {
     pub buckets: Vec<QuotaBucket>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_credits: Option<Vec<ResetCredit>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
     pub error: Option<String>,
 }
 
@@ -1574,5 +1861,191 @@ mod tests {
         assert!(is_token_revoked_or_invalid("401 Unauthorized"));
         assert!(is_token_revoked_or_invalid("UNAUTHENTICATED: Request had invalid authentication credentials"));
         assert!(!is_token_revoked_or_invalid("Connection timed out after 5000 ms"));
+    }
+
+    #[test]
+    fn test_account_supports_model_and_normalization() {
+        let mut acc = crate::db::SubscriptionAccount {
+            id: "sub_1".to_string(),
+            provider_id: "chatgpt".to_string(),
+            account_type: "chatgpt".to_string(),
+            email: Some("user@example.com".to_string()),
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: 9_999_999_999,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: Some("Plus".to_string()),
+            supported_models: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        // 尚未探测的旧数据（supported_models = None）兼容所有模型
+        assert!(account_supports_model(&acc, "gpt-6-astra"));
+
+        acc.supported_models = Some(vec![
+            "gpt-5.6-luna".to_string(),
+            "claude-3-7-sonnet".to_string(),
+        ]);
+        assert!(account_supports_model(&acc, "gpt-5.6-luna"));
+        assert!(account_supports_model(&acc, "GPT-5.6-LUNA"));
+        assert!(account_supports_model(&acc, "claude-3-7-sonnet-20250219"));
+        assert!(!account_supports_model(&acc, "gpt-6-astra"));
+    }
+
+    #[test]
+    fn test_is_model_unsupported_for_account() {
+        use axum::http::StatusCode;
+        assert!(is_model_unsupported_for_account(
+            StatusCode::NOT_FOUND,
+            r#"{"error":{"code":"model_not_found","message":"The model gpt-6-astra does not exist or you do not have access to it."}}"#
+        ));
+        assert!(is_model_unsupported_for_account(
+            StatusCode::FORBIDDEN,
+            r#"{"error":{"message":"Your current plan does not support this model. Please upgrade to Pro."}}"#
+        ));
+        assert!(is_model_unsupported_for_account(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"This model is not supported for your account tier."}}"#
+        ));
+        // 限流、容量、鉴权失败绝不能误判为模型不支持
+        assert!(!is_model_unsupported_for_account(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"model_not_found"}}"#
+        ));
+        assert!(!is_model_unsupported_for_account(
+            StatusCode::FORBIDDEN,
+            r#"{"error":{"message":"Quota exceeded for model gpt-6-astra"}}"#
+        ));
+        assert!(!is_model_unsupported_for_account(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"maximum context length exceeded for this model"}}"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_subscription_account_for_model_tiered_pool() {
+        let dir = std::env::temp_dir().join(format!("pivot-oauth-tier-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let db = crate::db::Database::new(db_path.clone()).unwrap();
+        let client = reqwest::Client::new();
+        let future_exp = chrono::Utc::now().timestamp() + 3600;
+
+        // Plus 账号：仅支持基础模型
+        db.save_subscription_account(&crate::db::SubscriptionAccount {
+            id: "acc_plus".to_string(),
+            provider_id: "chatgpt_subscription".to_string(),
+            account_type: "chatgpt".to_string(),
+            email: Some("plus@example.com".to_string()),
+            access_token: "tok_plus".to_string(),
+            refresh_token: None,
+            expires_at: future_exp,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: Some("Plus".to_string()),
+            supported_models: Some(vec!["gpt-5.6-luna".to_string()]),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        // Pro 账号：支持基础模型 + 高阶独享模型
+        db.save_subscription_account(&crate::db::SubscriptionAccount {
+            id: "acc_pro".to_string(),
+            provider_id: "chatgpt_subscription".to_string(),
+            account_type: "chatgpt".to_string(),
+            email: Some("pro@example.com".to_string()),
+            access_token: "tok_pro".to_string(),
+            refresh_token: None,
+            expires_at: future_exp,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: Some("Pro".to_string()),
+            supported_models: Some(vec![
+                "gpt-5.6-luna".to_string(),
+                "gpt-6-astra".to_string(),
+            ]),
+            created_at: "2026-01-02T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        // 1. 请求高阶独享模型 -> 100% 命中 Pro 账号
+        for _ in 0..4 {
+            let picked = acquire_subscription_account_for_model(
+                &db,
+                &client,
+                "chatgpt_subscription",
+                Some("gpt-6-astra"),
+                &[],
+            )
+            .await
+            .unwrap();
+            assert_eq!(picked.id, "acc_pro");
+        }
+
+        // 2. 请求共有基础模型 -> 两个账号平等轮询
+        let mut seen_ids = std::collections::HashSet::new();
+        for _ in 0..6 {
+            let picked = acquire_subscription_account_for_model(
+                &db,
+                &client,
+                "chatgpt_subscription",
+                Some("gpt-5.6-luna"),
+                &[],
+            )
+            .await
+            .unwrap();
+            seen_ids.insert(picked.id);
+        }
+        assert_eq!(seen_ids.len(), 2);
+
+        // 3. 排除 acc_pro 时，请求独享模型应返回 SERVICE_UNAVAILABLE 而非派给 Plus
+        let (status, _) = acquire_subscription_account_for_model(
+            &db,
+            &client,
+            "chatgpt_subscription",
+            Some("gpt-6-astra"),
+            &["acc_pro".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        // 4. Pro 账号冷却时，请求独享模型返回 429，绝不误派给 Plus 账号
+        db.set_account_cooldown("acc_pro", chrono::Utc::now().timestamp() + 300)
+            .unwrap();
+        let (status, msg) = acquire_subscription_account_for_model(
+            &db,
+            &client,
+            "chatgpt_subscription",
+            Some("gpt-6-astra"),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(msg.contains("gpt-6-astra"));
+
+        // 5. 禁用 Pro 账号后，池中仅剩 Plus 账号 -> 请求高阶模型直接返回 403
+        let mut pro_acc = db.get_subscription_account_by_id("acc_pro").unwrap().unwrap();
+        pro_acc.enabled = false;
+        db.save_subscription_account(&pro_acc).unwrap();
+        let (status, msg) = acquire_subscription_account_for_model(
+            &db,
+            &client,
+            "chatgpt_subscription",
+            Some("gpt-6-astra"),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert!(msg.contains("gpt-6-astra"));
+
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
     }
 }

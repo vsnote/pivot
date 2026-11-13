@@ -502,6 +502,135 @@ pub async fn set_provider_enabled(state: &AppState, id: String, enabled: bool) -
     Ok(())
 }
 
+fn find_matching_existing_account(
+    existing: Vec<SubscriptionAccount>,
+    account_type: &str,
+    email: Option<&str>,
+) -> Option<SubscriptionAccount> {
+    let target_email = email.map(str::trim).filter(|s| !s.is_empty());
+    existing.into_iter().find(|a| {
+        if a.account_type != account_type {
+            return false;
+        }
+        let existing_email = a.email.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        match (target_email, existing_email) {
+            (Some(t), Some(e)) => t.eq_ignore_ascii_case(e),
+            (None, None) => true,
+            _ => false,
+        }
+    })
+}
+
+async fn probe_account_capabilities(
+    state: &AppState,
+    provider_id: &str,
+    account_type: &str,
+    access_token: &str,
+) -> (Option<String>, Option<Vec<String>>) {
+    if account_type == "chatgpt" {
+        let (models_res, plan_type) = tokio::join!(
+            oauth::fetch_chatgpt_account_models(&state.http_client, access_token),
+            oauth::fetch_chatgpt_plan_type(&state.http_client, access_token),
+        );
+        let supported_models = models_res.ok().filter(|m| !m.is_empty());
+        (plan_type, supported_models)
+    } else {
+        let base_url = state
+            .db
+            .get_providers()
+            .ok()
+            .and_then(|list| {
+                list.into_iter()
+                    .find(|p| p.id == provider_id)
+                    .map(|p| p.base_url)
+            })
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| "https://daily-cloudcode-pa.googleapis.com".to_string());
+        let supported_models =
+            oauth::fetch_antigravity_models(&state.http_client, access_token, &base_url)
+                .await
+                .ok()
+                .filter(|m| !m.is_empty());
+        (None, supported_models)
+    }
+}
+
+fn upsert_subscription_account_from_token(
+    state: &AppState,
+    provider_id: String,
+    account_type: String,
+    token_resp: oauth::TokenResponse,
+    plan_type: Option<String>,
+    supported_models: Option<Vec<String>>,
+) -> Result<SubscriptionAccount, String> {
+    let now_sec = chrono::Utc::now().timestamp();
+    let expires_at = now_sec + token_resp.expires_in;
+    let now_str = chrono::Utc::now().to_rfc3339();
+
+    let existing_accounts = state.db.get_subscription_accounts(&provider_id).unwrap_or_default();
+    if let Some(target) = find_matching_existing_account(
+        existing_accounts,
+        &account_type,
+        token_resp.email.as_deref(),
+    ) {
+        state
+            .db
+            .update_account_tokens(
+                &target.id,
+                &token_resp.access_token,
+                token_resp.refresh_token.as_deref(),
+                expires_at,
+            )
+            .map_err(|e| e.to_string())?;
+
+        let _ = state.db.set_account_cooldown(&target.id, 0);
+        if let Some(ref pt) = plan_type {
+            let _ = state.db.update_account_plan_type(&target.id, pt);
+        }
+        if let Some(ref models) = supported_models {
+            let _ = state.db.update_account_supported_models(&target.id, models);
+        }
+
+        let mut updated = target;
+        updated.access_token = token_resp.access_token;
+        if let Some(rf) = token_resp.refresh_token {
+            updated.refresh_token = Some(rf);
+        }
+        updated.expires_at = expires_at;
+        updated.cooldown_until = 0;
+        if plan_type.is_some() {
+            updated.plan_type = plan_type;
+        }
+        if supported_models.is_some() {
+            updated.supported_models = supported_models;
+        }
+        updated.updated_at = now_str;
+        return Ok(updated);
+    }
+
+    let account = SubscriptionAccount {
+        id: format!("sub_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        provider_id,
+        account_type,
+        email: token_resp.email,
+        access_token: token_resp.access_token,
+        refresh_token: token_resp.refresh_token,
+        expires_at,
+        cooldown_until: 0,
+        enabled: true,
+        plan_type,
+        supported_models,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    };
+
+    state
+        .db
+        .save_subscription_account(&account)
+        .map_err(|e| e.to_string())?;
+    Ok(account)
+}
+
 pub async fn start_subscription_oauth(
     state: &AppState,
     provider_id: String,
@@ -527,57 +656,22 @@ pub async fn start_subscription_oauth(
         oauth::exchange_code_for_tokens(&state.http_client, &code, &pkce.verifier).await?
     };
 
-    let now_sec = chrono::Utc::now().timestamp();
-    let expires_at = now_sec + token_resp.expires_in;
-    let now_str = chrono::Utc::now().to_rfc3339();
+    let (plan_type, supported_models) = probe_account_capabilities(
+        state,
+        &provider_id,
+        &account_type,
+        &token_resp.access_token,
+    )
+    .await;
 
-    let existing_accounts = state.db.get_subscription_accounts(&provider_id).unwrap_or_default();
-    if let Some(target) = existing_accounts
-        .into_iter()
-        .find(|a| (a.email == token_resp.email && token_resp.email.is_some()) || (account_type == "chatgpt" && a.account_type == "chatgpt"))
-    {
-        state
-            .db
-            .update_account_tokens(
-                &target.id,
-                &token_resp.access_token,
-                token_resp.refresh_token.as_deref(),
-                expires_at,
-            )
-            .map_err(|e| e.to_string())?;
-
-        let _ = state.db.set_account_cooldown(&target.id, 0);
-
-        let mut updated = target;
-        updated.access_token = token_resp.access_token;
-        if let Some(rf) = token_resp.refresh_token {
-            updated.refresh_token = Some(rf);
-        }
-        updated.expires_at = expires_at;
-        updated.cooldown_until = 0;
-        updated.updated_at = now_str;
-        return Ok(updated);
-    }
-
-    let account = SubscriptionAccount {
-        id: format!("sub_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+    upsert_subscription_account_from_token(
+        state,
         provider_id,
         account_type,
-        email: token_resp.email,
-        access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
-        expires_at,
-        cooldown_until: 0,
-        enabled: true,
-        created_at: now_str.clone(),
-        updated_at: now_str,
-    };
-
-    state
-        .db
-        .save_subscription_account(&account)
-        .map_err(|e| e.to_string())?;
-    Ok(account)
+        token_resp,
+        plan_type,
+        supported_models,
+    )
 }
 
 pub async fn import_codex_subscription_account(
@@ -586,57 +680,22 @@ pub async fn import_codex_subscription_account(
 ) -> Result<SubscriptionAccount, String> {
     let token_resp = oauth::import_local_codex_account(&state.http_client).await?;
 
-    let now_sec = chrono::Utc::now().timestamp();
-    let expires_at = now_sec + token_resp.expires_in;
-    let now_str = chrono::Utc::now().to_rfc3339();
+    let (plan_type, supported_models) = probe_account_capabilities(
+        state,
+        &provider_id,
+        "chatgpt",
+        &token_resp.access_token,
+    )
+    .await;
 
-    let existing_accounts = state.db.get_subscription_accounts(&provider_id).unwrap_or_default();
-    if let Some(target) = existing_accounts
-        .into_iter()
-        .find(|a| (a.email == token_resp.email && token_resp.email.is_some()) || a.account_type == "chatgpt")
-    {
-        state
-            .db
-            .update_account_tokens(
-                &target.id,
-                &token_resp.access_token,
-                token_resp.refresh_token.as_deref(),
-                expires_at,
-            )
-            .map_err(|e| e.to_string())?;
-
-        let _ = state.db.set_account_cooldown(&target.id, 0);
-
-        let mut updated = target;
-        updated.access_token = token_resp.access_token;
-        if let Some(rf) = token_resp.refresh_token {
-            updated.refresh_token = Some(rf);
-        }
-        updated.expires_at = expires_at;
-        updated.cooldown_until = 0;
-        updated.updated_at = now_str;
-        return Ok(updated);
-    }
-
-    let account = SubscriptionAccount {
-        id: format!("sub_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+    upsert_subscription_account_from_token(
+        state,
         provider_id,
-        account_type: "chatgpt".to_string(),
-        email: token_resp.email,
-        access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
-        expires_at,
-        cooldown_until: 0,
-        enabled: true,
-        created_at: now_str.clone(),
-        updated_at: now_str,
-    };
-
-    state
-        .db
-        .save_subscription_account(&account)
-        .map_err(|e| e.to_string())?;
-    Ok(account)
+        "chatgpt".to_string(),
+        token_resp,
+        plan_type,
+        supported_models,
+    )
 }
 
 pub fn get_subscription_accounts(
@@ -679,20 +738,150 @@ pub fn toggle_subscription_account(
     Ok(())
 }
 
+/// 同步服务商下所有已启用订阅账号的模型列表，更新各账号自身的 supported_models 并返回去重并集
 pub async fn sync_subscription_models(
     state: &AppState,
     provider_id: String,
     base_url: String,
 ) -> Result<Vec<String>, String> {
-    let account = oauth::acquire_subscription_account(&state.db, &state.http_client, &provider_id)
-        .await
-        .map_err(|(_, msg)| msg)?;
-
-    if account.account_type == "chatgpt" {
-        oauth::fetch_chatgpt_models(&state.http_client, &account.access_token).await
-    } else {
-        oauth::fetch_antigravity_models(&state.http_client, &account.access_token, &base_url).await
+    let accounts = state
+        .db
+        .get_subscription_accounts(&provider_id)
+        .map_err(|e| e.to_string())?;
+    let enabled_accounts: Vec<_> = accounts.into_iter().filter(|a| a.enabled).collect();
+    if enabled_accounts.is_empty() {
+        return Err("请先连接并启用至少一个订阅账号".to_string());
     }
+
+    let now_sec = chrono::Utc::now().timestamp();
+    let mut union_models = Vec::new();
+    let mut union_seen = std::collections::HashSet::new();
+    let mut last_err = String::new();
+    let mut is_chatgpt_pool = true;
+
+    for mut account in enabled_accounts.clone() {
+        if account.account_type != "chatgpt" {
+            is_chatgpt_pool = false;
+        }
+
+        // 若 Token 临期，先自动刷新后再探测模型
+        if account.expires_at - now_sec < 300 {
+            if let Some(ref refresh_token) = account.refresh_token {
+                let refresh_res = if account.account_type == "chatgpt" {
+                    oauth::refresh_chatgpt_token(&state.http_client, refresh_token).await
+                } else {
+                    oauth::refresh_antigravity_token(&state.http_client, refresh_token).await
+                };
+                match refresh_res {
+                    Ok((new_token, expires_in)) => {
+                        let new_expires_at = now_sec + expires_in;
+                        let _ = state.db.update_account_tokens(
+                            &account.id,
+                            &new_token,
+                            account.refresh_token.as_deref(),
+                            new_expires_at,
+                        );
+                        let _ = state.db.set_account_cooldown(&account.id, 0);
+                        account.access_token = new_token;
+                        account.expires_at = new_expires_at;
+                    }
+                    Err(e) => {
+                        if oauth::is_token_revoked_or_invalid(&e) {
+                            let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                        }
+                        if account.expires_at <= now_sec {
+                            last_err = format!(
+                                "账号 {} Token 刷新失败: {}",
+                                account.email.as_deref().unwrap_or(&account.id),
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+            } else if account.expires_at <= now_sec {
+                let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                last_err = format!(
+                    "账号 {} Token 已过期且缺少 refresh_token",
+                    account.email.as_deref().unwrap_or(&account.id)
+                );
+                continue;
+            }
+        }
+
+        let fetched_res = if account.account_type == "chatgpt" {
+            let (models_res, plan_type) = tokio::join!(
+                oauth::fetch_chatgpt_account_models(&state.http_client, &account.access_token),
+                oauth::fetch_chatgpt_plan_type(&state.http_client, &account.access_token),
+            );
+            if let Some(ref pt) = plan_type {
+                let _ = state.db.update_account_plan_type(&account.id, pt);
+            }
+            models_res
+        } else {
+            oauth::fetch_antigravity_models(&state.http_client, &account.access_token, &base_url)
+                .await
+        };
+
+        match fetched_res {
+            Ok(models) if !models.is_empty() => {
+                let _ = state
+                    .db
+                    .update_account_supported_models(&account.id, &models);
+                for m in models {
+                    let trimmed = m.trim().to_string();
+                    if !trimmed.is_empty() && union_seen.insert(trimmed.clone()) {
+                        union_models.push(trimmed);
+                    }
+                }
+            }
+            Ok(_) => {
+                last_err = "上游未返回可用模型".to_string();
+            }
+            Err(e) => {
+                if oauth::is_token_revoked_or_invalid(&e) {
+                    let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                }
+                last_err = e;
+            }
+        }
+    }
+
+    if !union_models.is_empty() {
+        return Ok(union_models);
+    }
+
+    // 所有账号本次网络拉取均失败时，优先汇总各启用账号已持久化的 supported_models 并集
+    for account in &enabled_accounts {
+        if let Some(ref cached) = account.supported_models {
+            for m in cached {
+                let trimmed = m.trim().to_string();
+                if !trimmed.is_empty() && union_seen.insert(trimmed.clone()) {
+                    union_models.push(trimmed);
+                }
+            }
+        }
+    }
+    if !union_models.is_empty() {
+        return Ok(union_models);
+    }
+
+    if is_chatgpt_pool {
+        if let Some(local) = oauth::get_local_codex_cached_models() {
+            if !local.is_empty() {
+                return Ok(local);
+            }
+        }
+        if let Some(acc) = enabled_accounts.first() {
+            return oauth::fetch_chatgpt_models(&state.http_client, &acc.access_token).await;
+        }
+    }
+
+    Err(if last_err.is_empty() {
+        "未能获取到任何可用订阅模型".to_string()
+    } else {
+        last_err
+    })
 }
 
 pub async fn get_subscription_account_quota(
@@ -746,6 +935,7 @@ pub async fn get_subscription_account_quota(
                             updated_at: now_sec,
                             buckets: Vec::new(),
                             reset_credits: None,
+                            plan_type: account.plan_type.clone(),
                             error: Some("账号授权已失效，请重新授权".to_string()),
                         });
                     }
@@ -759,14 +949,20 @@ pub async fn get_subscription_account_quota(
                 updated_at: now_sec,
                 buckets: Vec::new(),
                 reset_credits: None,
+                plan_type: account.plan_type.clone(),
                 error: Some("账号授权已失效，请重新授权".to_string()),
             });
         }
     }
 
-    let (buckets, reset_credits) = if account.account_type == "chatgpt" {
+    let (buckets, reset_credits, detected_plan) = if account.account_type == "chatgpt" {
         match oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await {
-            Ok((b, rc)) => (b, Some(rc)),
+            Ok((b, rc, pt)) => {
+                if let Some(ref p) = pt {
+                    let _ = state.db.update_account_plan_type(&account.id, p);
+                }
+                (b, Some(rc), pt.or_else(|| account.plan_type.clone()))
+            }
             Err(e) => {
                 let is_auth_err = oauth::is_token_revoked_or_invalid(&e);
                 if is_auth_err {
@@ -777,6 +973,7 @@ pub async fn get_subscription_account_quota(
                     updated_at: now_sec,
                     buckets: Vec::new(),
                     reset_credits: None,
+                    plan_type: account.plan_type.clone(),
                     error: Some(if is_auth_err { "账号授权已失效，请重新授权".to_string() } else { e }),
                 });
             }
@@ -784,7 +981,7 @@ pub async fn get_subscription_account_quota(
     } else {
         let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
         match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
-            Ok(b) => (b, None),
+            Ok(b) => (b, None, account.plan_type.clone()),
             Err(e) => {
                 let is_auth_err = oauth::is_token_revoked_or_invalid(&e);
                 if is_auth_err {
@@ -795,6 +992,7 @@ pub async fn get_subscription_account_quota(
                     updated_at: now_sec,
                     buckets: Vec::new(),
                     reset_credits: None,
+                    plan_type: account.plan_type.clone(),
                     error: Some(if is_auth_err { "账号授权已失效，请重新授权".to_string() } else { e }),
                 });
             }
@@ -830,6 +1028,7 @@ pub async fn get_subscription_account_quota(
         updated_at: now_sec,
         buckets,
         reset_credits,
+        plan_type: detected_plan,
         error: None,
     })
 }
@@ -854,9 +1053,10 @@ pub async fn consume_subscription_reset_credit(
     if account.expires_at > 0 && account.expires_at - now_sec < 300 {
         if let Some(ref rt) = account.refresh_token {
             if account.account_type == "chatgpt" {
-                if let Ok((new_token, new_expires_at)) =
+                if let Ok((new_token, expires_in)) =
                     oauth::refresh_chatgpt_token(&state.http_client, rt).await
                 {
+                    let new_expires_at = now_sec + expires_in;
                     let _ = state.db.update_account_tokens(
                         &account.id,
                         &new_token,
@@ -876,14 +1076,18 @@ pub async fn consume_subscription_reset_credit(
     let _ = state.db.set_account_cooldown(&account.id, 0);
 
     // 重新拉取最新额度并返回
-    let (buckets, reset_credits) =
+    let (buckets, reset_credits, plan_type) =
         oauth::fetch_chatgpt_quota(&state.http_client, &account.access_token).await?;
+    if let Some(ref p) = plan_type {
+        let _ = state.db.update_account_plan_type(&account.id, p);
+    }
 
     Ok(oauth::AccountQuota {
         account_id,
         updated_at: chrono::Utc::now().timestamp(),
         buckets,
         reset_credits: Some(reset_credits),
+        plan_type: plan_type.or(account.plan_type),
         error: None,
     })
 }
@@ -910,6 +1114,47 @@ pub async fn get_all_subscription_quotas(
         results.push(quota);
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_sub(id: &str, account_type: &str, email: Option<&str>) -> SubscriptionAccount {
+        SubscriptionAccount {
+            id: id.to_string(),
+            provider_id: "chatgpt_subscription".to_string(),
+            account_type: account_type.to_string(),
+            email: email.map(str::to_string),
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: 9_999_999_999,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: None,
+            supported_models: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    #[test]
+    fn chatgpt_accounts_with_different_emails_coexist_without_overwriting() {
+        let existing = vec![sample_sub("sub_plus", "chatgpt", Some("plus@example.com"))];
+
+        // 不同邮箱的 ChatGPT 账号不能命中覆盖
+        assert!(find_matching_existing_account(
+            existing.clone(),
+            "chatgpt",
+            Some("pro@example.com")
+        )
+        .is_none());
+
+        // 同邮箱（忽略大小写）命中更新
+        let matched =
+            find_matching_existing_account(existing, "chatgpt", Some("PLUS@example.com")).unwrap();
+        assert_eq!(matched.id, "sub_plus");
+    }
 }
 
 

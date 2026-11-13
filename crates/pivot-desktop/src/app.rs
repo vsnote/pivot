@@ -167,6 +167,7 @@ pub struct PivotApp {
     pub settings_banner: Option<SettingsBanner>,
     pub update_state: UpdateCheckState,
     pub update_version: Option<String>,
+    pub update_check_seq: u64,
 
     pub pending_open_add_provider: bool,
     pub pending_confirm: Option<PendingConfirm>,
@@ -278,6 +279,7 @@ impl PivotApp {
             settings_banner: None,
             update_state: UpdateCheckState::Idle,
             update_version: None,
+            update_check_seq: 0,
             pending_open_add_provider: false,
             pending_confirm: None,
             confirm_busy: false,
@@ -760,6 +762,13 @@ impl PivotApp {
 
         if self.active_tab == ActiveTab::Providers && tab != ActiveTab::Providers {
             self.latencies.clear();
+        }
+        if self.active_tab == ActiveTab::Settings
+            && tab != ActiveTab::Settings
+            && matches!(self.update_state, UpdateCheckState::UpToDate)
+        {
+            self.update_check_seq = self.update_check_seq.wrapping_add(1);
+            self.update_state = UpdateCheckState::Idle;
         }
         self.context_menu = None;
         self.client_model_select = None;
@@ -1413,6 +1422,10 @@ impl PivotApp {
     }
 
     pub fn editor_fetch_models(&mut self, cx: &mut Context<Self>) {
+        self.editor_fetch_models_with_mode(false, cx);
+    }
+
+    fn editor_fetch_models_with_mode(&mut self, auto_select_new: bool, cx: &mut Context<Self>) {
         let Some(ed) = self.editor.as_mut() else {
             return;
         };
@@ -1449,42 +1462,74 @@ impl PivotApp {
             let res = handle
                 .spawn(async move {
                     if is_sub {
-                        service::sync_subscription_models(&state, provider_id, base_url).await
+                        let sync_res =
+                            service::sync_subscription_models(&state, provider_id.clone(), base_url)
+                                .await;
+                        let accounts =
+                            service::get_subscription_accounts(&state, provider_id).ok();
+                        (sync_res, accounts)
                     } else {
-                        service::fetch_provider_models(protocol, base_url, api_key).await
+                        let fetch_res =
+                            service::fetch_provider_models(protocol, base_url, api_key).await;
+                        (fetch_res, None)
                     }
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 let mut should_auto_save = false;
+                let mut updated_stat: Option<SubAccountStat> = None;
                 if let Some(ed) = app.editor.as_mut().filter(|e| e.provider_id == pid_check) {
                     ed.fetching_models = false;
                     match res {
-                        Ok(Ok(fetched)) => {
-                            resolve_display_names_for_models(
-                                fetched.iter(),
-                                &mut app.model_display_names,
-                            );
-                            ed.upstream_models = Some(fetched.clone());
-                            // 合并入候选模型池并持久化
-                            let mut seen: HashSet<String> = ed.model_pool.iter().cloned().collect();
-                            for m in &fetched {
-                                let t = m.trim();
-                                if !t.is_empty() && seen.insert(t.to_string()) {
-                                    ed.model_pool.push(t.to_string());
+                        Ok((fetch_res, maybe_accounts)) => {
+                            if let Some(accs) = maybe_accounts {
+                                updated_stat = Some(compute_sub_stat(&accs));
+                                ed.sub_accounts = accs;
+                            }
+                            match fetch_res {
+                                Ok(fetched) => {
+                                    resolve_display_names_for_models(
+                                        fetched.iter(),
+                                        &mut app.model_display_names,
+                                    );
+                                    ed.upstream_models = Some(fetched.clone());
+                                    // 合并入候选模型池并持久化，同时记录本次新增的池内模型
+                                    let mut seen: HashSet<String> =
+                                        ed.model_pool.iter().cloned().collect();
+                                    let mut newly_added: Vec<String> = Vec::new();
+                                    for m in &fetched {
+                                        let t = m.trim();
+                                        if !t.is_empty() && seen.insert(t.to_string()) {
+                                            let owned = t.to_string();
+                                            ed.model_pool.push(owned.clone());
+                                            newly_added.push(owned);
+                                        }
+                                    }
+                                    save_provider_pool(&ed.provider_id, &ed.model_pool);
+
+                                    // 若订阅模式当前尚未选任何模型，自动默认选中全池；
+                                    // 若是由新增/导入更高阶订阅账号触发的同步，自动将新解锁模型并入已选列表
+                                    if is_sub && !fetched.is_empty() {
+                                        if ed.selected_models.is_empty() {
+                                            ed.selected_models = fetched;
+                                            should_auto_save = true;
+                                        } else if auto_select_new && !newly_added.is_empty() {
+                                            let mut selected_set: HashSet<String> =
+                                                ed.selected_models.iter().cloned().collect();
+                                            for m in newly_added {
+                                                if selected_set.insert(m.clone()) {
+                                                    ed.selected_models.push(m);
+                                                }
+                                            }
+                                            should_auto_save = true;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    ed.error_msg = Some(err);
                                 }
                             }
-                            save_provider_pool(&ed.provider_id, &ed.model_pool);
-
-                            // 若订阅模式当前尚未选任何模型，自动默认选中推荐模型或全池
-                            if is_sub && ed.selected_models.is_empty() && !fetched.is_empty() {
-                                ed.selected_models = fetched;
-                                should_auto_save = true;
-                            }
-                        }
-                        Ok(Err(err)) => {
-                            ed.error_msg = Some(err);
                         }
                         Err(e) => {
                             ed.error_msg = Some(e.to_string());
@@ -1493,6 +1538,9 @@ impl PivotApp {
                     cx.notify();
                 }
 
+                if let Some(stat) = updated_stat {
+                    app.sub_account_stats.insert(pid_check, stat);
+                }
                 if should_auto_save {
                     app.editor_auto_save_subscription(cx);
                 }
@@ -1627,14 +1675,17 @@ impl PivotApp {
 
             let _ = this.update(cx, |app, cx| {
                 let mut trigger_sync = false;
+                let mut updated_stat: Option<SubAccountStat> = None;
                 if let Some(ed) = app.editor.as_mut().filter(|e| e.provider_id == provider_id) {
                     ed.connecting_oauth = false;
                     match res {
                         Ok((Ok(_acc), accounts)) => {
+                            updated_stat = Some(compute_sub_stat(&accounts));
                             ed.sub_accounts = accounts;
                             trigger_sync = true;
                         }
                         Ok((Err(err), accounts)) => {
+                            updated_stat = Some(compute_sub_stat(&accounts));
                             ed.sub_accounts = accounts;
                             ed.error_msg = Some(err);
                         }
@@ -1644,8 +1695,11 @@ impl PivotApp {
                     }
                     cx.notify();
                 }
+                if let Some(stat) = updated_stat {
+                    app.sub_account_stats.insert(provider_id.clone(), stat);
+                }
                 if trigger_sync {
-                    app.editor_fetch_models(cx);
+                    app.editor_fetch_models_with_mode(true, cx);
                     app.editor_auto_save_subscription(cx);
                 }
             });
@@ -1682,10 +1736,12 @@ impl PivotApp {
 
             let _ = this.update(cx, |app, cx| {
                 let mut trigger_sync = false;
+                let mut updated_stat: Option<SubAccountStat> = None;
                 if let Some(ed) = app.editor.as_mut().filter(|e| e.provider_id == provider_id) {
                     ed.importing_codex = false;
                     match res {
                         Ok((Ok(_), accounts)) => {
+                            updated_stat = Some(compute_sub_stat(&accounts));
                             ed.sub_accounts = accounts;
                             trigger_sync = true;
                         }
@@ -1698,8 +1754,11 @@ impl PivotApp {
                     }
                     cx.notify();
                 }
+                if let Some(stat) = updated_stat {
+                    app.sub_account_stats.insert(provider_id.clone(), stat);
+                }
                 if trigger_sync {
-                    app.editor_fetch_models(cx);
+                    app.editor_fetch_models_with_mode(true, cx);
                     app.editor_auto_save_subscription(cx);
                 }
             });
@@ -1819,17 +1878,35 @@ impl PivotApp {
         cx.spawn(async move |this, cx| {
             let res = handle
                 .spawn(async move {
-                    service::get_subscription_account_quota(&state, pid, aid, Some(base_url)).await
+                    let quota_res = service::get_subscription_account_quota(
+                        &state,
+                        pid.clone(),
+                        aid,
+                        Some(base_url),
+                    )
+                    .await;
+                    let accounts = service::get_subscription_accounts(&state, pid).ok();
+                    (quota_res, accounts)
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                let mut updated_stat: Option<SubAccountStat> = None;
                 if let Some(ed) = app.editor.as_mut().filter(|e| e.provider_id == provider_id) {
                     ed.loading_quotas.remove(&account_id);
-                    if let Ok(Ok(quota)) = res {
-                        ed.sub_quotas.insert(account_id, quota);
+                    if let Ok((quota_res, maybe_accounts)) = res {
+                        if let Some(accs) = maybe_accounts {
+                            updated_stat = Some(compute_sub_stat(&accs));
+                            ed.sub_accounts = accs;
+                        }
+                        if let Ok(quota) = quota_res {
+                            ed.sub_quotas.insert(account_id, quota);
+                        }
                     }
                     cx.notify();
+                }
+                if let Some(stat) = updated_stat {
+                    app.sub_account_stats.insert(provider_id, stat);
                 }
             });
         })
@@ -1861,25 +1938,40 @@ impl PivotApp {
         cx.spawn(async move |this, cx| {
             let res = handle
                 .spawn(async move {
-                    service::consume_subscription_reset_credit(&state, pid, aid).await
+                    let credit_res =
+                        service::consume_subscription_reset_credit(&state, pid.clone(), aid).await;
+                    let accounts = service::get_subscription_accounts(&state, pid).ok();
+                    (credit_res, accounts)
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                let mut updated_stat: Option<SubAccountStat> = None;
                 if let Some(ed) = app.editor.as_mut().filter(|e| e.provider_id == provider_id) {
                     ed.consuming_credit_id = None;
                     match res {
-                        Ok(Ok(updated_quota)) => {
-                            ed.sub_quotas.insert(account_id, updated_quota);
-                        }
-                        Ok(Err(err)) => {
-                            ed.error_msg = Some(err);
+                        Ok((credit_res, maybe_accounts)) => {
+                            if let Some(accs) = maybe_accounts {
+                                updated_stat = Some(compute_sub_stat(&accs));
+                                ed.sub_accounts = accs;
+                            }
+                            match credit_res {
+                                Ok(updated_quota) => {
+                                    ed.sub_quotas.insert(account_id, updated_quota);
+                                }
+                                Err(err) => {
+                                    ed.error_msg = Some(err);
+                                }
+                            }
                         }
                         Err(e) => {
                             ed.error_msg = Some(e.to_string());
                         }
                     }
                     cx.notify();
+                }
+                if let Some(stat) = updated_stat {
+                    app.sub_account_stats.insert(provider_id, stat);
                 }
             });
         })
@@ -2393,6 +2485,8 @@ impl PivotApp {
         ) {
             return;
         }
+        self.update_check_seq = self.update_check_seq.wrapping_add(1);
+        let seq = self.update_check_seq;
         if !silent {
             self.update_state = UpdateCheckState::Checking;
             cx.notify();
@@ -2400,6 +2494,8 @@ impl PivotApp {
 
         let client = self.core_state.http_client.clone();
         let handle = self.tokio_handle.clone();
+        let handle_for_timer = self.tokio_handle.clone();
+        let locale = self.prefs.locale;
         let local_ver = env!("CARGO_PKG_VERSION").to_string();
 
         cx.spawn(async move |this, cx| {
@@ -2407,7 +2503,11 @@ impl PivotApp {
                 .spawn(async move { updater::fetch_latest_manifest(&client).await })
                 .await;
 
+            let mut schedule_reset = false;
             let _ = this.update(cx, |app, cx| {
+                if app.update_check_seq != seq {
+                    return;
+                }
                 match res {
                     Ok(Ok(manifest)) if !manifest.version.is_empty() => {
                         if updater::is_newer_semver(&manifest.version, &local_ver) {
@@ -2425,7 +2525,16 @@ impl PivotApp {
                             app.update_version = None;
                             app.update_state = UpdateCheckState::UpToDate;
                             app.sync_tray_snapshot();
+                            schedule_reset = true;
                         }
+                    }
+                    Ok(Ok(_)) if !silent => {
+                        app.update_state = UpdateCheckState::Failed {
+                            error: locale
+                                .pick("远端版本信息为空", "Remote release version is empty")
+                                .to_string(),
+                            retry_info: None,
+                        };
                     }
                     Ok(Err(err)) if !silent => {
                         app.update_state = UpdateCheckState::Failed {
@@ -2443,6 +2552,22 @@ impl PivotApp {
                 }
                 cx.notify();
             });
+
+            if schedule_reset {
+                let _ = handle_for_timer
+                    .spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.update_check_seq == seq
+                        && matches!(app.update_state, UpdateCheckState::UpToDate)
+                    {
+                        app.update_state = UpdateCheckState::Idle;
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
     }

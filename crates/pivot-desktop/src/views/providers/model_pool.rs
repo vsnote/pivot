@@ -460,6 +460,12 @@ pub fn render_model_pool_section(
                             .as_ref()
                             .map(|up| !up.contains(model_id.as_str()))
                             .unwrap_or(false);
+                        let no_supporting_account = is_subscription
+                            && !editor.sub_accounts.is_empty()
+                            && !editor.sub_accounts.iter().any(|acc| {
+                                acc.enabled
+                                    && pivot_core::oauth::account_supports_model(acc, model_id)
+                            });
                         let is_hovered =
                             editor.hovered_pool_model.as_deref() == Some(model_id.as_str());
                         let copy_key = format!("pool_copy_{}", model_id);
@@ -622,7 +628,26 @@ pub fn render_model_pool_section(
                                                     .flex_shrink_0()
                                                     .child(locale.pick("上游未见", "Unlisted")),
                                             )
-                                        }),
+                                        })
+                                        .when(
+                                            is_checked && !is_stale && no_supporting_account,
+                                            |el| {
+                                                el.child(
+                                                    div()
+                                                        .px(px(4.5))
+                                                        .py(px(0.5))
+                                                        .rounded(px(3.0))
+                                                        .bg(palette.amber_soft_bg)
+                                                        .text_size(px(9.5))
+                                                        .text_color(palette.amber_text)
+                                                        .flex_shrink_0()
+                                                        .child(locale.pick(
+                                                            "无可用账号",
+                                                            "No active account",
+                                                        )),
+                                                )
+                                            },
+                                        ),
                                 )
                                 // 行最右侧仅保留悬停删除按钮
                                 .when(is_hovered, |el| {

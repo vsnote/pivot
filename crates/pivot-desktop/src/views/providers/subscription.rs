@@ -490,6 +490,13 @@ fn render_account_row(
             format!("Account {}", short)
         });
 
+    let plan_badge = acc
+        .plan_type
+        .as_deref()
+        .or_else(|| quota.and_then(|q| q.plan_type.as_deref()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let toggle_acc_id = acc_id.clone();
     let next_enabled = !acc.enabled;
     let expand_acc_id = acc_id.clone();
@@ -534,6 +541,38 @@ fn render_account_row(
                                 .truncate()
                                 .child(email_label),
                         )
+                        .when_some(plan_badge, |el, plan| {
+                            let lower = plan.to_ascii_lowercase();
+                            let is_pro = lower.contains("pro")
+                                || lower.contains("team")
+                                || lower.contains("enterprise");
+                            let (bg, border, fg) = if is_pro {
+                                (
+                                    palette.blue_soft_bg,
+                                    palette.blue_soft_border,
+                                    palette.blue_text,
+                                )
+                            } else {
+                                (
+                                    palette.secondary,
+                                    palette.border_subtle,
+                                    palette.muted_foreground,
+                                )
+                            };
+                            el.child(
+                                div()
+                                    .px(px(5.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .bg(bg)
+                                    .border_1()
+                                    .border_color(border)
+                                    .text_size(px(10.0))
+                                    .text_color(fg)
+                                    .flex_shrink_0()
+                                    .child(plan.to_string()),
+                            )
+                        })
                         .when(auth_expired, |el| {
                             el.child(
                                 div()

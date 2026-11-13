@@ -47,6 +47,10 @@ pub struct SubscriptionAccount {
     pub expires_at: i64,
     pub cooldown_until: i64,
     pub enabled: bool,
+    #[serde(default)]
+    pub plan_type: Option<String>,
+    #[serde(default)]
+    pub supported_models: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -279,6 +283,8 @@ impl Database {
                 expires_at INTEGER NOT NULL,
                 cooldown_until INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                plan_type TEXT,
+                supported_models TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -322,6 +328,15 @@ impl Database {
         }
         if !has_column(&conn, "interceptor_state", "model")? {
             conn.execute("ALTER TABLE interceptor_state ADD COLUMN model TEXT", [])?;
+        }
+        if !has_column(&conn, "subscription_accounts", "plan_type")? {
+            conn.execute("ALTER TABLE subscription_accounts ADD COLUMN plan_type TEXT", [])?;
+        }
+        if !has_column(&conn, "subscription_accounts", "supported_models")? {
+            conn.execute(
+                "ALTER TABLE subscription_accounts ADD COLUMN supported_models TEXT",
+                [],
+            )?;
         }
 
         // 清理早期版本按延迟公式伪造写入的虚假 Token 估算值，还原为真实 0 值
@@ -1009,28 +1024,36 @@ impl Database {
         }
     }
 
+    fn map_subscription_account_row(row: &rusqlite::Row<'_>) -> Result<SubscriptionAccount, rusqlite::Error> {
+        let enabled_int: i32 = row.get(8)?;
+        let plan_type: Option<String> = row.get(9)?;
+        let supported_models_json: Option<String> = row.get(10)?;
+        let supported_models = supported_models_json
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok());
+        Ok(SubscriptionAccount {
+            id: row.get(0)?,
+            provider_id: row.get(1)?,
+            account_type: row.get(2)?,
+            email: row.get(3)?,
+            access_token: row.get(4)?,
+            refresh_token: row.get(5)?,
+            expires_at: row.get(6)?,
+            cooldown_until: row.get(7)?,
+            enabled: enabled_int == 1,
+            plan_type,
+            supported_models,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+        })
+    }
+
     pub fn get_subscription_accounts(&self, provider_id: &str) -> Result<Vec<SubscriptionAccount>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, created_at, updated_at
+            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, created_at, updated_at
              FROM subscription_accounts WHERE provider_id = ?1 ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![provider_id], |row| {
-            let enabled_int: i32 = row.get(8)?;
-            Ok(SubscriptionAccount {
-                id: row.get(0)?,
-                provider_id: row.get(1)?,
-                account_type: row.get(2)?,
-                email: row.get(3)?,
-                access_token: row.get(4)?,
-                refresh_token: row.get(5)?,
-                expires_at: row.get(6)?,
-                cooldown_until: row.get(7)?,
-                enabled: enabled_int == 1,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![provider_id], Self::map_subscription_account_row)?;
 
         let mut list = Vec::new();
         for r in rows {
@@ -1042,25 +1065,10 @@ impl Database {
     pub fn get_subscription_account_by_id(&self, account_id: &str) -> Result<Option<SubscriptionAccount>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, created_at, updated_at
+            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, created_at, updated_at
              FROM subscription_accounts WHERE id = ?1 LIMIT 1",
         )?;
-        let mut rows = stmt.query_map(params![account_id], |row| {
-            let enabled_int: i32 = row.get(8)?;
-            Ok(SubscriptionAccount {
-                id: row.get(0)?,
-                provider_id: row.get(1)?,
-                account_type: row.get(2)?,
-                email: row.get(3)?,
-                access_token: row.get(4)?,
-                refresh_token: row.get(5)?,
-                expires_at: row.get(6)?,
-                cooldown_until: row.get(7)?,
-                enabled: enabled_int == 1,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(params![account_id], Self::map_subscription_account_row)?;
         if let Some(r) = rows.next() {
             Ok(Some(r?))
         } else {
@@ -1071,9 +1079,13 @@ impl Database {
     pub fn save_subscription_account(&self, account: &SubscriptionAccount) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
+        let supported_models_json = account
+            .supported_models
+            .as_ref()
+            .and_then(|list| serde_json::to_string(list).ok());
         conn.execute(
-            "INSERT INTO subscription_accounts (id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO subscription_accounts (id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 email = excluded.email,
                 access_token = excluded.access_token,
@@ -1081,6 +1093,8 @@ impl Database {
                 expires_at = excluded.expires_at,
                 cooldown_until = excluded.cooldown_until,
                 enabled = excluded.enabled,
+                plan_type = COALESCE(excluded.plan_type, subscription_accounts.plan_type),
+                supported_models = COALESCE(excluded.supported_models, subscription_accounts.supported_models),
                 updated_at = excluded.updated_at;",
             params![
                 account.id,
@@ -1092,11 +1106,116 @@ impl Database {
                 account.expires_at,
                 account.cooldown_until,
                 if account.enabled { 1 } else { 0 },
+                account.plan_type,
+                supported_models_json,
                 account.created_at,
                 now,
             ],
         )?;
         Ok(())
+    }
+
+    /// 持久化单个订阅账号实测支持的模型列表；传入空切片时不覆盖已有记录
+    pub fn update_account_supported_models(
+        &self,
+        account_id: &str,
+        models: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        let mut seen = std::collections::HashSet::new();
+        let cleaned: Vec<String> = models
+            .iter()
+            .map(|m| m.trim())
+            .filter(|m| !m.is_empty() && seen.insert((*m).to_string()))
+            .map(ToString::to_string)
+            .collect();
+        if cleaned.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(&cleaned).unwrap_or_else(|_| "[]".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE subscription_accounts SET supported_models = ?1, updated_at = ?2 WHERE id = ?3",
+            params![json, now, account_id],
+        )?;
+        Ok(())
+    }
+
+    /// 更新订阅账号的套餐等级标识（如 Pro / Plus / Team）
+    pub fn update_account_plan_type(
+        &self,
+        account_id: &str,
+        plan_type: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let trimmed = plan_type.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE subscription_accounts SET plan_type = ?1, updated_at = ?2 WHERE id = ?3",
+            params![trimmed, now, account_id],
+        )?;
+        Ok(())
+    }
+
+    /// 运行时从指定账号的 supported_models 中移除上游判定无权调用的模型，避免后续请求误派
+    pub fn remove_model_from_account(
+        &self,
+        account_id: &str,
+        model: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let target = model.trim();
+        if target.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let current_json: Option<String> = conn
+            .query_row(
+                "SELECT supported_models FROM subscription_accounts WHERE id = ?1 LIMIT 1",
+                params![account_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+
+        let Some(raw) = current_json else {
+            return Ok(false);
+        };
+        let Ok(mut list) = serde_json::from_str::<Vec<String>>(&raw) else {
+            return Ok(false);
+        };
+
+        let target_candidates = crate::gateway::router::normalize_model_candidates(target);
+        let matches_target = |candidate: &str| -> bool {
+            if candidate.eq_ignore_ascii_case(target) {
+                return true;
+            }
+            if target_candidates
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(candidate))
+            {
+                return true;
+            }
+            crate::gateway::router::normalize_model_candidates(candidate)
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(target))
+        };
+
+        let before_len = list.len();
+        list.retain(|m| !matches_target(m));
+        if list.len() == before_len {
+            return Ok(false);
+        }
+
+        let updated_json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE subscription_accounts SET supported_models = ?1, updated_at = ?2 WHERE id = ?3",
+            params![updated_json, now, account_id],
+        )?;
+        Ok(true)
     }
 
     pub fn update_account_tokens(&self, account_id: &str, access_token: &str, refresh_token: Option<&str>, expires_at: i64) -> Result<(), rusqlite::Error> {
@@ -1322,6 +1441,8 @@ mod provider_tests {
             expires_at: 9999999999,
             cooldown_until: 0,
             enabled: true,
+            plan_type: None,
+            supported_models: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }).unwrap();
@@ -1548,6 +1669,71 @@ mod provider_tests {
 
         let err_logs = db.get_logs_in_window(None, true, 50).unwrap();
         assert_eq!(err_logs.len(), 2);
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn subscription_account_plan_and_models_migrate_roundtrip_and_prune() {
+        let path = temp_db_path("sub_models");
+        let db = Database::new(path.clone()).unwrap();
+
+        // 模拟老版本表结构缺少 plan_type / supported_models 列
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("ALTER TABLE subscription_accounts DROP COLUMN plan_type", [])
+                .unwrap();
+            conn.execute(
+                "ALTER TABLE subscription_accounts DROP COLUMN supported_models",
+                [],
+            )
+            .unwrap();
+        }
+        db.init_tables().unwrap();
+
+        let acc = SubscriptionAccount {
+            id: "sub_tier".to_string(),
+            provider_id: "chatgpt_subscription".to_string(),
+            account_type: "chatgpt".to_string(),
+            email: Some("pro@example.com".to_string()),
+            access_token: "tok".to_string(),
+            refresh_token: Some("rf".to_string()),
+            expires_at: 9_999_999_999,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: Some("Pro".to_string()),
+            supported_models: Some(vec!["gpt-6-astra".to_string(), "gpt-6-luna".to_string()]),
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+        db.save_subscription_account(&acc).unwrap();
+
+        let loaded = db.get_subscription_account_by_id("sub_tier").unwrap().unwrap();
+        assert_eq!(loaded.plan_type.as_deref(), Some("Pro"));
+        assert_eq!(
+            loaded.supported_models,
+            Some(vec!["gpt-6-astra".to_string(), "gpt-6-luna".to_string()])
+        );
+
+        // 空切片不覆盖已有列表
+        db.update_account_supported_models("sub_tier", &[]).unwrap();
+        let after_empty = db.get_subscription_account_by_id("sub_tier").unwrap().unwrap();
+        assert_eq!(after_empty.supported_models.as_ref().map(Vec::len), Some(2));
+
+        // 精准移除单个模型（忽略大小写）
+        assert!(db.remove_model_from_account("sub_tier", "GPT-6-ASTRA").unwrap());
+        assert!(!db.remove_model_from_account("sub_tier", "non-existent").unwrap());
+        let after_remove = db.get_subscription_account_by_id("sub_tier").unwrap().unwrap();
+        assert_eq!(
+            after_remove.supported_models,
+            Some(vec!["gpt-6-luna".to_string()])
+        );
+
+        // 移除最后一个模型时保留 Some([])，而非回退为 None
+        assert!(db.remove_model_from_account("sub_tier", "gpt-6-luna").unwrap());
+        let after_last = db.get_subscription_account_by_id("sub_tier").unwrap().unwrap();
+        assert_eq!(after_last.supported_models, Some(vec![]));
 
         drop(db);
         let _ = std::fs::remove_file(path);
