@@ -54,14 +54,23 @@ fn url_encode(s: &str) -> String {
     encoded
 }
 
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn url_decode(s: &str) -> String {
-    let mut res = Vec::new();
+    let mut res = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                res.push(val);
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                res.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
@@ -141,6 +150,33 @@ pub async fn listen_for_code(expected_state: &str, timeout_secs: u64) -> Result<
                             }
                         }
 
+                        let state_valid = state.as_deref() == Some(expected_state);
+                        let valid_code = code.filter(|c| !c.trim().is_empty());
+
+                        if !state_valid {
+                            let err_html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Pivot 授权失败</title></head><body><h2>授权校验失败</h2><p>State 缺失或不匹配，请回到 Pivot 重新发起授权。</p></body></html>";
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                err_html.len(),
+                                err_html
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            let _ = socket.flush().await;
+                            return Err("OAuth State 缺失或校验失败，可能存在 CSRF 风险".to_string());
+                        }
+
+                        if valid_code.is_none() {
+                            let err_html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Pivot 授权失败</title></head><body><h2>授权失败</h2><p>回调中未找到授权码，请重新发起授权。</p></body></html>";
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                err_html.len(),
+                                err_html
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            let _ = socket.flush().await;
+                            return Err("OAuth 回调中未找到授权码 code".to_string());
+                        }
+
                         let html_body = r#"<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Pivot 授权成功</title></head>
@@ -162,17 +198,7 @@ pub async fn listen_for_code(expected_state: &str, timeout_secs: u64) -> Result<
                         let _ = socket.write_all(response.as_bytes()).await;
                         let _ = socket.flush().await;
 
-                        if let Some(s) = state {
-                            if s != expected_state {
-                                return Err("OAuth State 校验失败，可能存在 CSRF 风险".to_string());
-                            }
-                        }
-
-                        if let Some(c) = code {
-                            return Ok(c);
-                        } else {
-                            return Err("OAuth 回调中未找到授权码 code".to_string());
-                        }
+                        return Ok(valid_code.unwrap());
                     }
                 }
             }
@@ -245,11 +271,11 @@ pub async fn exchange_code_for_tokens(
     })
 }
 
-/// 刷新 Token
+/// 刷新 Token，同时返回上游轮换下发的新 refresh_token（若有）
 pub async fn refresh_antigravity_token(
     client: &reqwest::Client,
     refresh_token: &str,
-) -> Result<(String, i64), String> {
+) -> Result<(String, Option<String>, i64), String> {
     let params = [
         ("client_id", ANTIGRAVITY_CLIENT_ID),
         ("client_secret", ANTIGRAVITY_CLIENT_SECRET),
@@ -279,9 +305,15 @@ pub async fn refresh_antigravity_token(
         .ok_or_else(|| "刷新响应缺少 access_token".to_string())?
         .to_string();
 
+    let new_refresh_token = json["refresh_token"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let expires_in = json["expires_in"].as_i64().unwrap_or(3600);
 
-    Ok((access_token, expires_in))
+    Ok((access_token, new_refresh_token, expires_in))
 }
 
 /// 生成 OpenAI ChatGPT Codex OAuth 授权 URL
@@ -337,6 +369,33 @@ pub async fn listen_for_chatgpt_code(expected_state: &str, timeout_secs: u64) ->
                             }
                         }
 
+                        let state_valid = state.as_deref() == Some(expected_state);
+                        let valid_code = code.filter(|c| !c.trim().is_empty());
+
+                        if !state_valid {
+                            let err_html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Pivot 授权失败</title></head><body><h2>授权校验失败</h2><p>State 缺失或不匹配，请回到 Pivot 重新发起授权。</p></body></html>";
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                err_html.len(),
+                                err_html
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            let _ = socket.flush().await;
+                            return Err("OAuth State 缺失或校验失败，可能存在 CSRF 风险".to_string());
+                        }
+
+                        if valid_code.is_none() {
+                            let err_html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Pivot 授权失败</title></head><body><h2>授权失败</h2><p>回调中未找到授权码，请重新发起授权。</p></body></html>";
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                err_html.len(),
+                                err_html
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            let _ = socket.flush().await;
+                            return Err("OAuth 回调中未找到授权码 code".to_string());
+                        }
+
                         let html_body = r#"<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Pivot 授权成功</title></head>
@@ -358,17 +417,7 @@ pub async fn listen_for_chatgpt_code(expected_state: &str, timeout_secs: u64) ->
                         let _ = socket.write_all(response.as_bytes()).await;
                         let _ = socket.flush().await;
 
-                        if let Some(s) = state {
-                            if s != expected_state {
-                                return Err("OAuth State 校验失败，可能存在 CSRF 风险".to_string());
-                            }
-                        }
-
-                        if let Some(c) = code {
-                            return Ok(c);
-                        } else {
-                            return Err("OAuth 回调中未找到授权码 code".to_string());
-                        }
+                        return Ok(valid_code.unwrap());
                     }
                 }
             }
@@ -441,11 +490,11 @@ pub async fn exchange_chatgpt_code(
     })
 }
 
-/// 刷新 OpenAI Token
+/// 刷新 OpenAI Token，并返回上游 Refresh Token Rotation 下发的新 refresh_token（若有）
 pub async fn refresh_chatgpt_token(
     client: &reqwest::Client,
     refresh_token: &str,
-) -> Result<(String, i64), String> {
+) -> Result<(String, Option<String>, i64), String> {
     let params = [
         ("client_id", OPENAI_CODEX_CLIENT_ID),
         ("grant_type", "refresh_token"),
@@ -474,9 +523,15 @@ pub async fn refresh_chatgpt_token(
         .ok_or_else(|| "刷新响应缺少 access_token".to_string())?
         .to_string();
 
+    let new_refresh_token = json["refresh_token"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let expires_in = json["expires_in"].as_i64().unwrap_or(86400 * 7);
 
-    Ok((access_token, expires_in))
+    Ok((access_token, new_refresh_token, expires_in))
 }
 
 /// 读取本地已登录的 ~/.codex/auth.json 凭据
@@ -756,7 +811,8 @@ pub fn parse_chatgpt_usage_json(json: &serde_json::Value) -> Vec<QuotaBucket> {
         }
         let used_pct = win["used_percent"].as_f64()?;
         let remaining_fraction = ((100.0 - used_pct) / 100.0).clamp(0.0, 1.0);
-        let is_exhausted = remaining_fraction <= 0.005 || limit_reached;
+        // 仅按当前窗口自身剩余比例判定是否耗尽，避免 5h 窗口触顶时连坐将未耗尽的 7d 周窗口标记为耗尽
+        let is_exhausted = remaining_fraction <= 0.005;
 
         let label = format_window_label(win, default_suffix);
 
@@ -783,6 +839,16 @@ pub fn parse_chatgpt_usage_json(json: &serde_json::Value) -> Vec<QuotaBucket> {
 
     if let Some(secondary) = parse_window(&rate_limit["secondary_window"], "chatgpt_secondary_window", "短周期配额") {
         buckets.push(secondary);
+    }
+
+    if limit_reached && !buckets.is_empty() && !buckets.iter().any(|b| b.is_exhausted) {
+        if let Some((min_idx, _)) = buckets
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.remaining_fraction.total_cmp(&b.remaining_fraction))
+        {
+            buckets[min_idx].is_exhausted = true;
+        }
     }
 
     buckets
@@ -953,7 +1019,154 @@ pub fn account_supports_model(account: &crate::db::SubscriptionAccount, target_m
     false
 }
 
-/// 从指定 provider 获取一个可用的订阅账号（支持按目标模型过滤、排除失败账号、自动轮询、检查冷却、自动续期 Token）
+static REFRESH_LOCKS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn account_refresh_lock(account_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let map_mutex = REFRESH_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = map_mutex.lock().unwrap();
+    map.entry(account_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+static FAMILY_COOLDOWNS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, i64>>,
+> = std::sync::OnceLock::new();
+
+pub fn model_family_key(model: &str) -> Option<&'static str> {
+    let lower = model.trim().to_lowercase();
+    if lower.contains("claude") {
+        Some("claude")
+    } else if lower.contains("gemini") {
+        Some("gemini")
+    } else {
+        None
+    }
+}
+
+pub fn mark_account_family_cooldown_until(account_id: &str, family: &str, until_sec: i64) {
+    let lock = FAMILY_COOLDOWNS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = lock.lock().unwrap();
+    let key = format!("{}:{}", account_id, family);
+    let prev = map.get(&key).copied().unwrap_or(0);
+    if until_sec > prev {
+        map.insert(key, until_sec);
+    }
+}
+
+pub fn clear_account_family_cooldown(account_id: &str, family: &str) {
+    if let Some(lock) = FAMILY_COOLDOWNS.get() {
+        let mut map = lock.lock().unwrap();
+        map.remove(&format!("{}:{}", account_id, family));
+    }
+}
+
+pub fn mark_account_family_cooldown(account_id: &str, model: &str, cooldown_seconds: i64) {
+    if let Some(family) = model_family_key(model) {
+        let until = chrono::Utc::now().timestamp() + cooldown_seconds;
+        mark_account_family_cooldown_until(account_id, family, until);
+    }
+}
+
+pub fn is_account_family_cooled_down(account_id: &str, model: &str, now_sec: i64) -> bool {
+    let Some(family) = model_family_key(model) else {
+        return false;
+    };
+    let Some(lock) = FAMILY_COOLDOWNS.get() else {
+        return false;
+    };
+    let map = lock.lock().unwrap();
+    let key = format!("{}:{}", account_id, family);
+    map.get(&key).copied().unwrap_or(0) > now_sec
+}
+
+/// 按账号加单飞锁检查/刷新 Token，保留上游轮换下发的新 refresh_token，不清除已有配额冷却
+pub async fn ensure_or_refresh_account_token(
+    db: &crate::db::Database,
+    http_client: &reqwest::Client,
+    account_id: &str,
+    force_if_token_matches: Option<&str>,
+) -> Result<crate::db::SubscriptionAccount, String> {
+    let lock = account_refresh_lock(account_id);
+    let _guard = lock.lock().await;
+
+    let mut account = db
+        .get_subscription_account_by_id(account_id)
+        .map_err(|e| format!("查询账号失败: {}", e))?
+        .ok_or_else(|| "未找到指定账号".to_string())?;
+
+    let now_sec = chrono::Utc::now().timestamp();
+    if let Some(failed_tok) = force_if_token_matches {
+        // 并发请求已先完成刷新，直接复用最新 Token
+        if account.access_token != failed_tok && !account.auth_invalid {
+            return Ok(account);
+        }
+    } else if account.expires_at - now_sec >= 300 && !account.auth_invalid {
+        return Ok(account);
+    }
+
+    let refresh_token = account
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let Some(rt) = refresh_token else {
+        if force_if_token_matches.is_some() || account.expires_at <= now_sec {
+            let _ = db.set_account_auth_invalid(&account.id, true);
+            return Err("该账号无 refresh_token 凭据，无法自动续期".to_string());
+        }
+        return Ok(account);
+    };
+
+    let refresh_res = if account.account_type == "chatgpt" {
+        refresh_chatgpt_token(http_client, &rt).await
+    } else {
+        refresh_antigravity_token(http_client, &rt).await
+    };
+
+    match refresh_res {
+        Ok((new_token, maybe_new_rt, expires_in)) => {
+            let new_expires_at = now_sec + expires_in;
+            let effective_rt = maybe_new_rt
+                .as_deref()
+                .or(account.refresh_token.as_deref());
+            let _ = db.update_account_tokens(&account.id, &new_token, effective_rt, new_expires_at);
+            account.access_token = new_token;
+            if let Some(new_rt) = maybe_new_rt {
+                account.refresh_token = Some(new_rt);
+            }
+            account.expires_at = new_expires_at;
+            account.auth_invalid = false;
+            Ok(account)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "刷新订阅账号 {} ({:?}) Token 失败: {}",
+                account.id,
+                account.email,
+                e
+            );
+            if is_token_revoked_or_invalid(&e) {
+                let _ = db.set_account_auth_invalid(&account.id, true);
+                account.auth_invalid = true;
+            } else if account.expires_at <= now_sec {
+                // 瞬时网络失败且 Token 已过期时短暂冷却 60 秒，避免高频重试
+                let _ = db.set_account_cooldown(&account.id, account.cooldown_until.max(now_sec + 60));
+            }
+            if force_if_token_matches.is_some() || account.expires_at <= now_sec || account.auth_invalid {
+                Err(e)
+            } else {
+                Ok(account)
+            }
+        }
+    }
+}
+
+/// 从指定 provider 获取一个可用的订阅账号（支持按目标模型过滤、排除失败账号、自动轮询、检查冷却、单飞续期 Token）
 pub async fn acquire_subscription_account_for_model(
     db: &crate::db::Database,
     http_client: &reqwest::Client,
@@ -1007,10 +1220,26 @@ pub async fn acquire_subscription_account_for_model(
         ));
     }
 
-    let now_sec = chrono::Utc::now().timestamp();
-    let available: Vec<_> = after_exclude
+    let valid_auth: Vec<_> = after_exclude
         .into_iter()
-        .filter(|a| a.cooldown_until <= now_sec)
+        .filter(|a| !a.auth_invalid)
+        .collect();
+    if valid_auth.is_empty() {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "订阅账号授权已失效，请在服务商设置中重新授权".to_string(),
+        ));
+    }
+
+    let now_sec = chrono::Utc::now().timestamp();
+    let available: Vec<_> = valid_auth
+        .into_iter()
+        .filter(|a| {
+            a.cooldown_until <= now_sec
+                && !model_trimmed
+                    .map(|m| is_account_family_cooled_down(&a.id, m, now_sec))
+                    .unwrap_or(false)
+        })
         .collect();
 
     if available.is_empty() {
@@ -1031,70 +1260,16 @@ pub async fn acquire_subscription_account_for_model(
 
     // 循环遍历可用账号，若某个账号刷新失败或已过期，自动尝试池中的下一个账号
     for i in 0..available.len() {
-        let mut account = available[(start_idx + i) % available.len()].clone();
-        let mut account_valid = true;
-
-        if account.expires_at - now_sec < 300 {
-            if let Some(ref refresh_token) = account.refresh_token {
-                let refresh_res = if account.account_type == "chatgpt" {
-                    refresh_chatgpt_token(http_client, refresh_token).await
-                } else {
-                    refresh_antigravity_token(http_client, refresh_token).await
-                };
-                match refresh_res {
-                    Ok((new_token, expires_in)) => {
-                        let new_expires_at = now_sec + expires_in;
-                        let _ = db.update_account_tokens(
-                            &account.id,
-                            &new_token,
-                            account.refresh_token.as_deref(),
-                            new_expires_at,
-                        );
-                        let _ = db.set_account_cooldown(&account.id, 0);
-                        account.access_token = new_token;
-                        account.expires_at = new_expires_at;
-                        account.cooldown_until = 0;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "刷新订阅账号 {} ({:?}) Token 失败: {}",
-                            account.id,
-                            account.email,
-                            e
-                        );
-                        let is_revoked = is_token_revoked_or_invalid(&e);
-                        if is_revoked {
-                            // 授权已被上游撤销或失效，冷却 24 小时避免反复重试（前端将显示授权失效并引导重新授权）
-                            let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
-                            account.cooldown_until = now_sec + 86400;
-                        } else if account.expires_at <= now_sec {
-                            // Token 已过期但可能因网络原因暂时失败，冷却 60 秒避免短时间内对失效账号高频重试
-                            let _ = db.set_account_cooldown(&account.id, now_sec + 60);
-                            account.cooldown_until = now_sec + 60;
-                        }
-                        if account.expires_at <= now_sec {
-                            account_valid = false;
-                            last_err = format!(
-                                "订阅账号 {} Token 已过期且刷新失败: {}",
-                                account.email.as_deref().unwrap_or(&account.id),
-                                e
-                            );
-                        }
-                    }
-                }
-            } else if account.expires_at <= now_sec {
-                account_valid = false;
-                let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
-                account.cooldown_until = now_sec + 86400;
+        let candidate = &available[(start_idx + i) % available.len()];
+        match ensure_or_refresh_account_token(db, http_client, &candidate.id, None).await {
+            Ok(refreshed) => return Ok(refreshed),
+            Err(e) => {
                 last_err = format!(
-                    "订阅账号 {} Token 已过期且缺少 refresh_token",
-                    account.email.as_deref().unwrap_or(&account.id)
+                    "订阅账号 {} Token 刷新失败: {}",
+                    candidate.email.as_deref().unwrap_or(&candidate.id),
+                    e
                 );
             }
-        }
-
-        if account_valid {
-            return Ok(account);
         }
     }
 
@@ -1117,53 +1292,17 @@ pub async fn acquire_subscription_account(
     acquire_subscription_account_for_model(db, http_client, provider_id, None, &[]).await
 }
 
-/// 当上游返回 401 Unauthorized 时，强制尝试使用 refresh_token 刷新账号凭据
+/// 当上游返回 401 Unauthorized 时，强制尝试使用 refresh_token 刷新账号凭据（带单飞保护）
 pub async fn try_refresh_subscription_account(
     db: &crate::db::Database,
     http_client: &reqwest::Client,
     account_id: &str,
 ) -> Result<crate::db::SubscriptionAccount, String> {
-    let mut account = db
+    let existing = db
         .get_subscription_account_by_id(account_id)
         .map_err(|e| format!("查询账号失败: {}", e))?
         .ok_or_else(|| "未找到指定账号".to_string())?;
-
-    let refresh_token = account
-        .refresh_token
-        .as_deref()
-        .ok_or_else(|| "该账号无 refresh_token 凭据，无法自动续期".to_string())?;
-
-    let refresh_res = if account.account_type == "chatgpt" {
-        refresh_chatgpt_token(http_client, refresh_token).await
-    } else {
-        refresh_antigravity_token(http_client, refresh_token).await
-    };
-
-    match refresh_res {
-        Ok((new_token, expires_in)) => {
-            let now_sec = chrono::Utc::now().timestamp();
-            let new_expires_at = now_sec + expires_in;
-            let _ = db.update_account_tokens(
-                &account.id,
-                &new_token,
-                account.refresh_token.as_deref(),
-                new_expires_at,
-            );
-            let _ = db.set_account_cooldown(&account.id, 0);
-            account.access_token = new_token;
-            account.expires_at = new_expires_at;
-            account.cooldown_until = 0;
-            Ok(account)
-        }
-        Err(e) => {
-            let is_revoked = is_token_revoked_or_invalid(&e);
-            if is_revoked {
-                let now_sec = chrono::Utc::now().timestamp();
-                let _ = db.set_account_cooldown(&account.id, now_sec + 86400);
-            }
-            Err(e)
-        }
-    }
+    ensure_or_refresh_account_token(db, http_client, account_id, Some(&existing.access_token)).await
 }
 
 /// 判断 Token 刷新或上游鉴权错误是否属于授权撤销/失效（需要用户重新授权）
@@ -1171,13 +1310,20 @@ pub fn is_token_revoked_or_invalid(err: &str) -> bool {
     let lower = err.to_lowercase();
     lower.contains("invalid_grant")
         || lower.contains("invalid_refresh_token")
-        || lower.contains("invalid_request")
-        || lower.contains("revoked")
-        || lower.contains("unauthorized")
+        || lower.contains("invalid refresh token")
+        || lower.contains("token_revoked")
+        || lower.contains("token has been revoked")
+        || lower.contains("token has been expired or revoked")
+        || lower.contains("refresh_token_reused")
+        || lower.contains("account_deactivated")
         || lower.contains("unauthenticated")
-        || lower.contains("401")
-        || (lower.contains("refresh_token") && (lower.contains("invalid") || lower.contains("expired") || lower.contains("failed")))
-        || (lower.contains("token") && (lower.contains("expired") || lower.contains("invalid")))
+        || lower.contains("401 unauthorized")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid_token")
+        || lower.contains("invalid token")
+        || lower.contains("token_expired")
+        || lower.contains("token expired")
+        || lower.contains("token is expired")
 }
 
 /// 标记账号进入冷却（如遇到 429 速率限制，默认冷却 5 分钟）
@@ -1278,7 +1424,8 @@ pub fn handle_account_model_unsupported(
         return;
     }
 
-    // 存量未探测账号（supported_models 为 None）：后台拉取真实模型列表并剔除失败模型
+    // 存量未探测账号（supported_models 为 None）：后台拉取真实模型列表并剔除失败模型；
+    // 若探测失败或结果为空，回退从所属服务商声明列表中剔除该模型后精确落库，彻底阻断自愈死循环
     let db_clone = db.clone();
     let client_clone = http_client.clone();
     let acc_clone = account.clone();
@@ -1291,12 +1438,20 @@ pub fn handle_account_model_unsupported(
         } else {
             fetch_antigravity_models(&client_clone, &acc_clone.access_token, &base_clone).await
         };
-        if let Ok(mut models) = fetched_res {
-            models.retain(|m| !m.eq_ignore_ascii_case(&model_clone));
-            if !models.is_empty() {
-                let _ = db_clone.update_account_supported_models(&acc_clone.id, &models);
-            }
-        }
+        let mut models = match fetched_res {
+            Ok(list) => list,
+            Err(_) => db_clone
+                .get_providers()
+                .ok()
+                .and_then(|ps| {
+                    ps.into_iter()
+                        .find(|p| p.id == acc_clone.provider_id)
+                        .map(|p| p.models)
+                })
+                .unwrap_or_default(),
+        };
+        models.retain(|m| !m.eq_ignore_ascii_case(&model_clone));
+        let _ = db_clone.set_account_supported_models_exact(&acc_clone.id, &models);
     });
 }
 
@@ -1814,7 +1969,7 @@ mod tests {
         assert_eq!(buckets[0].id, "chatgpt_primary_window");
         assert_eq!(buckets[0].label, "Pro Lite 周周期配额");
         assert!((buckets[0].remaining_fraction - 0.03).abs() < 1e-4);
-        assert_eq!(buckets[0].is_exhausted, false);
+        assert!(!buckets[0].is_exhausted);
         assert!(buckets[0].reset_time.is_some());
     }
 
@@ -1845,12 +2000,12 @@ mod tests {
         assert_eq!(buckets[0].id, "chatgpt_primary_window");
         assert_eq!(buckets[0].label, "Plus 5小时配额");
         assert_eq!(buckets[0].remaining_fraction, 0.0);
-        assert_eq!(buckets[0].is_exhausted, true);
+        assert!(buckets[0].is_exhausted);
 
         assert_eq!(buckets[1].id, "chatgpt_secondary_window");
         assert_eq!(buckets[1].label, "Plus 周周期配额");
         assert!((buckets[1].remaining_fraction - 0.55).abs() < 1e-4);
-        assert_eq!(buckets[1].is_exhausted, true); // limit_reached: true
+        assert!(!buckets[1].is_exhausted); // 5h 耗尽不连坐剩余 55% 的周配额
     }
 
     #[test]
@@ -1861,6 +2016,38 @@ mod tests {
         assert!(is_token_revoked_or_invalid("401 Unauthorized"));
         assert!(is_token_revoked_or_invalid("UNAUTHENTICATED: Request had invalid authentication credentials"));
         assert!(!is_token_revoked_or_invalid("Connection timed out after 5000 ms"));
+        assert!(!is_token_revoked_or_invalid("刷新 OpenAI Token 请求失败: TLS invalid peer certificate"));
+        assert!(!is_token_revoked_or_invalid("502 Bad Gateway <html>error 40123</html>"));
+    }
+
+    #[test]
+    fn test_url_decode_does_not_panic_on_utf8_after_percent() {
+        assert_eq!(url_decode("abc%中文"), "abc%中文");
+        assert_eq!(url_decode("a+b%20c%2F"), "a b c/");
+    }
+
+    #[test]
+    fn test_chatgpt_usage_5h_limit_does_not_exhaust_7d_window() {
+        let json = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "limit_reached": true,
+                "primary_window": {
+                    "used_percent": 20.0,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 500000
+                },
+                "secondary_window": {
+                    "used_percent": 100.0,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 3600
+                }
+            }
+        });
+        let buckets = parse_chatgpt_usage_json(&json);
+        assert_eq!(buckets.len(), 2);
+        assert!(!buckets[0].is_exhausted, "7天周窗口剩余80%不应被连坐标记为耗尽");
+        assert!(buckets[1].is_exhausted, "5小时窗口应标记为耗尽");
     }
 
     #[test]
@@ -1877,6 +2064,7 @@ mod tests {
             enabled: true,
             plan_type: Some("Plus".to_string()),
             supported_models: None,
+            auth_invalid: false,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
@@ -1946,6 +2134,7 @@ mod tests {
             enabled: true,
             plan_type: Some("Plus".to_string()),
             supported_models: Some(vec!["gpt-5.6-luna".to_string()]),
+            auth_invalid: false,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         })
@@ -1967,6 +2156,7 @@ mod tests {
                 "gpt-5.6-luna".to_string(),
                 "gpt-6-astra".to_string(),
             ]),
+            auth_invalid: false,
             created_at: "2026-01-02T00:00:00Z".to_string(),
             updated_at: "2026-01-02T00:00:00Z".to_string(),
         })

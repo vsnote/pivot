@@ -51,6 +51,8 @@ pub struct SubscriptionAccount {
     pub plan_type: Option<String>,
     #[serde(default)]
     pub supported_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub auth_invalid: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -285,6 +287,7 @@ impl Database {
                 enabled INTEGER NOT NULL DEFAULT 1,
                 plan_type TEXT,
                 supported_models TEXT,
+                auth_invalid INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -338,6 +341,12 @@ impl Database {
                 [],
             )?;
         }
+        if !has_column(&conn, "subscription_accounts", "auth_invalid")? {
+            conn.execute(
+                "ALTER TABLE subscription_accounts ADD COLUMN auth_invalid INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         // 清理早期版本按延迟公式伪造写入的虚假 Token 估算值，还原为真实 0 值
         let _ = conn.execute(
@@ -350,17 +359,21 @@ impl Database {
             [],
         );
 
-        // 确保历史遗留 60s 默认超时的服务商提升至 300 秒，避免大上下文与深度思考模型（常需 200s+）被中途掐断
-        let _ = conn.execute(
-            "UPDATE providers SET timeout_secs = 300 WHERE timeout_secs < 180",
-            [],
-        );
-
-        // 清洗历史版本可能写入的特定第三方工具名称
-        let _ = conn.execute(
-            "UPDATE providers SET name = '本地代理 (8317)' WHERE name LIKE '%CC-Switch%';",
-            [],
-        );
+        // 一次性迁移：仅在首次升级（user_version < 1）时提升历史 60s 默认超时并清洗旧工具名，避免覆盖用户后续手动调整
+        let user_ver: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if user_ver < 1 {
+            let _ = conn.execute(
+                "UPDATE providers SET timeout_secs = 300 WHERE timeout_secs < 180",
+                [],
+            );
+            let _ = conn.execute(
+                "UPDATE providers SET name = '本地代理 (8317)' WHERE name LIKE '%CC-Switch%';",
+                [],
+            );
+            let _ = conn.execute_batch("PRAGMA user_version = 1;");
+        }
 
         // 清理因历史删除服务商未级联清理而遗留的孤立订阅账号
         let _ = conn.execute(
@@ -440,7 +453,7 @@ impl Database {
                 priority: row.get(7)?,
                 weight: row.get(8)?,
                 timeout_secs: row.get(9)?,
-                latency_ms: None,
+                latency_ms: row.get(10)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
                 preset_id: row.get(13)?,
@@ -1030,6 +1043,7 @@ impl Database {
         let supported_models_json: Option<String> = row.get(10)?;
         let supported_models = supported_models_json
             .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok());
+        let auth_invalid_int: i32 = row.get(11)?;
         Ok(SubscriptionAccount {
             id: row.get(0)?,
             provider_id: row.get(1)?,
@@ -1042,15 +1056,16 @@ impl Database {
             enabled: enabled_int == 1,
             plan_type,
             supported_models,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
+            auth_invalid: auth_invalid_int == 1,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
         })
     }
 
     pub fn get_subscription_accounts(&self, provider_id: &str) -> Result<Vec<SubscriptionAccount>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, created_at, updated_at
+            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, auth_invalid, created_at, updated_at
              FROM subscription_accounts WHERE provider_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![provider_id], Self::map_subscription_account_row)?;
@@ -1065,7 +1080,7 @@ impl Database {
     pub fn get_subscription_account_by_id(&self, account_id: &str) -> Result<Option<SubscriptionAccount>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, created_at, updated_at
+            "SELECT id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, auth_invalid, created_at, updated_at
              FROM subscription_accounts WHERE id = ?1 LIMIT 1",
         )?;
         let mut rows = stmt.query_map(params![account_id], Self::map_subscription_account_row)?;
@@ -1084,8 +1099,8 @@ impl Database {
             .as_ref()
             .and_then(|list| serde_json::to_string(list).ok());
         conn.execute(
-            "INSERT INTO subscription_accounts (id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO subscription_accounts (id, provider_id, account_type, email, access_token, refresh_token, expires_at, cooldown_until, enabled, plan_type, supported_models, auth_invalid, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 email = excluded.email,
                 access_token = excluded.access_token,
@@ -1095,6 +1110,7 @@ impl Database {
                 enabled = excluded.enabled,
                 plan_type = COALESCE(excluded.plan_type, subscription_accounts.plan_type),
                 supported_models = COALESCE(excluded.supported_models, subscription_accounts.supported_models),
+                auth_invalid = excluded.auth_invalid,
                 updated_at = excluded.updated_at;",
             params![
                 account.id,
@@ -1108,6 +1124,7 @@ impl Database {
                 if account.enabled { 1 } else { 0 },
                 account.plan_type,
                 supported_models_json,
+                if account.auth_invalid { 1 } else { 0 },
                 account.created_at,
                 now,
             ],
@@ -1121,17 +1138,29 @@ impl Database {
         account_id: &str,
         models: &[String],
     ) -> Result<(), rusqlite::Error> {
-        let mut seen = std::collections::HashSet::new();
-        let cleaned: Vec<String> = models
-            .iter()
-            .map(|m| m.trim())
-            .filter(|m| !m.is_empty() && seen.insert((*m).to_string()))
-            .map(ToString::to_string)
-            .collect();
+        let cleaned = clean_model_list(models);
         if cleaned.is_empty() {
             return Ok(());
         }
-        let json = serde_json::to_string(&cleaned).unwrap_or_else(|_| "[]".to_string());
+        self.write_account_supported_models_json(account_id, &cleaned)
+    }
+
+    /// 精确写入单个订阅账号的 supported_models（允许写入空数组 `[]`，用于阻断无权账号自愈死循环）
+    pub fn set_account_supported_models_exact(
+        &self,
+        account_id: &str,
+        models: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        let cleaned = clean_model_list(models);
+        self.write_account_supported_models_json(account_id, &cleaned)
+    }
+
+    fn write_account_supported_models_json(
+        &self,
+        account_id: &str,
+        cleaned: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        let json = serde_json::to_string(cleaned).unwrap_or_else(|_| "[]".to_string());
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1223,15 +1252,35 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         if let Some(rf) = refresh_token {
             conn.execute(
-                "UPDATE subscription_accounts SET access_token = ?1, refresh_token = ?2, expires_at = ?3, updated_at = ?4 WHERE id = ?5",
+                "UPDATE subscription_accounts SET access_token = ?1, refresh_token = ?2, expires_at = ?3, auth_invalid = 0, updated_at = ?4 WHERE id = ?5",
                 params![access_token, rf, expires_at, now, account_id],
             )?;
         } else {
             conn.execute(
-                "UPDATE subscription_accounts SET access_token = ?1, expires_at = ?2, updated_at = ?3 WHERE id = ?4",
+                "UPDATE subscription_accounts SET access_token = ?1, expires_at = ?2, auth_invalid = 0, updated_at = ?3 WHERE id = ?4",
                 params![access_token, expires_at, now, account_id],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn set_account_auth_invalid(&self, account_id: &str, invalid: bool) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE subscription_accounts SET auth_invalid = ?1, updated_at = ?2 WHERE id = ?3",
+            params![if invalid { 1 } else { 0 }, now, account_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_account_enabled(&self, account_id: &str, enabled: bool) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE subscription_accounts SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+            params![if enabled { 1 } else { 0 }, now, account_id],
+        )?;
         Ok(())
     }
 
@@ -1249,6 +1298,16 @@ impl Database {
         conn.execute("DELETE FROM subscription_accounts WHERE id = ?1", params![account_id])?;
         Ok(())
     }
+}
+
+fn clean_model_list(models: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    models
+        .iter()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty() && seen.insert((*m).to_string()))
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1443,6 +1502,7 @@ mod provider_tests {
             enabled: true,
             plan_type: None,
             supported_models: None,
+            auth_invalid: false,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }).unwrap();
@@ -1704,6 +1764,7 @@ mod provider_tests {
             enabled: true,
             plan_type: Some("Pro".to_string()),
             supported_models: Some(vec!["gpt-6-astra".to_string(), "gpt-6-luna".to_string()]),
+            auth_invalid: false,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };

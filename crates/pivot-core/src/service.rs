@@ -158,10 +158,7 @@ pub async fn save_provider(state: &AppState, mut provider: Provider) -> Result<(
     crate::provider_models::validate_provider(&mut provider)?;
     state.db.save_provider(&provider).map_err(|e| e.to_string())?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
-    let _ = mgr.sync_codex_catalog_if_intercepted();
-    let _ = mgr.sync_claude_settings_if_intercepted();
-    let _ = mgr.sync_pi_models_if_intercepted();
-    let _ = mgr.sync_opencode_models_if_intercepted();
+    let _ = mgr.sync_all_if_intercepted();
     Ok(())
 }
 
@@ -175,9 +172,7 @@ pub async fn reorder_providers(
         .reorder_providers(&ids)
         .map_err(|e| e.to_string())?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
-    let _ = mgr.sync_codex_catalog_if_intercepted();
-    let _ = mgr.sync_pi_models_if_intercepted();
-    let _ = mgr.sync_opencode_models_if_intercepted();
+    let _ = mgr.sync_all_if_intercepted();
     state.db.get_providers().map_err(|e| e.to_string())
 }
 
@@ -191,10 +186,7 @@ pub async fn delete_provider(
         .delete_provider(&id)
         .map_err(|_| format!("服务商 {} 不存在或已被删除", id))?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
-    let _ = mgr.sync_codex_catalog_if_intercepted();
-    let _ = mgr.sync_claude_settings_if_intercepted();
-    let _ = mgr.sync_pi_models_if_intercepted();
-    let _ = mgr.sync_opencode_models_if_intercepted();
+    let _ = mgr.sync_all_if_intercepted();
     Ok(())
 }
 
@@ -260,7 +252,6 @@ pub async fn test_provider_latency(state: &AppState, id: String) -> Result<i64, 
         if accounts.is_empty() {
             return Err("未绑定任何订阅账号，请先在编辑中添加账号".to_string());
         }
-        let now_sec = chrono::Utc::now().timestamp();
         // 尝试获取可用账号（未在冷却且能成功刷新 Token）
         match oauth::acquire_subscription_account(&state.db, &state.http_client, &provider.id).await {
             Ok(acc) => {
@@ -276,8 +267,15 @@ pub async fn test_provider_latency(state: &AppState, id: String) -> Result<i64, 
                     match res {
                         Ok(r) if r.status().is_success() => Ok(start.elapsed().as_millis() as i64),
                         Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                            let _ = state.db.set_account_cooldown(&acc.id, now_sec + 86400);
-                            Err("订阅账号授权已失效，请在编辑中重新授权".to_string())
+                            if oauth::try_refresh_subscription_account(&state.db, &state.http_client, &acc.id)
+                                .await
+                                .is_ok()
+                            {
+                                Ok(start.elapsed().as_millis() as i64)
+                            } else {
+                                let _ = state.db.set_account_auth_invalid(&acc.id, true);
+                                Err("订阅账号授权已失效，请在编辑中重新授权".to_string())
+                            }
                         }
                         Ok(_) => Ok(start.elapsed().as_millis() as i64),
                         Err(e) => Err(format!("连接超时或失败: {}", e)),
@@ -286,16 +284,25 @@ pub async fn test_provider_latency(state: &AppState, id: String) -> Result<i64, 
                     let base = provider.base_url.trim().trim_end_matches('/');
                     let ep = format!("{}/v1internal:fetchAvailableModels", base);
                     let res = state.http_client
-                        .get(&ep)
+                        .post(&ep)
                         .header("authorization", format!("Bearer {}", acc.access_token))
+                        .header("content-type", "application/json")
+                        .body("{}")
                         .timeout(std::time::Duration::from_secs(5))
                         .send()
                         .await;
                     match res {
                         Ok(r) if r.status().is_success() => Ok(start.elapsed().as_millis() as i64),
                         Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                            let _ = state.db.set_account_cooldown(&acc.id, now_sec + 86400);
-                            Err("订阅账号授权已失效，请在编辑中重新授权".to_string())
+                            if oauth::try_refresh_subscription_account(&state.db, &state.http_client, &acc.id)
+                                .await
+                                .is_ok()
+                            {
+                                Ok(start.elapsed().as_millis() as i64)
+                            } else {
+                                let _ = state.db.set_account_auth_invalid(&acc.id, true);
+                                Err("订阅账号授权已失效，请在编辑中重新授权".to_string())
+                            }
                         }
                         Ok(_) => Ok(start.elapsed().as_millis() as i64),
                         Err(e) => Err(format!("连接超时或失败: {}", e)),
@@ -424,17 +431,20 @@ pub async fn import_third_party_provider(
         Some(existing) => {
             let mut updated = existing.clone();
             updated.enabled = true;
+            updated.is_default = false;
+            updated.default_model = None;
             if updated.name.contains("CC-Switch") {
                 updated.name = third_party.suggested_name;
             }
             if !models.is_empty() {
                 updated.models = models;
             }
+            crate::provider_models::validate_provider(&mut updated)?;
             state.db.save_provider(&updated).map_err(|e| e.to_string())?;
             updated
         }
         None => {
-            let new_provider = Provider {
+            let mut new_provider = Provider {
                 id: format!("tp_{}_{}", id, &uuid::Uuid::new_v4().to_string()[..8]),
                 name: third_party.suggested_name,
                 protocol: third_party.protocol,
@@ -448,7 +458,7 @@ pub async fn import_third_party_provider(
                     .unwrap_or_else(|| vec!["default".to_string()]),
                 models,
                 default_model: None,
-                is_default: existing_providers.is_empty(),
+                is_default: false,
                 enabled: true,
                 priority: 10,
                 weight: 1,
@@ -457,12 +467,17 @@ pub async fn import_third_party_provider(
                 created_at: None,
                 updated_at: None,
             };
+            crate::provider_models::validate_provider(&mut new_provider)?;
             state.db.save_provider(&new_provider).map_err(|e| e.to_string())?;
             new_provider
         }
     };
 
     let info = mgr.toggle_tool(&id, true)?;
+    let _ = mgr.sync_codex_catalog_if_intercepted();
+    let _ = mgr.sync_claude_settings_if_intercepted();
+    let _ = mgr.sync_pi_models_if_intercepted();
+    let _ = mgr.sync_opencode_models_if_intercepted();
     Ok((provider, info))
 }
 
@@ -495,10 +510,7 @@ pub async fn fetch_provider_models(protocol: String, base_url: String, api_key: 
 pub async fn set_provider_enabled(state: &AppState, id: String, enabled: bool) -> Result<(), String> {
     state.db.set_provider_enabled(&id, enabled).map_err(|e| e.to_string())?;
     let mgr = InterceptorManager::new(state.db.clone(), state.port);
-    let _ = mgr.sync_codex_catalog_if_intercepted();
-    let _ = mgr.sync_claude_settings_if_intercepted();
-    let _ = mgr.sync_pi_models_if_intercepted();
-    let _ = mgr.sync_opencode_models_if_intercepted();
+    let _ = mgr.sync_all_if_intercepted();
     Ok(())
 }
 
@@ -598,6 +610,7 @@ fn upsert_subscription_account_from_token(
         }
         updated.expires_at = expires_at;
         updated.cooldown_until = 0;
+        updated.auth_invalid = false;
         if plan_type.is_some() {
             updated.plan_type = plan_type;
         }
@@ -620,6 +633,7 @@ fn upsert_subscription_account_from_token(
         enabled: true,
         plan_type,
         supported_models,
+        auth_invalid: false,
         created_at: now_str.clone(),
         updated_at: now_str,
     };
@@ -720,22 +734,14 @@ pub fn delete_subscription_account(
 
 pub fn toggle_subscription_account(
     state: &AppState,
-    provider_id: String,
+    _provider_id: String,
     account_id: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let accounts = state
+    state
         .db
-        .get_subscription_accounts(&provider_id)
-        .map_err(|e| e.to_string())?;
-    if let Some(mut account) = accounts.into_iter().find(|a| a.id == account_id) {
-        account.enabled = enabled;
-        state
-            .db
-            .save_subscription_account(&account)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+        .set_account_enabled(&account_id, enabled)
+        .map_err(|e| e.to_string())
 }
 
 /// 同步服务商下所有已启用订阅账号的模型列表，更新各账号自身的 supported_models 并返回去重并集
@@ -753,7 +759,6 @@ pub async fn sync_subscription_models(
         return Err("请先连接并启用至少一个订阅账号".to_string());
     }
 
-    let now_sec = chrono::Utc::now().timestamp();
     let mut union_models = Vec::new();
     let mut union_seen = std::collections::HashSet::new();
     let mut last_err = String::new();
@@ -764,46 +769,16 @@ pub async fn sync_subscription_models(
             is_chatgpt_pool = false;
         }
 
-        // 若 Token 临期，先自动刷新后再探测模型
-        if account.expires_at - now_sec < 300 {
-            if let Some(ref refresh_token) = account.refresh_token {
-                let refresh_res = if account.account_type == "chatgpt" {
-                    oauth::refresh_chatgpt_token(&state.http_client, refresh_token).await
-                } else {
-                    oauth::refresh_antigravity_token(&state.http_client, refresh_token).await
-                };
-                match refresh_res {
-                    Ok((new_token, expires_in)) => {
-                        let new_expires_at = now_sec + expires_in;
-                        let _ = state.db.update_account_tokens(
-                            &account.id,
-                            &new_token,
-                            account.refresh_token.as_deref(),
-                            new_expires_at,
-                        );
-                        let _ = state.db.set_account_cooldown(&account.id, 0);
-                        account.access_token = new_token;
-                        account.expires_at = new_expires_at;
-                    }
-                    Err(e) => {
-                        if oauth::is_token_revoked_or_invalid(&e) {
-                            let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
-                        }
-                        if account.expires_at <= now_sec {
-                            last_err = format!(
-                                "账号 {} Token 刷新失败: {}",
-                                account.email.as_deref().unwrap_or(&account.id),
-                                e
-                            );
-                            continue;
-                        }
-                    }
-                }
-            } else if account.expires_at <= now_sec {
-                let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+        // 若 Token 临期，使用单飞锁自动续期后再探测模型
+        match oauth::ensure_or_refresh_account_token(&state.db, &state.http_client, &account.id, None).await {
+            Ok(refreshed) => {
+                account = refreshed;
+            }
+            Err(e) => {
                 last_err = format!(
-                    "账号 {} Token 已过期且缺少 refresh_token",
-                    account.email.as_deref().unwrap_or(&account.id)
+                    "账号 {} Token 刷新失败: {}",
+                    account.email.as_deref().unwrap_or(&account.id),
+                    e
                 );
                 continue;
             }
@@ -840,7 +815,7 @@ pub async fn sync_subscription_models(
             }
             Err(e) => {
                 if oauth::is_token_revoked_or_invalid(&e) {
-                    let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                    let _ = state.db.set_account_auth_invalid(&account.id, true);
                 }
                 last_err = e;
             }
@@ -901,56 +876,23 @@ pub async fn get_subscription_account_quota(
         .ok_or_else(|| "未找到指定订阅账号".to_string())?;
 
     let now_sec = chrono::Utc::now().timestamp();
-    // 检查 Token 是否需要刷新
-    if account.expires_at - now_sec < 300 {
-        if let Some(ref refresh_token) = account.refresh_token {
-            let refresh_res = if account.account_type == "chatgpt" {
-                oauth::refresh_chatgpt_token(&state.http_client, refresh_token).await
-            } else {
-                oauth::refresh_antigravity_token(&state.http_client, refresh_token).await
-            };
-            match refresh_res {
-                Ok((new_token, expires_in)) => {
-                    let new_expires_at = now_sec + expires_in;
-                    let _ = state.db.update_account_tokens(
-                        &account.id,
-                        &new_token,
-                        account.refresh_token.as_deref(),
-                        new_expires_at,
-                    );
-                    let _ = state.db.set_account_cooldown(&account.id, 0);
-                    account.access_token = new_token;
-                    account.expires_at = new_expires_at;
-                    account.cooldown_until = 0;
-                }
-                Err(ref e) => {
-                    let is_revoked = oauth::is_token_revoked_or_invalid(e);
-                    if is_revoked {
-                        let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
-                        account.cooldown_until = now_sec + 86400;
-                    }
-                    if account.expires_at <= now_sec {
-                        return Ok(oauth::AccountQuota {
-                            account_id,
-                            updated_at: now_sec,
-                            buckets: Vec::new(),
-                            reset_credits: None,
-                            plan_type: account.plan_type.clone(),
-                            error: Some("账号授权已失效，请重新授权".to_string()),
-                        });
-                    }
-                }
-            }
-        } else if account.expires_at <= now_sec {
-            let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
-            account.cooldown_until = now_sec + 86400;
+    match oauth::ensure_or_refresh_account_token(&state.db, &state.http_client, &account.id, None).await {
+        Ok(refreshed) => {
+            account = refreshed;
+        }
+        Err(e) => {
+            let is_auth_err = account.auth_invalid || oauth::is_token_revoked_or_invalid(&e);
             return Ok(oauth::AccountQuota {
                 account_id,
                 updated_at: now_sec,
                 buckets: Vec::new(),
                 reset_credits: None,
                 plan_type: account.plan_type.clone(),
-                error: Some("账号授权已失效，请重新授权".to_string()),
+                error: Some(if is_auth_err {
+                    "账号授权已失效，请重新授权".to_string()
+                } else {
+                    e
+                }),
             });
         }
     }
@@ -966,7 +908,7 @@ pub async fn get_subscription_account_quota(
             Err(e) => {
                 let is_auth_err = oauth::is_token_revoked_or_invalid(&e);
                 if is_auth_err {
-                    let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                    let _ = state.db.set_account_auth_invalid(&account.id, true);
                 }
                 return Ok(oauth::AccountQuota {
                     account_id,
@@ -979,13 +921,16 @@ pub async fn get_subscription_account_quota(
             }
         }
     } else {
-        let url = base_url.unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
+        let url = base_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "https://cloudcode-pa.googleapis.com".to_string());
         match oauth::fetch_antigravity_quota(&state.http_client, &account.access_token, &url).await {
             Ok(b) => (b, None, account.plan_type.clone()),
             Err(e) => {
                 let is_auth_err = oauth::is_token_revoked_or_invalid(&e);
                 if is_auth_err {
-                    let _ = state.db.set_account_cooldown(&account.id, now_sec + 86400);
+                    let _ = state.db.set_account_auth_invalid(&account.id, true);
                 }
                 return Ok(oauth::AccountQuota {
                     account_id,
@@ -999,28 +944,73 @@ pub async fn get_subscription_account_quota(
         }
     };
 
-    let mut any_exhausted = false;
-    let mut max_reset_sec = 0i64;
-
-    for b in &buckets {
-        if b.is_exhausted {
-            any_exhausted = true;
-            if let Some(ref rt) = b.reset_time {
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rt) {
-                    let reset_sec = dt.timestamp();
-                    if reset_sec > max_reset_sec {
-                        max_reset_sec = reset_sec;
+    if account.account_type == "chatgpt" {
+        let mut any_exhausted = false;
+        let mut max_reset_sec = 0i64;
+        for b in &buckets {
+            if b.is_exhausted {
+                any_exhausted = true;
+                if let Some(ref rt) = b.reset_time {
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rt) {
+                        let reset_sec = dt.timestamp();
+                        if reset_sec > max_reset_sec {
+                            max_reset_sec = reset_sec;
+                        }
                     }
                 }
             }
         }
-    }
+        if any_exhausted && max_reset_sec > now_sec {
+            let _ = state.db.set_account_cooldown(&account.id, max_reset_sec);
+        } else if !any_exhausted && account.cooldown_until > 0 {
+            let _ = state.db.set_account_cooldown(&account.id, 0);
+        }
+    } else {
+        // Antigravity 多模型族独立配额：仅各自冷却耗尽的模型族，全部桶耗尽时才写账号级冷却（取最早恢复时间）
+        for family in ["claude", "gemini"] {
+            let family_buckets: Vec<_> = buckets
+                .iter()
+                .filter(|b| b.label.to_lowercase().contains(family))
+                .collect();
+            if !family_buckets.is_empty() {
+                if let Some(max_f_reset) = family_buckets
+                    .iter()
+                    .filter(|b| b.is_exhausted)
+                    .filter_map(|b| {
+                        b.reset_time
+                            .as_deref()
+                            .and_then(|rt| chrono::DateTime::parse_from_rfc3339(rt).ok())
+                            .map(|dt| dt.timestamp())
+                    })
+                    .filter(|&ts| ts > now_sec)
+                    .max()
+                {
+                    oauth::mark_account_family_cooldown_until(&account.id, family, max_f_reset);
+                } else if family_buckets.iter().all(|b| !b.is_exhausted) {
+                    oauth::clear_account_family_cooldown(&account.id, family);
+                }
+            }
+        }
 
-    if any_exhausted && max_reset_sec > now_sec {
-        let _ = state.db.set_account_cooldown(&account.id, max_reset_sec);
-    } else if !any_exhausted && account.cooldown_until > 0 && account.cooldown_until <= now_sec {
-        // 已过冷却时间或额度已恢复，解除冷却标记
-        let _ = state.db.set_account_cooldown(&account.id, 0);
+        let all_exhausted = !buckets.is_empty() && buckets.iter().all(|b| b.is_exhausted);
+        if all_exhausted {
+            let min_reset_sec = buckets
+                .iter()
+                .filter_map(|b| {
+                    b.reset_time
+                        .as_deref()
+                        .and_then(|rt| chrono::DateTime::parse_from_rfc3339(rt).ok())
+                        .map(|dt| dt.timestamp())
+                })
+                .filter(|&ts| ts > now_sec)
+                .min()
+                .unwrap_or(0);
+            if min_reset_sec > now_sec {
+                let _ = state.db.set_account_cooldown(&account.id, min_reset_sec);
+            }
+        } else if account.cooldown_until > 0 {
+            let _ = state.db.set_account_cooldown(&account.id, 0);
+        }
     }
 
     Ok(oauth::AccountQuota {
@@ -1048,26 +1038,11 @@ pub async fn consume_subscription_reset_credit(
         .find(|a| a.id == account_id)
         .ok_or_else(|| "未找到指定订阅账号".to_string())?;
 
-    let now_sec = chrono::Utc::now().timestamp();
     // 检查 Token 是否需要续期
-    if account.expires_at > 0 && account.expires_at - now_sec < 300 {
-        if let Some(ref rt) = account.refresh_token {
-            if account.account_type == "chatgpt" {
-                if let Ok((new_token, expires_in)) =
-                    oauth::refresh_chatgpt_token(&state.http_client, rt).await
-                {
-                    let new_expires_at = now_sec + expires_in;
-                    let _ = state.db.update_account_tokens(
-                        &account.id,
-                        &new_token,
-                        Some(rt.as_str()),
-                        new_expires_at,
-                    );
-                    account.access_token = new_token;
-                    account.expires_at = new_expires_at;
-                }
-            }
-        }
+    if let Ok(refreshed) =
+        oauth::ensure_or_refresh_account_token(&state.db, &state.http_client, &account.id, None).await
+    {
+        account = refreshed;
     }
 
     oauth::consume_chatgpt_reset_credit(&state.http_client, &account.access_token).await?;
@@ -1133,6 +1108,7 @@ mod tests {
             enabled: true,
             plan_type: None,
             supported_models: None,
+            auth_invalid: false,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
