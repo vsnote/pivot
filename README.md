@@ -35,14 +35,9 @@ Pivot 是面向现代主流 AI Coding Agent 打造的本地轻量路由网关。
 
 ## 📥 下载与安装
 
-前往 [GitHub Releases](https://github.com/vsnote/pivot/releases/latest) 下载 macOS 安装包：
+前往 [GitHub Releases](https://github.com/vsnote/pivot/releases/latest) 下载最新 macOS 安装包（原生支持 Apple Silicon 与 Intel）。
 
-| 芯片架构 | 适用机型 | 安装包 |
-| :--- | :--- | :--- |
-| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | `Pivot_*_aarch64.dmg` |
-| **Intel** | Intel 处理器传统 Mac | `Pivot_*_x64.dmg` |
-
-> 若遇到 macOS 拦截提示，可在终端执行解除隔离：  
+> 若首次打开遇到 macOS 安全拦截提示，可在终端执行解除隔离：  
 > `sudo xattr -r -d com.apple.quarantine /Applications/Pivot.app`
 
 ---

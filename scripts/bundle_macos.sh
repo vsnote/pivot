@@ -17,27 +17,35 @@ VERSION="${2:-$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pivot-desktop/Cargo.t
 VERSION="${VERSION#v}"
 
 case "${TARGET}" in
-  aarch64-apple-darwin)
-    ARCH_LABEL="aarch64"
+  universal|universal-apple-darwin)
+    TARGET="universal-apple-darwin"
+    ARM64_BIN="${ROOT_DIR}/target/aarch64-apple-darwin/release/pivot"
+    X64_BIN="${ROOT_DIR}/target/x86_64-apple-darwin/release/pivot"
+    if [[ ! -f "${ARM64_BIN}" ]]; then
+      echo "Missing arm64 release binary at ${ARM64_BIN}. Run: cargo build --release --target aarch64-apple-darwin -p pivot-desktop" >&2
+      exit 1
+    fi
+    if [[ ! -f "${X64_BIN}" ]]; then
+      echo "Missing x86_64 release binary at ${X64_BIN}. Run: cargo build --release --target x86_64-apple-darwin -p pivot-desktop" >&2
+      exit 1
+    fi
     ;;
-  x86_64-apple-darwin)
-    ARCH_LABEL="x64"
+  aarch64-apple-darwin|x86_64-apple-darwin)
+    BIN_PATH="${ROOT_DIR}/target/${TARGET}/release/pivot"
+    if [[ ! -f "${BIN_PATH}" ]]; then
+      if [[ -z "${EXPLICIT_TARGET}" && -f "${ROOT_DIR}/target/release/pivot" ]]; then
+        BIN_PATH="${ROOT_DIR}/target/release/pivot"
+      else
+        echo "Release binary not found at ${BIN_PATH}. Run: cargo build --release --target ${TARGET} -p pivot-desktop" >&2
+        exit 1
+      fi
+    fi
     ;;
   *)
     echo "Unsupported macOS target: ${TARGET}" >&2
     exit 1
     ;;
 esac
-
-BIN_PATH="${ROOT_DIR}/target/${TARGET}/release/pivot"
-if [[ ! -f "${BIN_PATH}" ]]; then
-  if [[ -z "${EXPLICIT_TARGET}" && -f "${ROOT_DIR}/target/release/pivot" ]]; then
-    BIN_PATH="${ROOT_DIR}/target/release/pivot"
-  else
-    echo "Release binary not found at ${BIN_PATH}. Run: cargo build --release --target ${TARGET} -p pivot-desktop" >&2
-    exit 1
-  fi
-fi
 
 ICON_ICNS="${ROOT_DIR}/crates/pivot-desktop/assets/icon.icns"
 if [[ ! -f "${ICON_ICNS}" ]]; then
@@ -49,12 +57,23 @@ BUNDLE_ROOT="${ROOT_DIR}/target/bundle/${TARGET}"
 APP_DIR="${BUNDLE_ROOT}/Pivot.app"
 DMG_STAGE="${BUNDLE_ROOT}/dmg-stage"
 OUT_DIR="${ROOT_DIR}/target/bundle"
-OUT_DMG="${OUT_DIR}/Pivot_${VERSION}_${ARCH_LABEL}.dmg"
+OUT_DMG="${OUT_DIR}/Pivot.dmg"
 
 rm -rf "${BUNDLE_ROOT}" "${OUT_DMG}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${OUT_DIR}"
 
-cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/pivot"
+if [[ "${TARGET}" == "universal-apple-darwin" ]]; then
+  echo "==> Creating universal binary via lipo"
+  lipo -create -output "${APP_DIR}/Contents/MacOS/pivot" "${ARM64_BIN}" "${X64_BIN}"
+  ARCHS="$(lipo -archs "${APP_DIR}/Contents/MacOS/pivot")"
+  if [[ ! "${ARCHS}" =~ arm64 ]] || [[ ! "${ARCHS}" =~ x86_64 ]]; then
+    echo "Universal binary verification failed, detected archs: ${ARCHS}" >&2
+    exit 1
+  fi
+  echo "==> Verified universal binary archs: ${ARCHS}"
+else
+  cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/pivot"
+fi
 chmod +x "${APP_DIR}/Contents/MacOS/pivot"
 cp "${ICON_ICNS}" "${APP_DIR}/Contents/Resources/icon.icns"
 

@@ -667,6 +667,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_manifest_for_universal_dmg() {
+        let raw = serde_json::json!({
+            "version": "0.3.9",
+            "notes": "• 合并为单一通用安装包\n• 修复多账号刷新并发竞态",
+            "platforms": {
+                "darwin-aarch64": {
+                    "url": "https://github.com/vsnote/pivot/releases/download/v0.3.9/Pivot.dmg"
+                },
+                "darwin-x86_64": {
+                    "url": "https://github.com/vsnote/pivot/releases/download/v0.3.9/Pivot.dmg"
+                }
+            }
+        });
+
+        let arm = parse_manifest_for_platform(&raw, "darwin-aarch64");
+        let x64 = parse_manifest_for_platform(&raw, "darwin-x86_64");
+        assert_eq!(arm.version, "0.3.9");
+        assert_eq!(
+            arm.asset_url.as_deref(),
+            Some("https://github.com/vsnote/pivot/releases/download/v0.3.9/Pivot.dmg")
+        );
+        assert_eq!(arm.asset_url, x64.asset_url);
+        assert_eq!(
+            extract_release_note_items(arm.notes.as_deref()),
+            vec!["合并为单一通用安装包", "修复多账号刷新并发竞态"]
+        );
+    }
+
+    #[test]
     fn test_extract_release_note_items() {
         assert!(extract_release_note_items(None).is_empty());
         assert!(extract_release_note_items(Some("   \n\t  ")).is_empty());

@@ -1,38 +1,29 @@
 changelog:
   categories:
-    - title: '🚀 新功能 (Features)'
+    - title: '新功能'
       labels:
         - 'feat'
         - 'feature'
         - 'enhancement'
-    - title: '🐛 漏洞修复 (Bug Fixes)'
+    - title: '修复'
       labels:
         - 'fix'
         - 'bug'
         - 'bugfix'
-    - title: '⚡ 性能优化与重构 (Performance & Refactoring)'
+    - title: '改进'
       labels:
         - 'perf'
         - 'performance'
         - 'refactor'
-    - title: '💄 界面与交互 (UI & UX)'
-      labels:
         - 'ui'
         - 'style'
         - 'ux'
-    - title: '📝 文档更新 (Documentation)'
-      labels:
-        - 'doc'
-        - 'docs'
-        - 'documentation'
-    - title: '🔧 工具与维护 (Tooling & Maintenance)'
-      labels:
-        - 'chore'
-        - 'ci'
-        - 'build'
-        - 'dependencies'
   exclude:
     labels:
+      - 'chore'
+      - 'ci'
+      - 'build'
+      - 'docs'
       - 'ignore-for-release'
       - 'skip-changelog'
     authors:

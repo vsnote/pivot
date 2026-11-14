@@ -73,6 +73,10 @@ jobs:
             const isPrerelease = process.env.PRERELEASE === 'true';
 
             function buildReleaseLogs(tag) {
+              try {
+                execSync('git fetch --tags --force 2>/dev/null || true', { encoding: 'utf8' });
+              } catch (e) {}
+
               let targetRef = 'HEAD';
               try {
                 execSync(`git rev-parse --verify "${tag}^{commit}" 2>/dev/null`, { encoding: 'utf8' });
@@ -93,19 +97,18 @@ jobs:
               try {
                 rawLog = execSync(`git log ${range} --pretty=format:"%h|%s" --no-merges`, { encoding: 'utf8' }).trim();
               } catch (e) {
-                return { markdownChangelog: '', plainNotes: '' };
+                return { prevTag, markdownChangelog: '', plainNotes: '' };
               }
-              if (!rawLog) return { markdownChangelog: '', plainNotes: '' };
+              if (!rawLog) return { prevTag, markdownChangelog: '', plainNotes: '' };
 
               const categories = {
-                features: { title: '### 🚀 新功能 (Features)', items: [], plainItems: [] },
-                fixes: { title: '### 🐛 漏洞修复 (Bug Fixes)', items: [], plainItems: [] },
-                perf: { title: '### ⚡ 优化与重构 (Refactoring & Performance)', items: [], plainItems: [] },
-                ui: { title: '### 💄 界面与体验 (UI & Styling)', items: [], plainItems: [] },
-                maintenance: { title: '### 🔧 工具与构建 (Tooling & Maintenance)', items: [], plainItems: [] },
-                others: { title: '### 📦 其他更新 (Other Changes)', items: [], plainItems: [] },
+                features: { title: '### 新功能', items: [], plainItems: [] },
+                fixes: { title: '### 修复', items: [], plainItems: [] },
+                improvements: { title: '### 改进', items: [], plainItems: [] },
               };
+              const maintenance = { items: [], plainItems: [] };
 
+              const commitBaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/commit`;
               const lines = rawLog.split('\n').filter(Boolean);
               for (const line of lines) {
                 const sepIndex = line.indexOf('|');
@@ -115,42 +118,49 @@ jobs:
                 if (!msg) continue;
                 if (/^(chore\s*\(\s*release\s*\)|release)\s*:/i.test(msg)) continue;
 
-                const lower = msg.toLowerCase();
-                const item = `- ${msg} ([${hash}](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${hash}))`;
-                const plainText = msg.replace(/^[a-z]+(\([^)]*\))?!?\s*:\s*/i, '').trim() || msg;
+                const matched = msg.match(/^([a-z]+)(?:\(([^)]*)\))?!?\s*:\s*(.+)$/i);
+                let bucket = categories.improvements;
+                let cleanText = msg;
 
-                if (lower.startsWith('feat')) {
-                  categories.features.items.push(item);
-                  categories.features.plainItems.push(plainText);
-                } else if (lower.startsWith('fix')) {
-                  categories.fixes.items.push(item);
-                  categories.fixes.plainItems.push(plainText);
-                } else if (lower.startsWith('perf') || lower.startsWith('refactor')) {
-                  categories.perf.items.push(item);
-                  categories.perf.plainItems.push(plainText);
-                } else if (lower.startsWith('style') || lower.startsWith('ui')) {
-                  categories.ui.items.push(item);
-                  categories.ui.plainItems.push(plainText);
-                } else if (lower.startsWith('chore') || lower.startsWith('ci') || lower.startsWith('build')) {
-                  categories.maintenance.items.push(item);
-                  categories.maintenance.plainItems.push(plainText);
-                } else {
-                  categories.others.items.push(item);
-                  categories.others.plainItems.push(plainText);
+                if (matched) {
+                  const type = matched[1].toLowerCase();
+                  const scope = (matched[2] || '').toLowerCase().trim();
+                  cleanText = matched[3].trim();
+
+                  if (
+                    ['chore', 'ci', 'build', 'docs', 'doc', 'test', 'tests'].includes(type) ||
+                    ['ci', 'release', 'workflow', 'scripts'].includes(scope)
+                  ) {
+                    bucket = maintenance;
+                  } else if (type === 'feat' || type === 'feature') {
+                    bucket = categories.features;
+                  } else if (type === 'fix' || type === 'bugfix') {
+                    bucket = categories.fixes;
+                  } else {
+                    bucket = categories.improvements;
+                  }
                 }
+
+                if (!cleanText) continue;
+                const item = `- ${cleanText} ([${hash}](${commitBaseUrl}/${hash}))`;
+                bucket.items.push(item);
+                bucket.plainItems.push(cleanText);
               }
 
               const sections = [];
-              for (const key of Object.keys(categories)) {
+              for (const key of ['features', 'fixes', 'improvements']) {
                 const cat = categories[key];
                 if (cat.items.length > 0) {
                   sections.push(`${cat.title}\n\n${cat.items.join('\n')}`);
                 }
               }
+              if (sections.length === 0 && maintenance.items.length > 0) {
+                sections.push(`${categories.improvements.title}\n\n${maintenance.items.join('\n')}`);
+              }
 
               const plainCollected = [];
               const seenPlain = new Set();
-              for (const key of ['features', 'fixes', 'perf', 'ui', 'others']) {
+              for (const key of ['features', 'fixes', 'improvements']) {
                 for (const text of categories[key].plainItems) {
                   if (text && !seenPlain.has(text)) {
                     seenPlain.add(text);
@@ -159,7 +169,7 @@ jobs:
                 }
               }
               if (plainCollected.length === 0) {
-                for (const text of categories.maintenance.plainItems) {
+                for (const text of maintenance.plainItems) {
                   if (text && !seenPlain.has(text)) {
                     seenPlain.add(text);
                     plainCollected.push(`• ${text}`);
@@ -168,12 +178,13 @@ jobs:
               }
 
               return {
+                prevTag,
                 markdownChangelog: sections.join('\n\n'),
                 plainNotes: plainCollected.join('\n'),
               };
             }
 
-            const { markdownChangelog: gitChangelog, plainNotes: gitPlainNotes } = buildReleaseLogs(tagName);
+            const { prevTag, markdownChangelog: gitChangelog, plainNotes: gitPlainNotes } = buildReleaseLogs(tagName);
 
             let apiNotes = '';
             try {
@@ -211,36 +222,20 @@ jobs:
               finalPlainNotes = fallbackItems.join('\n');
             }
 
-            const macosNotice = [
-              '### 🍎 macOS 安装与下载说明 (原生 Rust + GPUI 构建)',
-              '',
-              '| 芯片架构 | 适用机型 | 安装包推荐 |',
-              '| :--- | :--- | :--- |',
-              `| **Apple Silicon** | M1 / M2 / M3 / M4 及后续芯片 Mac | \`Pivot_${cleanVersion}_aarch64.dmg\` |`,
-              `| **Intel** | 采用 Intel 处理器的传统 Mac | \`Pivot_${cleanVersion}_x64.dmg\` |`,
-              '',
-              '> **💡 首次打开提示「已损坏」或「无法打开」？**',
-              '> 由于开源分发未内置苹果商业付费证书签名，macOS Gatekeeper 可能会弹出拦截提示。可通过以下方式解决：',
-              '> 1. 打开系统「设置」->「隐私与安全性」，在安全性部分找到提示并点击「仍要打开」。',
-              '> 2. 或在终端 (Terminal) 中执行以下命令去除隔离标记：',
-              '>    ```bash',
-              '>    sudo xattr -r -d com.apple.quarantine /Applications/Pivot.app',
-              '>    ```',
-              '',
-              '---',
-              '',
-            ].join('\n');
-
             let changelogContent = '';
             if (gitChangelog) {
-              changelogContent = `## 📝 更新日志 (Changelog)\n\n${gitChangelog}`;
+              changelogContent = gitChangelog;
             } else if (apiNotes) {
-              changelogContent = `## 📝 更新日志 (Changelog)\n\n${apiNotes}`;
+              changelogContent = apiNotes.trim();
             } else {
-              changelogContent = `## 📝 更新日志 (Changelog)\n\n发布版本 ${tagName}。`;
+              changelogContent = `发布版本 ${tagName}。`;
             }
 
-            const finalBody = `${macosNotice}${changelogContent}\n\n---\n**完整提交历史**: https://github.com/${context.repo.owner}/${context.repo.repo}/commits/${tagName}\n`;
+            const compareLink = prevTag
+              ? `**完整变更**: [\`${prevTag}...${tagName}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/compare/${prevTag}...${tagName})`
+              : `**提交记录**: [\`${tagName}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/commits/${tagName})`;
+
+            const finalBody = `${changelogContent}\n\n${compareLink}\n`;
 
             let release;
             let existing = null;
@@ -284,19 +279,9 @@ jobs:
             core.setOutput('notes_b64', Buffer.from(finalPlainNotes, 'utf8').toString('base64'));
 
   build-macos:
-    name: Build macOS (${{ matrix.name }})
+    name: Build macOS Universal App
     needs: create-release
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            arch_label: aarch64
-            name: Apple Silicon (aarch64)
-          - target: x86_64-apple-darwin
-            arch_label: x64
-            name: Intel (x64)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -316,28 +301,30 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          key: gpui-${{ matrix.target }}
+          key: gpui-universal
 
       - name: Run Core Unit Tests
-        if: matrix.target == 'aarch64-apple-darwin'
         run: cargo test --workspace
 
-      - name: Build Native GPUI Release Binary
-        run: cargo build --release --target ${{ matrix.target }} -p pivot-desktop
+      - name: Build Apple Silicon Release Binary
+        run: cargo build --release --target aarch64-apple-darwin -p pivot-desktop
 
-      - name: Package Pivot.app & DMG Installer
-        run: bash scripts/bundle_macos.sh "${{ matrix.target }}" "${{ needs.create-release.outputs.version }}"
+      - name: Build Intel Release Binary
+        run: cargo build --release --target x86_64-apple-darwin -p pivot-desktop
+
+      - name: Package Pivot.app & Universal DMG Installer
+        run: bash scripts/bundle_macos.sh universal "${{ needs.create-release.outputs.version }}"
 
       - name: Upload DMG to Release
         uses: actions/github-script@v7
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-          DMG_NAME: Pivot_${{ needs.create-release.outputs.version }}_${{ matrix.arch_label }}.dmg
+          DMG_NAME: Pivot.dmg
         with:
           script: |
             const fs = require('fs');
@@ -418,10 +405,10 @@ jobs:
               pub_date: new Date().toISOString(),
               platforms: {
                 'darwin-aarch64': {
-                  url: `${downloadBase}/Pivot_${version}_aarch64.dmg`,
+                  url: `${downloadBase}/Pivot.dmg`,
                 },
                 'darwin-x86_64': {
-                  url: `${downloadBase}/Pivot_${version}_x64.dmg`,
+                  url: `${downloadBase}/Pivot.dmg`,
                 },
               },
             };
