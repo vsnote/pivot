@@ -2557,30 +2557,98 @@ fn load_native_codex_models_cache() -> HashMap<String, Value> {
 }
 
 pub fn resolve_model_context_window(model_name: &str) -> (u64, u64) {
+    let lower = model_name.to_lowercase();
+    let explicit_1m = lower.contains("[1m]");
+
     // 目录命中优先：models.dev 的上下文与输出上限比名称猜测准确
     if let Some(m) = crate::model_catalog::lookup(model_name, None) {
         if let Some(ctx) = m.context_window {
-            return (ctx, m.max_output.unwrap_or(ctx));
+            let effective_ctx = if explicit_1m && ctx < 1_000_000 {
+                1_000_000
+            } else {
+                ctx
+            };
+            let max_out = m.max_output.unwrap_or(effective_ctx);
+            return (effective_ctx, max_out);
         }
     }
 
-    let lower = model_name.to_lowercase();
-    let name = lower.split('/').last().unwrap_or(&lower);
+    if explicit_1m {
+        return (1_000_000, 1_000_000);
+    }
 
-    if name.starts_with("gpt-5")
+    let raw_name = lower.split('/').last().unwrap_or(&lower);
+    let name = raw_name
+        .strip_suffix(']')
+        .and_then(|s| s.rsplit_once('[').map(|(base, _)| base))
+        .unwrap_or(raw_name)
+        .trim();
+
+    if name.starts_with("gemini-1.0") {
+        (32_768, 32_768)
+    } else if name.contains("gemini") {
+        (1_048_576, 1_048_576)
+    } else if name.starts_with("gpt-4.1") {
+        (1_047_576, 1_047_576)
+    } else if name.starts_with("gpt-5.5")
+        || name.starts_with("gpt-5.6")
+        || name.starts_with("gpt-5.7")
         || name.starts_with("gpt-6")
+        || name.starts_with("gpt-7")
+        || (name.starts_with("gpt-5.4") && !name.contains("-mini") && !name.contains("-nano"))
+    {
+        (1_050_000, 1_050_000)
+    } else if name.contains("codex-spark") {
+        (128_000, 128_000)
+    } else if name.starts_with("gpt-5")
         || name.starts_with("gpt-reserve")
         || name.contains("codex-auto-review")
     {
-        (272000, 872000)
-    } else if name.contains("gemini") {
-        (1000000, 2000000)
+        (400_000, 400_000)
+    } else if name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4") {
+        (200_000, 200_000)
+    } else if name.contains("claude-fable-5")
+        || name.contains("claude-opus-5")
+        || name.contains("claude-sonnet-5")
+        || name.contains("claude-haiku-5")
+        || name.contains("claude-opus-4-6")
+        || name.contains("claude-opus-4-7")
+        || name.contains("claude-opus-4-8")
+        || name.contains("claude-sonnet-4-6")
+    {
+        (1_000_000, 1_000_000)
     } else if name.contains("claude") {
-        (200000, 200000)
+        (200_000, 200_000)
+    } else if name.contains("deepseek-flash") || name.contains("deepseek-v4") {
+        (1_048_576, 1_048_576)
     } else if name.contains("deepseek") {
-        (64000, 64000)
+        (128_000, 128_000)
+    } else if name.starts_with("qwen3.5")
+        || name.starts_with("qwen3.6")
+        || name.starts_with("qwen3.7")
+        || name.starts_with("qwen3.8")
+        || name.starts_with("qwen3-coder")
+        || name.starts_with("qwen-plus")
+        || name.starts_with("qwen-flash")
+        || name.starts_with("qwen-turbo")
+        || name.starts_with("glm-5.2")
+        || name.starts_with("glm-5.3")
+        || name.starts_with("glm-5-2")
+        || name.starts_with("glm-5-3")
+        || name.starts_with("grok-4.20")
+        || name.starts_with("grok-4.3")
+    {
+        (1_000_000, 1_000_000)
+    } else if name.starts_with("kimi-k3")
+        || name.starts_with("mistral-large-4")
+        || name.contains("llama-4")
+        || name.starts_with("muse-")
+    {
+        (1_048_576, 1_048_576)
+    } else if name.starts_with("kimi-k2") {
+        (262_144, 262_144)
     } else {
-        (128000, 128000)
+        (128_000, 128_000)
     }
 }
 
@@ -2849,9 +2917,14 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
 pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
     let lower = model_name.to_lowercase();
     let name = lower.split('/').last().unwrap_or(&lower);
+    let (ctx_window, _) = resolve_model_context_window(model_name);
+    let is_1m = ctx_window >= 1_000_000;
 
-    // 0. 明确的经典非推理模型（保持为不支持思考调节的轻量基底）
-    let is_explicit_non_reasoning = (name.starts_with("gpt-4") && !name.contains("o1") && !name.contains("o3"))
+    // 0. 明确的经典非推理模型（排除 1M 窗口的 gpt-4.1 系列，保持不支持思考调节的 200k 轻量基底）
+    let is_explicit_non_reasoning = (name.starts_with("gpt-4")
+        && !name.starts_with("gpt-4.1")
+        && !name.contains("o1")
+        && !name.contains("o3"))
         || name.starts_with("gpt-3")
         || name.starts_with("chatgpt-4")
         || name.contains("claude-3-5-haiku")
@@ -2867,7 +2940,7 @@ pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
         return "claude-3-5-haiku";
     }
 
-    // 1. 深度推理 / 极致智力模型 -> 映射到原生支持 Effort 调节的 Opus 4.6 (默认 High 思考)
+    // 1. 深度推理 / 极致智力模型 -> 1M 模型映射到原生 1M Opus 4.7，其余映射到 Opus 4.6
     if name.contains("opus")
         || name.contains("reason")
         || name.contains("r1")
@@ -2876,8 +2949,16 @@ pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
         || name.contains("fable")
         || name.contains("qwq")
     {
-        "claude-opus-4-6"
-    } else if (name.contains("-mini") || name.ends_with("mini") || name.contains("small") || name.contains("instant"))
+        if is_1m {
+            "claude-opus-4-7"
+        } else {
+            "claude-opus-4-6"
+        }
+    } else if !is_1m
+        && (name.contains("-mini")
+            || name.ends_with("mini")
+            || name.contains("small")
+            || name.contains("instant"))
         && !name.contains("thinking")
         && !name.contains("deepseek")
         && !name.contains("high")
@@ -2885,11 +2966,13 @@ pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
         && !name.contains("v4")
         && !name.contains("gemini")
     {
-        // 纯轻量辅助模型（且不带 thinking/flash/deepseek/gemini 等特征）
+        // 纯轻量 < 1M 辅助模型（且不带 thinking/flash/deepseek/gemini 等特征）
         "claude-3-5-haiku"
+    } else if is_1m {
+        // 原生 >= 1M 主力通用/推理模型 -> 映射到 Claude Code 原生 1M 基底 Sonnet 5（支持 Low/Medium/High/xHigh/Max）
+        "claude-sonnet-5"
     } else {
-        // 主力通用/推理模型（含 Sonnet, GPT-5/6, DeepSeek Flash/Pro, Gemini 2.5/3.x/4.x, 各类编程模型）
-        // 映射到原生支持 Effort 调节的 Sonnet 4.6 (默认 Medium 思考，可自由按左右键调整 Low/Medium/High/xHigh/Max)
+        // < 1M 主力通用/推理模型 -> 映射到 Sonnet 4.6（200k 窗口，支持 Effort 调节）
         "claude-sonnet-4-6"
     }
 }
@@ -3619,8 +3702,16 @@ followUpQueueMode = "queue"
         assert_eq!(levels[5]["effort"], "ultra");
 
         let (cw, mcw) = resolve_model_context_window("gpt-6-astra");
-        assert!(cw == 272000 || cw == 1050000);
-        assert!(mcw == 872000 || mcw == 1050000);
+        assert_eq!(cw, 1_050_000);
+        assert!(mcw == 128_000 || mcw == 1_050_000);
+
+        assert_eq!(resolve_model_context_window("gemini-4-hydrogen-high").0, 1_048_576);
+        assert_eq!(resolve_model_context_window("deepseek-flash").0, 1_048_576);
+        assert_eq!(resolve_model_context_window("claude-fable-5-1-reversed").0, 1_000_000);
+        assert_eq!(resolve_model_context_window("gpt-4.1-mini").0, 1_047_576);
+        assert_eq!(resolve_model_context_window("claude-3-5-sonnet-20241022").0, 200_000);
+        assert_eq!(resolve_model_context_window("gpt-5.2").0, 400_000);
+        assert_eq!(resolve_model_context_window("gpt-5.2[1m]").0, 1_000_000);
     }
 
     #[test]
@@ -3897,21 +3988,28 @@ followUpQueueMode = "queue"
         assert_eq!(picker["replaceBuiltInOptions"], true);
         let options = picker["options"].as_array().expect("options must be array");
 
-        // Models
+        // Models (>= 1M 映射到原生 1M 基底，非 1M 保持 200k 基底)
         assert_eq!(options[0]["model"], "deepseek-v4-pro");
-        assert_eq!(options[0]["behavesAs"], "claude-sonnet-4-6");
+        assert_eq!(options[0]["behavesAs"], "claude-sonnet-5");
         assert_eq!(options[1]["model"], "deepseek-reasoner");
         assert_eq!(options[1]["behavesAs"], "claude-opus-4-6");
         assert_eq!(options[2]["model"], "gpt-6-astra");
-        assert_eq!(options[2]["behavesAs"], "claude-sonnet-4-6");
+        assert_eq!(options[2]["behavesAs"], "claude-sonnet-5");
 
-        // Test explicit non-reasoning vs reasoning helpers
+        // Test explicit non-reasoning vs reasoning & 1M context window helpers
         assert_eq!(resolve_claude_behaves_as("gpt-4o"), "claude-3-5-haiku");
         assert_eq!(resolve_claude_behaves_as("gpt-4o-mini"), "claude-3-5-haiku");
-        assert_eq!(resolve_claude_behaves_as("gemini-4-argon"), "claude-sonnet-4-6");
-        assert_eq!(resolve_claude_behaves_as("deepseek-flash"), "claude-sonnet-4-6");
-        assert_eq!(resolve_claude_behaves_as("gemini-3.8-flash-high"), "claude-sonnet-4-6");
-        assert_eq!(resolve_claude_behaves_as("claude-opus-4-6-thinking"), "claude-opus-4-6");
+        assert_eq!(resolve_claude_behaves_as("gpt-4.1"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_behaves_as("gpt-4.1-mini"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_behaves_as("gemini-4-argon"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_behaves_as("gemini-4-hydrogen-high"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_behaves_as("deepseek-flash"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_behaves_as("gemini-3.8-flash-high"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_behaves_as("claude-fable-5-2"), "claude-opus-4-7");
+        assert_eq!(resolve_claude_behaves_as("claude-opus-4-6-thinking"), "claude-opus-4-7");
+        assert_eq!(resolve_claude_behaves_as("gpt-5.2"), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_behaves_as("kimi-k2.6"), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_behaves_as("claude-3-5-sonnet-20241022"), "claude-3-5-haiku");
     }
 
     #[test]

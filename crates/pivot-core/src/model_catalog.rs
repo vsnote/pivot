@@ -350,7 +350,7 @@ fn build_index(models: Vec<CatalogModel>) -> HashMap<String, Vec<CatalogModel>> 
     index
 }
 
-/// 一次查询需要尝试的所有等价写法：原名、去服务商前缀、去变体后缀、去日期/版本后缀。
+/// 一次查询需要尝试的所有等价写法：原名、去服务商前缀、去容量后缀、循环去变体后缀、去日期/版本后缀。
 fn canonical_keys(id: &str) -> Vec<String> {
     let base = id.trim().to_lowercase();
     if base.is_empty() {
@@ -364,12 +364,26 @@ fn canonical_keys(id: &str) -> Vec<String> {
         }
     }
 
-    // 变体与思考等级剥离（如 -high, -medium, -low, -thinking 等）
+    // 剥离尾部方括号容量标签（如 [1m]、[1M]、[200k]）
     for key in keys.clone() {
-        if let Some(stripped) = strip_variant_suffix(&key) {
-            if !keys.contains(&stripped) {
-                keys.push(stripped);
+        if key.ends_with(']') {
+            if let Some(pos) = key.rfind('[') {
+                let stripped = key[..pos].trim_end();
+                if !stripped.is_empty() && !keys.contains(&stripped.to_string()) {
+                    keys.push(stripped.to_string());
+                }
             }
+        }
+    }
+
+    // 多轮循环剥离渠道/思考变体后缀（如 claude-opus-4-6-thinking-high / claude-fable-5-1-reversed）
+    for key in keys.clone() {
+        let mut cur = key;
+        while let Some(stripped) = strip_variant_suffix(&cur) {
+            if !keys.contains(&stripped) {
+                keys.push(stripped.clone());
+            }
+            cur = stripped;
         }
     }
 
@@ -381,31 +395,39 @@ fn canonical_keys(id: &str) -> Vec<String> {
         }
     }
 
-    // 组合剥离：变体 + 版本
+    // 组合剥离：循环变体 + 版本
     for key in keys.clone() {
-        if let Some(v) = strip_variant_suffix(&key) {
+        let mut cur = key;
+        while let Some(v) = strip_variant_suffix(&cur) {
             if let Some(d) = strip_version_suffix(&v) {
                 if !keys.contains(&d) {
                     keys.push(d);
                 }
             }
+            cur = v;
         }
     }
 
     keys
 }
 
-/// 剥离常见渠道代理或模型变体后缀（如 -high, -medium, -low, -thinking 等）。
+/// 剥离常见渠道代理、思考等级或格式后缀。
 fn strip_variant_suffix(id: &str) -> Option<String> {
     for suffix in [
+        "-xhigh",
         "-high",
         "-medium",
         "-low",
+        "-minimal",
+        "-max",
         "-thinking",
         "-thought",
         "-think",
         "-nothink",
         "-nothinking",
+        "-reversed",
+        "-cc-format",
+        "-cc",
         "-preview",
         "-exp",
         "-search",
@@ -564,6 +586,9 @@ mod tests {
         assert!(canonical_keys("meta-llama/llama-4-scout").contains(&"llama-4-scout".to_string()));
         assert!(canonical_keys("claude-3-5-sonnet-20241022").contains(&"claude-3-5-sonnet".to_string()));
         assert!(canonical_keys("gpt-5-latest").contains(&"gpt-5".to_string()));
+        assert!(canonical_keys("gpt-6-astra-cc-format").contains(&"gpt-6-astra".to_string()));
+        assert!(canonical_keys("claude-fable-5-1-reversed[1M]").contains(&"claude-fable-5-1".to_string()));
+        assert!(canonical_keys("gemini-4-hydrogen-xhigh").contains(&"gemini-4-hydrogen".to_string()));
     }
 
     #[test]
