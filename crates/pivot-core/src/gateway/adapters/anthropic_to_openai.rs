@@ -1,6 +1,43 @@
 use crate::gateway::types::*;
 use serde_json::{json, Value};
 
+fn anthropic_image_to_openai_part(block: &Value) -> Option<Value> {
+    let source = block.get("source")?;
+    let source_type = source.get("type").and_then(Value::as_str).unwrap_or("");
+    match source_type {
+        "base64" => {
+            let data = source.get("data").and_then(Value::as_str)?;
+            if data.is_empty() {
+                return None;
+            }
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("image/png");
+            Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{}", media_type, data)
+                }
+            }))
+        }
+        "url" => {
+            let url = source.get("url").and_then(Value::as_str)?;
+            if url.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": url
+                }
+            }))
+        }
+        _ => None,
+    }
+}
+
 pub fn convert_anthropic_req_to_openai(
     req: &AnthropicMessageRequest,
     target_model: &str,
@@ -49,6 +86,9 @@ pub fn convert_anthropic_req_to_openai(
             }
             Value::Array(blocks) => {
                 let mut text_parts = String::new();
+                let mut content_parts: Vec<Value> = Vec::new();
+                let mut has_image = false;
+                let mut pending_tool_images: Vec<Value> = Vec::new();
                 let mut tool_calls = Vec::new();
                 let mut thinking_parts = String::new();
 
@@ -58,6 +98,13 @@ pub fn convert_anthropic_req_to_openai(
                         "text" => {
                             if let Some(t) = block.get("text").and_then(|s| s.as_str()) {
                                 text_parts.push_str(t);
+                                content_parts.push(json!({ "type": "text", "text": t }));
+                            }
+                        }
+                        "image" => {
+                            if let Some(img_part) = anthropic_image_to_openai_part(block) {
+                                content_parts.push(img_part);
+                                has_image = true;
                             }
                         }
                         "thinking" => {
@@ -101,12 +148,33 @@ pub fn convert_anthropic_req_to_openai(
                                 Some(Value::String(s)) => s.clone(),
                                 Some(Value::Array(arr)) => {
                                     let mut s = String::new();
+                                    let mut had_image = false;
                                     for item in arr {
-                                        if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
+                                        let item_type = item
+                                            .get("type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        if item_type == "image" {
+                                            if let Some(img_part) =
+                                                anthropic_image_to_openai_part(item)
+                                            {
+                                                pending_tool_images.push(img_part);
+                                                had_image = true;
+                                            }
+                                        } else if let Some(t) =
+                                            item.get("text").and_then(|x| x.as_str())
+                                        {
+                                            if !s.is_empty() && !t.is_empty() {
+                                                s.push('\n');
+                                            }
                                             s.push_str(t);
                                         }
                                     }
-                                    s
+                                    if s.is_empty() && had_image {
+                                        "[Image content attached]".to_string()
+                                    } else {
+                                        s
+                                    }
                                 }
                                 Some(other) => other.to_string(),
                                 None => "".to_string(),
@@ -131,14 +199,21 @@ pub fn convert_anthropic_req_to_openai(
                     None
                 };
 
-                if !text_parts.is_empty() || !tool_calls.is_empty() || reasoning_content.is_some() {
+                if !text_parts.is_empty()
+                    || has_image
+                    || !tool_calls.is_empty()
+                    || reasoning_content.is_some()
+                {
+                    let content = if has_image {
+                        Some(Value::Array(content_parts))
+                    } else if text_parts.is_empty() {
+                        None
+                    } else {
+                        Some(Value::String(text_parts))
+                    };
                     openai_messages.push(OpenAIMessage {
                         role: msg.role.clone(),
-                        content: if text_parts.is_empty() {
-                            None
-                        } else {
-                            Some(Value::String(text_parts))
-                        },
+                        content,
                         tool_calls: if tool_calls.is_empty() {
                             None
                         } else {
@@ -146,6 +221,18 @@ pub fn convert_anthropic_req_to_openai(
                         },
                         tool_call_id: None,
                         reasoning_content,
+                        name: None,
+                    });
+                }
+
+                // 必须在所有并行 role: "tool" 消息推完后再追加 user 图片消息，避免破坏 OpenAI 工具调用消息顺序约束
+                if !pending_tool_images.is_empty() {
+                    openai_messages.push(OpenAIMessage {
+                        role: "user".to_string(),
+                        content: Some(Value::Array(pending_tool_images)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
                         name: None,
                     });
                 }
@@ -288,11 +375,9 @@ pub fn convert_openai_resp_to_anthropic(
         .map(|u| AnthropicUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         })
-        .unwrap_or(AnthropicUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-        });
+        .unwrap_or_default();
 
     AnthropicResponse {
         id: format!("msg_{}", resp.id),
@@ -440,5 +525,66 @@ mod tests {
         // Only max_tokens should be set, not max_completion_tokens
         assert_eq!(oai_req.max_tokens, Some(2048));
         assert_eq!(oai_req.max_completion_tokens, None);
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_image_and_parallel_tool_images() {
+        let b64 = "AAAA";
+        let req = AnthropicMessageRequest {
+            model: "gpt-6-astra".to_string(),
+            messages: vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: json!([
+                        { "type": "text", "text": "See image:" },
+                        { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": b64 } }
+                    ]),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: json!([
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": [
+                                { "type": "text", "text": "file text" },
+                                { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": b64 } }
+                            ]
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_2",
+                            "content": "second tool text"
+                        }
+                    ]),
+                },
+            ],
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            thinking: None,
+            metadata: None,
+        };
+
+        let oai = convert_anthropic_req_to_openai(&req, "gpt-6-astra");
+        // msg 0: user multimodal array
+        let m0 = oai.messages[0].content.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(m0[0]["type"], "text");
+        assert_eq!(m0[1]["type"], "image_url");
+        assert_eq!(m0[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+
+        // msg 1 & msg 2: tool messages stay text-only and contiguous; msg 3: appended user image message
+        assert_eq!(oai.messages.len(), 4);
+        assert_eq!(oai.messages[1].role, "tool");
+        assert_eq!(oai.messages[1].content, Some(Value::String("file text".to_string())));
+        assert_eq!(oai.messages[2].role, "tool");
+        assert_eq!(oai.messages[2].content, Some(Value::String("second tool text".to_string())));
+        assert_eq!(oai.messages[3].role, "user");
+        let m3 = oai.messages[3].content.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(m3[0]["type"], "image_url");
+        assert_eq!(m3[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
     }
 }

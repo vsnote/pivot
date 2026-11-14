@@ -18,6 +18,66 @@ fn is_anthropic_thinking_supported(target_model: &str) -> bool {
         || name.contains("thinking")
 }
 
+fn openai_image_part_to_anthropic(part: &Value) -> Option<Value> {
+    let url = part
+        .get("image_url")
+        .and_then(|v| v.get("url").and_then(Value::as_str).or_else(|| v.as_str()))?;
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some((media_type, data)) = rest.split_once(";base64,") {
+            if !data.is_empty() {
+                let mime = if media_type.is_empty() {
+                    "image/png"
+                } else {
+                    media_type
+                };
+                return Some(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": data
+                    }
+                }));
+            }
+        }
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Some(json!({
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": url
+            }
+        }));
+    }
+    None
+}
+
+fn convert_openai_user_content_to_anthropic(content: Option<&Value>) -> Value {
+    match content {
+        Some(Value::Array(arr)) => {
+            let blocks: Vec<Value> = arr
+                .iter()
+                .filter_map(|part| {
+                    let ptype = part.get("type").and_then(Value::as_str).unwrap_or("");
+                    match ptype {
+                        "text" => part
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(|t| json!({ "type": "text", "text": t })),
+                        "image_url" => openai_image_part_to_anthropic(part),
+                        "image" | "tool_result" => Some(part.clone()),
+                        _ => Some(part.clone()),
+                    }
+                })
+                .collect();
+            Value::Array(blocks)
+        }
+        Some(other) => other.clone(),
+        None => Value::String(String::new()),
+    }
+}
+
 pub fn convert_openai_req_to_anthropic(
     req: &OpenAIChatRequest,
     target_model: &str,
@@ -53,7 +113,7 @@ pub fn convert_openai_req_to_anthropic(
                 }
             }
             "user" => {
-                let content = msg.content.clone().unwrap_or(Value::String("".to_string()));
+                let content = convert_openai_user_content_to_anthropic(msg.content.as_ref());
                 anthropic_messages.push(AnthropicMessage {
                     role: "user".to_string(),
                     content,
@@ -307,6 +367,10 @@ pub fn convert_anthropic_resp_to_openai(
         name: None,
     };
 
+    let prompt_tokens = resp.usage.input_tokens
+        + resp.usage.cache_read_input_tokens.unwrap_or(0)
+        + resp.usage.cache_creation_input_tokens.unwrap_or(0);
+
     OpenAIChatResponse {
         id: resp.id.clone(),
         object: "chat.completion".to_string(),
@@ -318,9 +382,9 @@ pub fn convert_anthropic_resp_to_openai(
             finish_reason,
         }],
         usage: Some(OpenAIUsage {
-            prompt_tokens: resp.usage.input_tokens,
+            prompt_tokens,
             completion_tokens: resp.usage.output_tokens,
-            total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
+            total_tokens: prompt_tokens + resp.usage.output_tokens,
         }),
     }
 }
@@ -409,5 +473,51 @@ mod tests {
         assert_eq!(blocks[0]["type"], "tool_result");
         assert_eq!(blocks[0]["tool_use_id"], "call_1");
         assert_eq!(blocks[1]["tool_use_id"], "call_2");
+    }
+
+    #[test]
+    fn test_convert_openai_image_url_and_cached_usage() {
+        let req: OpenAIChatRequest = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "What is this?" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,QUFB" } },
+                    { "type": "image_url", "image_url": { "url": "https://example.com/pic.webp" } }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let ant = convert_openai_req_to_anthropic(&req, "claude-sonnet-4-6");
+        let blocks = ant.messages[0].content.as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "QUFB");
+        assert_eq!(blocks[2]["source"]["type"], "url");
+        assert_eq!(blocks[2]["source"]["url"], "https://example.com/pic.webp");
+
+        let ant_resp = AnthropicResponse {
+            id: "msg_1".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            content: vec![json!({ "type": "text", "text": "ok" })],
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1000,
+                output_tokens: 50,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(4000),
+            },
+        };
+        let oai_resp = convert_anthropic_resp_to_openai(&ant_resp, "claude-sonnet-4-6");
+        let u = oai_resp.usage.unwrap();
+        assert_eq!(u.prompt_tokens, 5000);
+        assert_eq!(u.total_tokens, 5050);
     }
 }

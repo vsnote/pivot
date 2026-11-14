@@ -47,10 +47,14 @@ pub struct AnthropicTool {
     pub input_schema: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,11 +223,15 @@ pub struct OpenAIChatChunk {
 
 // ================= Google Gemini Format =================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_call: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -263,6 +271,7 @@ pub struct GeminiUsageMetadata {
     pub prompt_token_count: Option<u32>,
     pub candidates_token_count: Option<u32>,
     pub total_token_count: Option<u32>,
+    pub cached_content_token_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

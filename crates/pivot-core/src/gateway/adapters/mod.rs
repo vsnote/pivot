@@ -19,6 +19,7 @@ pub struct SseState {
     pub last_thought_signature: Option<String>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+    pub cache_read_input_tokens: u32,
     pub pending_stop_reason: Option<String>,
     pub stream_finished: bool,
 }
@@ -113,6 +114,22 @@ fn close_active_anthropic_blocks(events: &mut Vec<String>, state: &mut SseState)
     }
 }
 
+fn update_gemini_sse_usage(usage: &Value, state: &mut SseState) {
+    let cached = usage
+        .get("cachedContentTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    if let Some(prompt_tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+        state.cache_read_input_tokens = cached;
+        state.total_input_tokens = (prompt_tokens as u32).saturating_sub(cached);
+    } else if cached > 0 {
+        state.cache_read_input_tokens = cached;
+    }
+    if let Some(output_tokens) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+        state.total_output_tokens = output_tokens as u32;
+    }
+}
+
 /// Convert a Gemini streaming response line to Anthropic SSE events.
 /// Gemini emits one JSON object per `data:` line and does not use a `[DONE]`
 /// sentinel, so the caller must invoke `finish_gemini_stream` when the body
@@ -145,8 +162,19 @@ pub fn parse_gemini_chunk_to_anthropic_events(
         return events;
     }
 
+    if let Some(usage) = usage {
+        update_gemini_sse_usage(usage, state);
+    }
+
     if !state.message_started {
         state.message_started = true;
+        let mut start_usage = json!({
+            "input_tokens": state.total_input_tokens,
+            "output_tokens": 0
+        });
+        if state.cache_read_input_tokens > 0 {
+            start_usage["cache_read_input_tokens"] = json!(state.cache_read_input_tokens);
+        }
         events.push(format!(
             "event: message_start\ndata: {}\n\n",
             json!({
@@ -159,7 +187,7 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                     "content": [],
                     "stop_reason": null,
                     "stop_sequence": null,
-                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                    "usage": start_usage
                 }
             })
         ));
@@ -314,12 +342,7 @@ pub fn parse_gemini_chunk_to_anthropic_events(
                     }
                 };
                 if let Some(usage) = usage {
-                    if let Some(input_tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
-                        state.total_input_tokens = input_tokens as u32;
-                    }
-                    if let Some(output_tokens) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
-                        state.total_output_tokens = output_tokens as u32;
-                    }
+                    update_gemini_sse_usage(usage, state);
                 }
                 events.extend(finish_gemini_stream(state, stop_reason));
                 return events;
@@ -328,12 +351,7 @@ pub fn parse_gemini_chunk_to_anthropic_events(
     }
 
     if let Some(usage) = usage {
-        if let Some(input_tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
-            state.total_input_tokens = input_tokens as u32;
-        }
-        if let Some(output_tokens) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
-            state.total_output_tokens = output_tokens as u32;
-        }
+        update_gemini_sse_usage(usage, state);
     }
     events
 }
@@ -357,8 +375,11 @@ pub fn finish_openai_stream(state: &mut SseState, stop_reason: &str) -> Vec<Stri
     let mut usage_obj = json!({
         "output_tokens": state.total_output_tokens
     });
-    if state.total_input_tokens > 0 {
+    if state.total_input_tokens > 0 || state.cache_read_input_tokens > 0 {
         usage_obj["input_tokens"] = json!(state.total_input_tokens);
+    }
+    if state.cache_read_input_tokens > 0 {
+        usage_obj["cache_read_input_tokens"] = json!(state.cache_read_input_tokens);
     }
     events.push(format!(
         "event: message_delta\ndata: {}\n\n",
@@ -731,10 +752,19 @@ pub fn parse_anthropic_event_to_openai_chunks_with_state(
             if let Some(usage) = val.get("usage") {
                 let out_tokens = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
                 let in_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let cache_read = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let cache_create = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let prompt_tokens = in_tokens + cache_read + cache_create;
                 chunk["usage"] = json!({
-                    "prompt_tokens": in_tokens,
+                    "prompt_tokens": prompt_tokens,
                     "completion_tokens": out_tokens,
-                    "total_tokens": in_tokens + out_tokens
+                    "total_tokens": prompt_tokens + out_tokens
                 });
             }
             chunks.push(format!("data: {}\n\n", chunk));
@@ -995,6 +1025,26 @@ mod tests {
         assert!(all_o.contains(r#""completion_tokens":15"#));
         assert!(all_o.contains(r#""total_tokens":70"#));
         assert!(all_o.contains("[DONE]"));
+    }
+
+    #[test]
+    fn test_gemini_stream_cached_tokens_mapping_and_openai_roundtrip() {
+        let mut state = SseState::new();
+        let chunk = r#"data: {"candidates":[{"content":{"parts":[{"text":"Done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":50000,"cachedContentTokenCount":42000,"candidatesTokenCount":300}}"#;
+        let events = parse_gemini_chunk_to_anthropic_events(chunk, &mut state, "req-cache", "gemini-4-hydrogen-high");
+        let all_a = events.concat();
+        assert!(all_a.contains(r#""input_tokens":8000"#));
+        assert!(all_a.contains(r#""cache_read_input_tokens":42000"#));
+        assert!(all_a.contains(r#""output_tokens":300"#));
+
+        let mut oai_chunks = Vec::new();
+        for evt in &events {
+            oai_chunks.extend(parse_anthropic_event_to_openai_chunks(evt, "req-cache", "gemini-4-hydrogen-high"));
+        }
+        let all_o = oai_chunks.concat();
+        assert!(all_o.contains(r#""prompt_tokens":50000"#));
+        assert!(all_o.contains(r#""completion_tokens":300"#));
+        assert!(all_o.contains(r#""total_tokens":50300"#));
     }
 
     #[test]

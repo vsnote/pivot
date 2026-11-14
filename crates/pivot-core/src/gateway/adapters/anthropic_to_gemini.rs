@@ -193,6 +193,92 @@ pub fn sanitize_gemini_schema(value: &mut Value) {
     }
 }
 
+/// 将 Anthropic image 内容块解析为 (字段名, payload)：("inlineData", {...}) 或 ("fileData", {...})
+fn parse_anthropic_image_entry(block: &Value) -> Option<(&'static str, Value)> {
+    let source = block.get("source")?;
+    let source_type = source.get("type").and_then(Value::as_str).unwrap_or("");
+    match source_type {
+        "base64" => {
+            let data = source.get("data").and_then(Value::as_str)?;
+            if data.is_empty() {
+                return None;
+            }
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("image/png");
+            Some((
+                "inlineData",
+                json!({
+                    "mimeType": media_type,
+                    "data": data
+                }),
+            ))
+        }
+        "url" => {
+            let url = source.get("url").and_then(Value::as_str)?;
+            if url.is_empty() {
+                return None;
+            }
+            // 兼容将 data URI 放入 source.url 的客户端写法
+            if let Some(rest) = url.strip_prefix("data:") {
+                if let Some((mime, b64)) = rest.split_once(";base64,") {
+                    if !b64.is_empty() {
+                        let media_type = if mime.is_empty() { "image/png" } else { mime };
+                        return Some((
+                            "inlineData",
+                            json!({
+                                "mimeType": media_type,
+                                "data": b64
+                            }),
+                        ));
+                    }
+                }
+            }
+            let mime_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    let lower = url.to_ascii_lowercase();
+                    if lower.contains(".png") {
+                        "image/png"
+                    } else if lower.contains(".webp") {
+                        "image/webp"
+                    } else if lower.contains(".gif") {
+                        "image/gif"
+                    } else {
+                        "image/jpeg"
+                    }
+                });
+            Some((
+                "fileData",
+                json!({
+                    "mimeType": mime_type,
+                    "fileUri": url
+                }),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn anthropic_image_block_to_gemini_part(block: &Value) -> Option<GeminiPart> {
+    let (field, payload) = parse_anthropic_image_entry(block)?;
+    match field {
+        "inlineData" => Some(GeminiPart {
+            inline_data: Some(payload),
+            ..Default::default()
+        }),
+        "fileData" => Some(GeminiPart {
+            file_data: Some(payload),
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
 pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiRequest {
     // 预先建立 tool_use_id -> tool_name 映射，确保 tool_result 发送给 Gemini 时匹配真实函数名
     let mut tool_id_to_name: HashMap<String, String> = HashMap::new();
@@ -225,9 +311,7 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
             Value::String(s) => {
                 parts.push(GeminiPart {
                     text: Some(s.clone()),
-                    function_call: None,
-                    function_response: None,
-                    thought_signature: None,
+                    ..Default::default()
                 });
             }
             Value::Array(blocks) => {
@@ -238,10 +322,13 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                             if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
                                 parts.push(GeminiPart {
                                     text: Some(t.to_string()),
-                                    function_call: None,
-                                    function_response: None,
-                                    thought_signature: None,
+                                    ..Default::default()
                                 });
+                            }
+                        }
+                        "image" => {
+                            if let Some(part) = anthropic_image_block_to_gemini_part(block) {
+                                parts.push(part);
                             }
                         }
                         "tool_use" => {
@@ -271,20 +358,51 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                                 .unwrap_or_else(|| "skip_thought_signature_validator".to_string());
 
                             parts.push(GeminiPart {
-                                text: None,
                                 function_call: Some(json!({
                                     "name": name,
                                     "args": args,
                                     "id": final_id
                                 })),
-                                function_response: None,
                                 thought_signature: Some(sig),
+                                ..Default::default()
                             });
                         }
                         "tool_result" => {
                             let content_val = block.get("content");
+                            let mut fr_parts: Vec<Value> = Vec::new();
                             let res_text = match content_val {
                                 Some(Value::String(s)) => s.clone(),
+                                Some(Value::Array(arr)) => {
+                                    let mut text_segments = Vec::new();
+                                    for item in arr {
+                                        let item_type = item
+                                            .get("type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        if item_type == "image" {
+                                            // Gemini 要求工具返回的图片必须嵌套在 functionResponse.parts 内，不能并列放在同条 user turns 中
+                                            if let Some((field, payload)) =
+                                                parse_anthropic_image_entry(item)
+                                            {
+                                                fr_parts.push(json!({ field: payload }));
+                                            }
+                                        } else if item_type == "text" {
+                                            if let Some(t) =
+                                                item.get("text").and_then(|v| v.as_str())
+                                            {
+                                                text_segments.push(t.to_string());
+                                            }
+                                        } else {
+                                            text_segments.push(item.to_string());
+                                        }
+                                    }
+                                    let joined = text_segments.join("\n");
+                                    if joined.is_empty() && !fr_parts.is_empty() {
+                                        "Image loaded.".to_string()
+                                    } else {
+                                        joined
+                                    }
+                                }
                                 Some(other) => other.to_string(),
                                 None => "".to_string(),
                             };
@@ -302,12 +420,13 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
                             if !tool_id.is_empty() {
                                 fr_val["id"] = json!(tool_id);
                             }
+                            if !fr_parts.is_empty() {
+                                fr_val["parts"] = Value::Array(fr_parts);
+                            }
 
                             parts.push(GeminiPart {
-                                text: None,
-                                function_call: None,
                                 function_response: Some(fr_val),
-                                thought_signature: None,
+                                ..Default::default()
                             });
                         }
                         _ => {}
@@ -351,9 +470,7 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
             role: "user".to_string(),
             parts: vec![GeminiPart {
                 text: Some(text),
-                function_call: None,
-                function_response: None,
-                thought_signature: None,
+                ..Default::default()
             }],
         })
     });
@@ -473,14 +590,19 @@ pub fn convert_gemini_resp_to_anthropic(
     let usage = resp
         .usage_metadata
         .as_ref()
-        .map(|u| AnthropicUsage {
-            input_tokens: u.prompt_token_count.unwrap_or(0),
-            output_tokens: u.candidates_token_count.unwrap_or(0),
+        .map(|u| {
+            // Gemini 的 promptTokenCount 包含 cachedContentTokenCount，
+            // 而 Claude Code 按 input_tokens + cache_read_input_tokens 计算总上下文，须扣除缓存避免重复统计
+            let prompt = u.prompt_token_count.unwrap_or(0);
+            let cached = u.cached_content_token_count.unwrap_or(0);
+            AnthropicUsage {
+                input_tokens: prompt.saturating_sub(cached),
+                output_tokens: u.candidates_token_count.unwrap_or(0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: if cached > 0 { Some(cached) } else { None },
+            }
         })
-        .unwrap_or(AnthropicUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-        });
+        .unwrap_or_default();
 
     AnthropicResponse {
         id: format!("msg_{}", uuid::Uuid::new_v4()),
@@ -797,5 +919,107 @@ mod tests {
         let thinking_config = gen_config.get("thinkingConfig").expect("should have thinkingConfig");
         assert_eq!(thinking_config["thinkingBudget"], 4000);
         assert_eq!(gen_config["maxOutputTokens"], 6048);
+    }
+
+    #[test]
+    fn test_anthropic_image_blocks_and_tool_result_multimodal_conversion() {
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let req = AnthropicMessageRequest {
+            model: "gemini-4-hydrogen-high".to_string(),
+            messages: vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: json!([
+                        { "type": "text", "text": "Inspect this:" },
+                        {
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": "image/png", "data": b64 }
+                        },
+                        {
+                            "type": "image",
+                            "source": { "type": "url", "url": "https://example.com/a.jpg" }
+                        }
+                    ]),
+                },
+                AnthropicMessage {
+                    role: "assistant".to_string(),
+                    content: json!([{
+                        "type": "tool_use",
+                        "id": "tool_img_1",
+                        "name": "Read",
+                        "input": { "file_path": "/tmp/test.png" }
+                    }]),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: json!([{
+                        "type": "tool_result",
+                        "tool_use_id": "tool_img_1",
+                        "content": [
+                            { "type": "text", "text": "Read /tmp/test.png" },
+                            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": b64 } }
+                        ]
+                    }]),
+                },
+            ],
+            system: None,
+            max_tokens: Some(1024),
+            temperature: None,
+            stream: None,
+            metadata: None,
+            thinking: None,
+            tool_choice: None,
+            tools: None,
+        };
+
+        let gemini_req = convert_anthropic_req_to_gemini(&req);
+        assert_eq!(gemini_req.contents.len(), 3);
+
+        // 1. 顶层 user 消息应包含 inlineData 和 fileData，且不包含纯文本 base64
+        let user_parts = &gemini_req.contents[0].parts;
+        assert_eq!(user_parts.len(), 3);
+        assert_eq!(user_parts[1].inline_data.as_ref().unwrap()["mimeType"], "image/png");
+        assert_eq!(user_parts[1].inline_data.as_ref().unwrap()["data"], b64);
+        assert_eq!(user_parts[2].file_data.as_ref().unwrap()["fileUri"], "https://example.com/a.jpg");
+
+        // 2. tool_result 不得把 base64 序列化进 response.result，也不能在同条 user turns 并列放 inlineData，
+        // 必须嵌套进 functionResponse.parts
+        let tool_turn = &gemini_req.contents[2];
+        assert_eq!(tool_turn.parts.len(), 1);
+        assert!(tool_turn.parts[0].inline_data.is_none());
+        let fr = tool_turn.parts[0].function_response.as_ref().unwrap();
+        assert_eq!(fr["name"], "Read");
+        assert_eq!(fr["response"]["result"], "Read /tmp/test.png");
+        assert!(!fr["response"]["result"].as_str().unwrap().contains(b64));
+        assert_eq!(fr["parts"][0]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(fr["parts"][0]["inlineData"]["data"], b64);
+    }
+
+    #[test]
+    fn test_gemini_resp_cached_tokens_mapping() {
+        let resp = GeminiResponse {
+            candidates: Some(vec![GeminiCandidate {
+                content: Some(GeminiContent {
+                    role: "model".to_string(),
+                    parts: vec![GeminiPart {
+                        text: Some("ok".to_string()),
+                        ..Default::default()
+                    }],
+                }),
+                finish_reason: Some("STOP".to_string()),
+            }]),
+            usage_metadata: Some(GeminiUsageMetadata {
+                prompt_token_count: Some(50000),
+                candidates_token_count: Some(200),
+                total_token_count: Some(50200),
+                cached_content_token_count: Some(42000),
+            }),
+        };
+
+        let ant = convert_gemini_resp_to_anthropic(&resp, "gemini-4-hydrogen-high");
+        assert_eq!(ant.usage.input_tokens, 8000);
+        assert_eq!(ant.usage.output_tokens, 200);
+        assert_eq!(ant.usage.cache_read_input_tokens, Some(42000));
+        assert_eq!(ant.usage.cache_creation_input_tokens, None);
     }
 }
