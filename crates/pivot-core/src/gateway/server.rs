@@ -1,7 +1,7 @@
 use crate::db::{Database, LogAttempt, Provider, RequestLog};
 use crate::gateway::adapters::{
     anthropic_to_gemini, anthropic_to_openai, finish_gemini_stream, finish_openai_stream,
-    openai_to_anthropic, parse_anthropic_event_to_openai_chunks_with_state,
+    gemini_to_openai, openai_to_anthropic, parse_anthropic_event_to_openai_chunks_with_state,
     parse_gemini_chunk_to_anthropic_events, parse_openai_chunk_to_anthropic_events, responses,
     AnthropicToOpenAiSseState, SseLineBuffer, SseState,
 };
@@ -71,67 +71,245 @@ fn estimate_text_tokens(text: &str) -> u32 {
     tokens.max(1)
 }
 
-fn estimate_anthropic_req_prompt_tokens(req: &AnthropicMessageRequest) -> u32 {
+fn estimate_text_tokens_conservative(text: &str) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut cjk_count = 0usize;
+    let mut code_sym_count = 0usize;
+    let mut ascii_count = 0usize;
+    let mut other_mb_count = 0usize;
+    for c in text.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{3400}'..='\u{4dbf}').contains(&c)
+            || ('\u{3000}'..='\u{303f}').contains(&c)
+            || ('\u{ff00}'..='\u{ffef}').contains(&c)
+        {
+            cjk_count += 1;
+        } else if matches!(
+            c,
+            '{' | '}' | '[' | ']' | '"' | ':' | ',' | '\\' | '/' | ';' | '(' | ')' | '<' | '>' | '=' | '\n' | '\t'
+        ) {
+            code_sym_count += 1;
+        } else if c.is_ascii() {
+            ascii_count += 1;
+        } else {
+            other_mb_count += 1;
+        }
+    }
+    let tokens = (cjk_count as f64 * 1.35
+        + code_sym_count as f64 * 0.45
+        + ascii_count as f64 * 0.30
+        + other_mb_count as f64 * 1.5)
+        .ceil() as u32;
+    tokens.max(1)
+}
+
+fn estimate_anthropic_req_tokens_with(
+    req: &AnthropicMessageRequest,
+    text_fn: fn(&str) -> u32,
+    image_tokens: u32,
+) -> u32 {
     let mut total: u32 = 20;
     if let Some(ref sys) = req.system {
         match sys {
-            Value::String(s) => total += estimate_text_tokens(s),
+            Value::String(s) => total = total.saturating_add(text_fn(s)),
             Value::Array(arr) => {
                 for item in arr {
                     if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                        total += estimate_text_tokens(t);
+                        total = total.saturating_add(text_fn(t));
                     }
                 }
             }
-            _ => total += estimate_text_tokens(&sys.to_string()),
+            _ => total = total.saturating_add(text_fn(&sys.to_string())),
         }
     }
     for m in &req.messages {
-        total += 4;
+        total = total.saturating_add(4);
         match &m.content {
-            Value::String(s) => total += estimate_text_tokens(s),
+            Value::String(s) => total = total.saturating_add(text_fn(s)),
             Value::Array(arr) => {
                 for item in arr {
                     let block_type = item.get("type").and_then(Value::as_str).unwrap_or("");
                     if block_type == "image" {
-                        total += 1000;
+                        total = total.saturating_add(image_tokens);
                     } else if let Some(t) = item.get("text").and_then(Value::as_str) {
-                        total += estimate_text_tokens(t);
+                        total = total.saturating_add(text_fn(t));
                     } else if let Some(thinking) = item.get("thinking").and_then(Value::as_str) {
-                        total += estimate_text_tokens(thinking);
+                        total = total.saturating_add(text_fn(thinking));
                     } else if let Some(input) = item.get("input") {
-                        total += estimate_text_tokens(&input.to_string());
+                        total = total.saturating_add(text_fn(&input.to_string()));
                     } else if let Some(content) = item.get("content") {
                         match content {
-                            Value::String(s) => total += estimate_text_tokens(s),
+                            Value::String(s) => total = total.saturating_add(text_fn(s)),
                             Value::Array(sub_arr) => {
                                 for sub in sub_arr {
                                     if sub.get("type").and_then(Value::as_str) == Some("image") {
-                                        total += 1000;
+                                        total = total.saturating_add(image_tokens);
                                     } else if let Some(st) = sub.get("text").and_then(Value::as_str) {
-                                        total += estimate_text_tokens(st);
+                                        total = total.saturating_add(text_fn(st));
                                     } else {
-                                        total += estimate_text_tokens(&sub.to_string());
+                                        total = total.saturating_add(text_fn(&sub.to_string()));
                                     }
                                 }
                             }
-                            _ => total += estimate_text_tokens(&content.to_string()),
+                            _ => total = total.saturating_add(text_fn(&content.to_string())),
                         }
                     } else {
-                        total += estimate_text_tokens(&item.to_string());
+                        total = total.saturating_add(text_fn(&item.to_string()));
                     }
                 }
             }
-            _ => total += estimate_text_tokens(&m.content.to_string()),
+            _ => total = total.saturating_add(text_fn(&m.content.to_string())),
         }
     }
     if let Some(ref tools) = req.tools {
         for t in tools {
-            total += 15 + estimate_text_tokens(&t.name) + estimate_text_tokens(t.description.as_deref().unwrap_or(""));
-            total += estimate_text_tokens(&t.input_schema.to_string());
+            total = total
+                .saturating_add(15)
+                .saturating_add(text_fn(&t.name))
+                .saturating_add(text_fn(t.description.as_deref().unwrap_or("")))
+                .saturating_add(text_fn(&t.input_schema.to_string()));
         }
     }
     total
+}
+
+fn estimate_anthropic_req_prompt_tokens(req: &AnthropicMessageRequest) -> u32 {
+    estimate_anthropic_req_tokens_with(req, estimate_text_tokens, 1000)
+}
+
+fn estimate_anthropic_count_tokens_fallback(
+    req: &AnthropicMessageRequest,
+    target_model: &str,
+) -> u32 {
+    let base = estimate_anthropic_req_tokens_with(req, estimate_text_tokens_conservative, 1200);
+    if target_model.to_lowercase().contains("gemini") {
+        ((base as f64) * 1.12).ceil() as u32
+    } else {
+        base
+    }
+}
+
+fn estimate_gemini_req_tokens_fallback(req_body: &Value, target_model: &str) -> u32 {
+    let mut total: u32 = 20;
+    let estimate_parts = |parts: &[Value], acc: &mut u32| {
+        for part in parts {
+            if let Some(t) = part.get("text").and_then(Value::as_str) {
+                *acc = acc.saturating_add(estimate_text_tokens_conservative(t));
+            } else if part.get("inlineData").is_some() || part.get("inline_data").is_some() {
+                *acc = acc.saturating_add(1200);
+            } else {
+                *acc = acc.saturating_add(estimate_text_tokens_conservative(&part.to_string()));
+            }
+        }
+    };
+
+    if let Some(sys) = req_body
+        .get("systemInstruction")
+        .or_else(|| req_body.get("system_instruction"))
+    {
+        if let Some(s) = sys.as_str() {
+            total = total.saturating_add(estimate_text_tokens_conservative(s));
+        } else if let Some(parts) = sys.get("parts").and_then(Value::as_array) {
+            estimate_parts(parts, &mut total);
+        }
+    }
+
+    if let Some(contents) = req_body.get("contents").and_then(Value::as_array) {
+        for c in contents {
+            total = total.saturating_add(4);
+            if let Some(parts) = c.get("parts").and_then(Value::as_array) {
+                estimate_parts(parts, &mut total);
+            }
+        }
+    }
+
+    if let Some(tools) = req_body.get("tools").and_then(Value::as_array) {
+        for t in tools {
+            total = total.saturating_add(estimate_text_tokens_conservative(&t.to_string()));
+        }
+    }
+
+    if target_model.to_lowercase().contains("gemini") {
+        ((total as f64) * 1.12).ceil() as u32
+    } else {
+        total
+    }
+}
+
+fn sanitize_gemini_tools_array(tools: &mut [Value]) {
+    for tool in tools {
+        let decls_opt = if tool.get("functionDeclarations").is_some() {
+            tool.get_mut("functionDeclarations")
+                .and_then(Value::as_array_mut)
+        } else {
+            tool.get_mut("function_declarations")
+                .and_then(Value::as_array_mut)
+        };
+        if let Some(decls) = decls_opt {
+            for decl in decls {
+                if decl.get("parameters").is_none() {
+                    if let Some(alt_schema) = decl
+                        .as_object_mut()
+                        .and_then(|m| m.remove("parametersJsonSchema").or_else(|| m.remove("parameters_json_schema")))
+                    {
+                        decl["parameters"] = alt_schema;
+                    }
+                }
+                if let Some(params) = decl.get_mut("parameters") {
+                    anthropic_to_gemini::sanitize_gemini_schema(params);
+                }
+            }
+        }
+    }
+}
+
+/// 按 Google 官方 / Antigravity v1internal Protobuf 约定构造 `:countTokens` 请求体：
+/// 内层 `CountTokensRequest` 仅允许 `model`、`contents`、`systemInstruction`、`tools`，不含 `generationConfig` / `toolConfig`；
+/// 订阅池外层仅包含 `{ "request": inner }`，标准 Gemini API 包含 `{ "generateContentRequest": inner }`。
+fn build_gemini_count_tokens_payload(
+    gemini_req_val: &Value,
+    target_model: &str,
+    is_subscription_pool: bool,
+) -> Value {
+    let model_path = format!("models/{}", target_model.trim_start_matches("models/"));
+    let contents = gemini_req_val
+        .get("contents")
+        .and_then(Value::as_array)
+        .filter(|arr| !arr.is_empty())
+        .map(|arr| Value::Array(arr.clone()))
+        .unwrap_or_else(|| json!([{ "role": "user", "parts": [{ "text": " " }] }]));
+
+    let mut inner = json!({
+        "model": model_path,
+        "contents": contents
+    });
+
+    if let Some(sys) = gemini_req_val
+        .get("systemInstruction")
+        .or_else(|| gemini_req_val.get("system_instruction"))
+    {
+        if !sys.is_null() {
+            inner["systemInstruction"] = sys.clone();
+        }
+    }
+
+    if let Some(tools) = gemini_req_val
+        .get("tools")
+        .and_then(Value::as_array)
+        .filter(|arr| !arr.is_empty())
+    {
+        let mut sanitized_tools = tools.clone();
+        sanitize_gemini_tools_array(&mut sanitized_tools);
+        inner["tools"] = Value::Array(sanitized_tools);
+    }
+
+    if is_subscription_pool {
+        json!({ "request": inner })
+    } else {
+        json!({ "generateContentRequest": inner })
+    }
 }
 
 fn estimate_openai_req_prompt_tokens(req: &OpenAIChatRequest) -> u32 {
@@ -518,6 +696,7 @@ pub fn create_gateway_router(state: GatewayState) -> Router {
         .route("/v1/health", get(health_check))
         .route("/v1/models", get(list_models))
         .route("/v1/messages", post(handle_messages))
+        .route("/v1/messages/count_tokens", post(handle_messages_count_tokens))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/v1/responses", post(handle_responses).get(handle_responses_get))
         .route("/v1beta/models", get(handle_gemini_list_models))
@@ -978,6 +1157,137 @@ async fn handle_messages(
         .into_response()
 }
 
+/// Handler for Anthropic `/v1/messages/count_tokens` (used by Claude Code for window/compact estimation).
+/// Does not write request logs or pollute total token stats; falls back to conservative local estimate
+/// when an upstream provider does not expose or fails `countTokens`.
+async fn handle_messages_count_tokens(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<AnthropicMessageRequest>,
+) -> Response {
+    let req_id = uuid::Uuid::new_v4().to_string();
+    let client_type = detect_client_type(&headers, "claude_code");
+    let session_id = extract_session_id(&headers);
+    let client_key = extract_client_api_key(&headers);
+    let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
+    let providers = state.db.get_providers().unwrap_or_default();
+
+    let route_match = match state
+        .router
+        .resolve_route(&req.model, session_id.as_deref(), &providers)
+    {
+        Ok(rm) => rm,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "type": "error",
+                    "error": { "type": "routing_error", "message": err }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let cand = &route_match.primary;
+    let timeout = Duration::from_secs(15);
+    let effective_key = cand.api_key.as_deref().or(client_key.as_deref());
+    let forward_ua = resolve_forward_user_agent(client_ua, &client_type);
+    let session_hint = req.messages.first().map(|m| format!("{:?}", m.content));
+    let client = &state.http_client;
+
+    let input_tokens: u64 = match cand.provider.protocol.as_str() {
+        "anthropic" => {
+            let mut body_val = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = body_val.as_object_mut() {
+                obj.insert("model".to_string(), json!(cand.target_model));
+                obj.remove("max_tokens");
+                obj.remove("stream");
+                obj.remove("temperature");
+                obj.remove("metadata");
+            }
+            let url = resolve_upstream_endpoint(&cand.provider.base_url, "/messages/count_tokens");
+            let mut req_builder = client
+                .post(&url)
+                .timeout(timeout)
+                .header("user-agent", &forward_ua)
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01");
+            if let Some(beta) = headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
+                req_builder = req_builder.header("anthropic-beta", beta);
+            }
+            req_builder = apply_upstream_headers(
+                req_builder,
+                &cand.provider,
+                &headers,
+                session_hint.as_deref(),
+                &req_id,
+            );
+            if let Some(key) = effective_key {
+                req_builder = req_builder
+                    .header("x-api-key", key)
+                    .header("authorization", format!("Bearer {}", key));
+            }
+
+            let upstream_count = match req_builder.json(&body_val).send().await {
+                Ok(res) if res.status().is_success() => res
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("input_tokens").and_then(Value::as_u64))
+                    .filter(|&n| n > 0),
+                _ => None,
+            };
+            upstream_count.unwrap_or_else(|| {
+                estimate_anthropic_count_tokens_fallback(&req, &cand.target_model) as u64
+            })
+        }
+        "gemini" => {
+            let gemini_req = anthropic_to_gemini::convert_anthropic_req_to_gemini(&req);
+            let gemini_val = serde_json::to_value(&gemini_req).unwrap_or_else(|_| json!({}));
+            let is_subscription_pool =
+                cand.provider.auth_type.as_deref() == Some("subscription_pool");
+            let payload =
+                build_gemini_count_tokens_payload(&gemini_val, &cand.target_model, is_subscription_pool);
+
+            let upstream_count = match send_gemini_upstream_request(
+                &state,
+                cand,
+                &payload,
+                is_subscription_pool,
+                false,
+                true,
+                timeout,
+                &forward_ua,
+                &headers,
+                session_hint.as_deref(),
+                &req_id,
+                effective_key,
+            )
+            .await
+            {
+                Ok(res) => res
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .and_then(|raw| {
+                        raw.get("totalTokens")
+                            .or_else(|| raw.get("response").and_then(|r| r.get("totalTokens")))
+                            .and_then(Value::as_u64)
+                    })
+                    .filter(|&n| n > 0),
+                Err(_) => None,
+            };
+            upstream_count.unwrap_or_else(|| {
+                estimate_anthropic_count_tokens_fallback(&req, &cand.target_model) as u64
+            })
+        }
+        _ => estimate_anthropic_count_tokens_fallback(&req, &cand.target_model) as u64,
+    };
+
+    Json(json!({ "input_tokens": input_tokens })).into_response()
+}
+
 fn resolve_upstream_endpoint(base_url: &str, suffix: &str) -> String {
     let clean = base_url.trim_end_matches('/');
     if clean.ends_with(suffix) {
@@ -1116,10 +1426,7 @@ async fn send_gemini_upstream_request(
         builder = apply_upstream_headers(builder, &cand.provider, headers, session_hint, req_id);
         builder
             .header("authorization", format!("Bearer {}", token))
-            .header(
-                "user-agent",
-                "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
-            )
+            .header("user-agent", crate::oauth::antigravity_user_agent())
             .json(req_body_val)
             .send()
     };
@@ -1212,6 +1519,7 @@ async fn send_gemini_upstream_request(
         }
 
         if res.status().is_success() {
+            crate::oauth::clear_account_model_soft_backoff(&account.id, &cand.target_model);
             return Ok(res);
         }
 
@@ -1226,7 +1534,7 @@ async fn send_gemini_upstream_request(
             continue;
         }
 
-        if crate::oauth::is_model_unsupported_for_account(status, &text) {
+        if !is_count_tokens && crate::oauth::is_model_unsupported_for_account(status, &text) {
             tracing::warn!(
                 "Subscription account {} does not support model '{}', pruning and failing over...",
                 account.id,
@@ -1244,14 +1552,20 @@ async fn send_gemini_upstream_request(
             continue;
         }
 
+        if is_count_tokens {
+            return Err((status, text));
+        }
+
         let is_capacity_or_rate = status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::SERVICE_UNAVAILABLE
             || text.contains("MODEL_CAPACITY_EXHAUSTED");
 
         if status == StatusCode::TOO_MANY_REQUESTS {
-            crate::oauth::mark_account_family_cooldown(&account.id, &cand.target_model, 300);
+            let backoff = crate::oauth::parse_upstream_retry_backoff_secs(&text, 15, 30);
+            crate::oauth::mark_account_model_soft_backoff(&account.id, &cand.target_model, backoff);
         } else if status == StatusCode::SERVICE_UNAVAILABLE || text.contains("MODEL_CAPACITY_EXHAUSTED") {
-            crate::oauth::mark_account_family_cooldown(&account.id, &cand.target_model, 60);
+            let backoff = crate::oauth::parse_upstream_retry_backoff_secs(&text, 10, 30);
+            crate::oauth::mark_account_model_soft_backoff(&account.id, &cand.target_model, backoff);
         }
 
         if is_capacity_or_rate && attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
@@ -2564,6 +2878,7 @@ async fn dispatch_chatgpt_request(
         }
 
         if res.status().is_success() {
+            crate::oauth::clear_account_model_soft_backoff(&account.id, &cand.target_model);
             res_opt = Some(res);
             break;
         }
@@ -2597,14 +2912,29 @@ async fn dispatch_chatgpt_request(
         }
 
         if status == StatusCode::TOO_MANY_REQUESTS {
-            crate::oauth::mark_account_cooldown(&state.db, &account.id, 300);
+            let lower = text.to_lowercase();
+            if lower.contains("usage_limit_reached") || lower.contains("quota_exceeded") {
+                crate::oauth::mark_account_cooldown(&state.db, &account.id, 300);
+            } else {
+                let backoff = crate::oauth::parse_upstream_retry_backoff_secs(&text, 15, 30);
+                crate::oauth::mark_account_model_soft_backoff(
+                    &account.id,
+                    &cand.target_model,
+                    backoff,
+                );
+            }
             if attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
                 excluded_accounts.push(account.id.clone());
                 last_upstream_err = Some((status, text));
                 continue;
             }
         } else if status == StatusCode::SERVICE_UNAVAILABLE {
-            crate::oauth::mark_account_cooldown(&state.db, &account.id, 60);
+            let backoff = crate::oauth::parse_upstream_retry_backoff_secs(&text, 10, 30);
+            crate::oauth::mark_account_model_soft_backoff(
+                &account.id,
+                &cand.target_model,
+                backoff,
+            );
             if attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
                 excluded_accounts.push(account.id.clone());
                 last_upstream_err = Some((status, text));
@@ -3450,8 +3780,6 @@ async fn handle_gemini_generate_content(
 ) -> Response {
     let start_time = Instant::now();
     let req_id = uuid::Uuid::new_v4().to_string();
-    state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
-    state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
     let clean_action = action.trim_start_matches('/');
     let model_and_method = clean_action.strip_prefix("models/").unwrap_or(clean_action);
@@ -3459,8 +3787,15 @@ async fn handle_gemini_generate_content(
         Some((m, method)) => (m, method),
         None => (model_and_method, "generateContent"),
     };
-    let is_stream = method.contains("streamGenerateContent")
-        || query_params.get("alt").map(|s| s.as_str()) == Some("sse");
+    let is_count_tokens = method == "countTokens";
+    let is_stream = !is_count_tokens
+        && (method.contains("streamGenerateContent")
+            || query_params.get("alt").map(|s| s.as_str()) == Some("sse"));
+
+    state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
+    if !is_count_tokens {
+        state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+    }
 
     let client_key = headers
         .get("x-goog-api-key")
@@ -3486,29 +3821,31 @@ async fn handle_gemini_generate_content(
         Ok(rm) => rm,
         Err(err) => {
             state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
-            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
-            log_request(
-                &state,
-                RequestLog {
-                    id: req_id.clone(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    method: "POST".to_string(),
-                    path: format!("/models/{}", action),
-                    client_type: client_type.clone(),
-                    incoming_model: model.to_string(),
-                    routed_provider_id: "none".to_string(),
-                    routed_provider_name: None,
-                    routed_model: String::new(),
-                    status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
-                    latency_ms: start_time.elapsed().as_millis() as i64,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    error_message: Some(err.clone()),
-                    is_stream,
-                    fallback_used: false,
-                    attempts: vec![],
-                },
-            );
+            if !is_count_tokens {
+                state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id.clone(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: format!("/models/{}", action),
+                        client_type: client_type.clone(),
+                        incoming_model: model.to_string(),
+                        routed_provider_id: "none".to_string(),
+                        routed_provider_name: None,
+                        routed_model: String::new(),
+                        status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
+                        latency_ms: start_time.elapsed().as_millis() as i64,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        error_message: Some(err.clone()),
+                        is_stream,
+                        fallback_used: false,
+                        attempts: vec![],
+                    },
+                );
+            }
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({
@@ -3559,43 +3896,45 @@ async fn handle_gemini_generate_content(
         match resp_result {
             Ok(result) => {
                 let latency_ms = start_time.elapsed().as_millis() as i64;
-                attempts.push(attempt(
-                    cand,
-                    StatusCode::OK,
-                    None,
-                    attempt_started.elapsed().as_millis() as i64,
-                ));
                 state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
-                state
-                    .stats
-                    .total_prompt_tokens
-                    .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
-                state
-                    .stats
-                    .total_completion_tokens
-                    .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
+                if !is_count_tokens {
+                    attempts.push(attempt(
+                        cand,
+                        StatusCode::OK,
+                        None,
+                        attempt_started.elapsed().as_millis() as i64,
+                    ));
+                    state
+                        .stats
+                        .total_prompt_tokens
+                        .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
+                    state
+                        .stats
+                        .total_completion_tokens
+                        .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
 
-                let log = RequestLog {
-                    id: req_id,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    method: "POST".to_string(),
-                    path: format!("/models/{}", action),
-                    client_type,
-                    incoming_model: model.to_string(),
-                    routed_provider_id: cand.provider.id.clone(),
-                    routed_provider_name: Some(cand.provider.name.clone()),
-                    routed_model: cand.target_model.clone(),
-                    status_code: StatusCode::OK.as_u16() as i32,
-                    latency_ms,
-                    prompt_tokens: result.prompt_tokens as i32,
-                    completion_tokens: result.completion_tokens as i32,
-                    error_message: None,
-                    is_stream,
-                    fallback_used,
-                    attempts,
-                };
-                log_request(&state, log.clone());
-                emit_log_event(&state, &log);
+                    let log = RequestLog {
+                        id: req_id,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: format!("/models/{}", action),
+                        client_type,
+                        incoming_model: model.to_string(),
+                        routed_provider_id: cand.provider.id.clone(),
+                        routed_provider_name: Some(cand.provider.name.clone()),
+                        routed_model: cand.target_model.clone(),
+                        status_code: StatusCode::OK.as_u16() as i32,
+                        latency_ms,
+                        prompt_tokens: result.prompt_tokens as i32,
+                        completion_tokens: result.completion_tokens as i32,
+                        error_message: None,
+                        is_stream,
+                        fallback_used,
+                        attempts,
+                    };
+                    log_request(&state, log.clone());
+                    emit_log_event(&state, &log);
+                }
                 return result.response;
             }
             Err((status, err_text)) => {
@@ -3615,29 +3954,31 @@ async fn handle_gemini_generate_content(
     }
 
     state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
-    state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+    if !is_count_tokens {
+        state.stats.error_count.fetch_add(1, Ordering::Relaxed);
 
-    let log = RequestLog {
-        id: req_id,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        method: "POST".to_string(),
-        path: format!("/models/{}", action),
-        client_type,
-        incoming_model: model.to_string(),
-        routed_provider_id: candidates.first().map(|c| c.provider.id.clone()).unwrap_or_else(|| "none".to_string()),
-        routed_provider_name: candidates.first().map(|c| c.provider.name.clone()),
-        routed_model: candidates.first().map(|c| c.target_model.clone()).unwrap_or_default(),
-        status_code: last_status.as_u16() as i32,
-        latency_ms: start_time.elapsed().as_millis() as i64,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        error_message: Some(last_error.clone()),
-        is_stream,
-        fallback_used,
-        attempts,
-    };
-    log_request(&state, log.clone());
-    emit_log_event(&state, &log);
+        let log = RequestLog {
+            id: req_id,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: "POST".to_string(),
+            path: format!("/models/{}", action),
+            client_type,
+            incoming_model: model.to_string(),
+            routed_provider_id: candidates.first().map(|c| c.provider.id.clone()).unwrap_or_else(|| "none".to_string()),
+            routed_provider_name: candidates.first().map(|c| c.provider.name.clone()),
+            routed_model: candidates.first().map(|c| c.target_model.clone()).unwrap_or_default(),
+            status_code: last_status.as_u16() as i32,
+            latency_ms: start_time.elapsed().as_millis() as i64,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some(last_error.clone()),
+            is_stream,
+            fallback_used,
+            attempts,
+        };
+        log_request(&state, log.clone());
+        emit_log_event(&state, &log);
+    }
 
     (
         last_status,
@@ -3664,9 +4005,13 @@ async fn dispatch_gemini_request(
     client_type: &str,
     headers: &HeaderMap,
 ) -> Result<DispatchResult, (StatusCode, String)> {
-    let timeout = resolve_dispatch_timeout(cand, 0);
-    let forward_ua = resolve_forward_user_agent(client_ua, client_type);
     let is_count_tokens = method == "countTokens";
+    let timeout = if is_count_tokens {
+        Duration::from_secs(15)
+    } else {
+        resolve_dispatch_timeout(cand, 0)
+    };
+    let forward_ua = resolve_forward_user_agent(client_ua, client_type);
     let session_hint = req_body
         .get("contents")
         .and_then(|c| c.as_array())
@@ -3677,24 +4022,50 @@ async fn dispatch_gemini_request(
         "gemini" => {
             let mut sanitized_req = req_body.clone();
             if let Some(tools) = sanitized_req.get_mut("tools").and_then(Value::as_array_mut) {
-                for tool in tools {
-                    let decls_opt = if tool.get("functionDeclarations").is_some() {
-                        tool.get_mut("functionDeclarations").and_then(Value::as_array_mut)
-                    } else {
-                        tool.get_mut("function_declarations").and_then(Value::as_array_mut)
-                    };
-                    if let Some(decls) = decls_opt {
-                        for decl in decls {
-                            if let Some(params) = decl.get_mut("parameters") {
-                                anthropic_to_gemini::sanitize_gemini_schema(params);
-                            }
-                        }
-                    }
-                }
+                sanitize_gemini_tools_array(tools);
             }
 
             let is_subscription_pool =
                 cand.provider.auth_type.as_deref() == Some("subscription_pool");
+
+            if is_count_tokens {
+                let req_body_val = build_gemini_count_tokens_payload(
+                    &sanitized_req,
+                    &cand.target_model,
+                    is_subscription_pool,
+                );
+                let resp_val = match send_gemini_upstream_request(
+                    state,
+                    cand,
+                    &req_body_val,
+                    is_subscription_pool,
+                    false,
+                    true,
+                    timeout,
+                    &forward_ua,
+                    headers,
+                    session_hint.as_deref(),
+                    req_id,
+                    cand.api_key.as_deref().or(client_key),
+                )
+                .await
+                {
+                    Ok(res) => match res.json::<Value>().await {
+                        Ok(raw_val) => raw_val.get("response").unwrap_or(&raw_val).clone(),
+                        Err(_) => {
+                            json!({ "totalTokens": estimate_gemini_req_tokens_fallback(req_body, &cand.target_model) })
+                        }
+                    },
+                    Err(_) => {
+                        json!({ "totalTokens": estimate_gemini_req_tokens_fallback(req_body, &cand.target_model) })
+                    }
+                };
+                return Ok(DispatchResult {
+                    response: Json(resp_val).into_response(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                });
+            }
 
             let req_body_val = if is_subscription_pool {
                 json!({
@@ -3712,7 +4083,7 @@ async fn dispatch_gemini_request(
                 &req_body_val,
                 is_subscription_pool,
                 is_stream,
-                is_count_tokens,
+                false,
                 timeout,
                 &forward_ua,
                 headers,
@@ -3828,10 +4199,117 @@ async fn dispatch_gemini_request(
                 })
             }
         }
+        "openai" | "chatgpt" | "openrouter" | "ollama" | "anthropic" => {
+            if is_count_tokens {
+                return Ok(DispatchResult {
+                    response: Json(json!({
+                        "totalTokens": estimate_gemini_req_tokens_fallback(req_body, &cand.target_model)
+                    }))
+                    .into_response(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                });
+            }
+
+            let mut oai_req =
+                gemini_to_openai::convert_gemini_req_to_openai(req_body, &cand.target_model);
+            oai_req.stream = Some(is_stream);
+            if is_stream {
+                oai_req.stream_options = Some(json!({ "include_usage": true }));
+            }
+
+            let dispatch_res = dispatch_openai_request(
+                state,
+                &oai_req,
+                cand,
+                req_id,
+                is_stream,
+                client_key,
+                client_ua,
+                client_type,
+                headers,
+            )
+            .await?;
+
+            if is_stream {
+                let byte_stream = dispatch_res.response.into_body().into_data_stream();
+                let gemini_stream = stream! {
+                    let mut sse_state = gemini_to_openai::OpenAiToGeminiSseState::new();
+                    let mut sse_buf = SseLineBuffer::new();
+                    let mut stream_aborted = false;
+
+                    for await chunk_res in byte_stream {
+                        match chunk_res {
+                            Ok(bytes) => {
+                                for raw_line in sse_buf.push_and_read_lines(&bytes) {
+                                    let line = raw_line.trim();
+                                    if !line.is_empty() {
+                                        for ev in sse_state.process_line(line) {
+                                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                stream_aborted = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !stream_aborted {
+                        if let Some(raw_line) = sse_buf.finish() {
+                            let line = raw_line.trim();
+                            if !line.is_empty() {
+                                for ev in sse_state.process_line(line) {
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                                }
+                            }
+                        }
+                        for ev in sse_state.finish() {
+                            yield Ok::<_, std::io::Error>(axum::body::Bytes::from(ev));
+                        }
+                    }
+                };
+
+                Ok(DispatchResult {
+                    response: Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .header("connection", "keep-alive")
+                        .body(Body::from_stream(gemini_stream))
+                        .unwrap(),
+                    prompt_tokens: dispatch_res.prompt_tokens,
+                    completion_tokens: dispatch_res.completion_tokens,
+                })
+            } else {
+                let body_bytes =
+                    axum::body::to_bytes(dispatch_res.response.into_body(), 10 * 1024 * 1024)
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                format!("Failed to read upstream response body: {}", e),
+                            )
+                        })?;
+                let chat_json: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to parse upstream JSON response: {}", e),
+                    )
+                })?;
+                let gemini_val = gemini_to_openai::convert_openai_resp_to_gemini(&chat_json);
+                Ok(DispatchResult {
+                    response: Json(gemini_val).into_response(),
+                    prompt_tokens: dispatch_res.prompt_tokens,
+                    completion_tokens: dispatch_res.completion_tokens,
+                })
+            }
+        }
         _ => Err((
             StatusCode::BAD_GATEWAY,
             format!(
-                "Gemini endpoint currently only supports Gemini providers (got protocol {})",
+                "Gemini endpoint does not support provider protocol {}",
                 cand.provider.protocol
             ),
         )),
@@ -4388,5 +4866,65 @@ mod tests {
         });
         sanitize_openai_tool_parameters(&mut tool_invalid_req, "foo_tool");
         assert_eq!(tool_invalid_req["required"], json!(["foo"]));
+    }
+
+    #[test]
+    fn test_build_gemini_count_tokens_payload_shapes() {
+        let req_val = json!({
+            "systemInstruction": { "parts": [{ "text": "System prompt" }] },
+            "contents": [{ "role": "user", "parts": [{ "text": "Hello" }] }],
+            "tools": [{
+                "functionDeclarations": [{
+                    "name": "read",
+                    "parametersJsonSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": { "path": { "type": "string" } }
+                    }
+                }]
+            }],
+            "generationConfig": { "temperature": 0.3 },
+            "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } }
+        });
+
+        let pool_payload = build_gemini_count_tokens_payload(&req_val, "gemini-4-hydrogen-high", true);
+        assert!(pool_payload.get("project").is_none());
+        assert!(pool_payload.get("model").is_none());
+        let inner = &pool_payload["request"];
+        assert_eq!(inner["model"], "models/gemini-4-hydrogen-high");
+        assert!(inner.get("generationConfig").is_none());
+        assert!(inner.get("toolConfig").is_none());
+        let params = &inner["tools"][0]["functionDeclarations"][0]["parameters"];
+        assert!(params.get("$schema").is_none());
+        assert!(params.get("additionalProperties").is_none());
+
+        let std_payload = build_gemini_count_tokens_payload(&req_val, "gemini-2.5-pro", false);
+        assert!(std_payload.get("generateContentRequest").is_some());
+        assert_eq!(std_payload["generateContentRequest"]["model"], "models/gemini-2.5-pro");
+    }
+
+    #[test]
+    fn test_estimate_anthropic_count_tokens_fallback_margin() {
+        let req = AnthropicMessageRequest {
+            model: "gemini-4-hydrogen-high".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: json!("请分析这段代码：fn main() { println!(\"hello, world!\"); }"),
+            }],
+            system: Some(json!("系统提示")),
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            thinking: None,
+            metadata: None,
+        };
+
+        let gem_est = estimate_anthropic_count_tokens_fallback(&req, "gemini-4-hydrogen-high");
+        let claude_est = estimate_anthropic_count_tokens_fallback(&req, "claude-sonnet-4-6");
+        assert!(claude_est > 20);
+        assert!(gem_est > claude_est);
     }
 }
