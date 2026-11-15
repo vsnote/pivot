@@ -4560,6 +4560,7 @@ mod tests {
 
     #[test]
     fn test_resolve_forward_user_agent() {
+        let _lock = crate::lock_test_env();
         assert_eq!(
             resolve_forward_user_agent(Some("codex_exec/0.154.0 (Mac OS)"), "codex_cli"),
             "codex_exec/0.154.0 (Mac OS)"

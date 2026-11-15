@@ -3445,14 +3445,11 @@ fn atomic_write<P: AsRef<Path>>(path: P, content: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn repeated_enable_preserves_original_cli_configuration() {
-        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::lock_test_env();
         let home = std::env::temp_dir().join(format!(
             "pivot-interceptor-{}",
             SystemTime::now()
@@ -3750,7 +3747,7 @@ followUpQueueMode = "queue"
 
     #[test]
     fn test_detect_third_party_endpoint_and_conflict() {
-        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::lock_test_env();
         let home = std::env::temp_dir().join(format!(
             "pivot-conflict-test-{}",
             SystemTime::now()
@@ -3901,7 +3898,7 @@ followUpQueueMode = "queue"
 
     #[test]
     fn test_claude_settings_incremental_patch_preserves_new_user_configs() {
-        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::lock_test_env();
         let home = std::env::temp_dir().join(format!(
             "pivot-inc-patch-test-{}",
             SystemTime::now()
@@ -4144,6 +4141,7 @@ base_url = "https://api.other.com/v1"
 
     #[test]
     fn test_claude_code_syncs_and_restores_small_fast_and_haiku_models() {
+        let _lock = crate::lock_test_env();
         let home = std::env::temp_dir().join(format!(
             "pivot-claude-aux-test-{}",
             std::time::SystemTime::now()

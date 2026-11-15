@@ -101,3 +101,9 @@ pub fn start_gateway(
         });
     }
 }
+
+#[cfg(test)]
+pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
