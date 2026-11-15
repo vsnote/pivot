@@ -848,31 +848,51 @@ impl InterceptorManager {
             }
 
             // 捕获开启前的原始凭据与模型配置，便于关闭时无痕还原
-            let (orig_auth_token, orig_env_model, orig_top_model) =
-                if prev_backup.as_ref().and_then(|b| b.get("captured")).and_then(|v| v.as_bool()) == Some(true) {
-                    (
-                        prev_backup.as_ref().and_then(|b| b.get("orig_auth_token")).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                        prev_backup.as_ref().and_then(|b| b.get("orig_env_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                        prev_backup.as_ref().and_then(|b| b.get("orig_top_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    )
-                } else {
-                    let cur_token = settings_val
-                        .get("env")
-                        .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN"))
-                        .and_then(|t| t.as_str())
-                        .filter(|s| *s != "pivot")
-                        .map(|s| s.to_string());
-                    let cur_env_model = settings_val
-                        .get("env")
-                        .and_then(|e| e.get("ANTHROPIC_MODEL"))
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string());
-                    let cur_top_model = settings_val
-                        .get("model")
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string());
-                    (cur_token, cur_env_model, cur_top_model)
-                };
+            let (
+                orig_auth_token,
+                orig_env_model,
+                orig_top_model,
+                orig_small_fast_model,
+                orig_default_haiku_model,
+            ) = if prev_backup.as_ref().and_then(|b| b.get("captured")).and_then(|v| v.as_bool()) == Some(true) {
+                (
+                    prev_backup.as_ref().and_then(|b| b.get("orig_auth_token")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    prev_backup.as_ref().and_then(|b| b.get("orig_env_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    prev_backup.as_ref().and_then(|b| b.get("orig_top_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    prev_backup.as_ref().and_then(|b| b.get("orig_small_fast_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    prev_backup.as_ref().and_then(|b| b.get("orig_default_haiku_model")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                )
+            } else {
+                let env_obj = settings_val.get("env");
+                let cur_token = env_obj
+                    .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN"))
+                    .and_then(|t| t.as_str())
+                    .filter(|s| *s != "pivot")
+                    .map(|s| s.to_string());
+                let cur_env_model = env_obj
+                    .and_then(|e| e.get("ANTHROPIC_MODEL"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                let cur_top_model = settings_val
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                let cur_small_fast = env_obj
+                    .and_then(|e| e.get("ANTHROPIC_SMALL_FAST_MODEL"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                let cur_default_haiku = env_obj
+                    .and_then(|e| e.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                (
+                    cur_token,
+                    cur_env_model,
+                    cur_top_model,
+                    cur_small_fast,
+                    cur_default_haiku,
+                )
+            };
 
             if !settings_val["env"].is_object() {
                 settings_val["env"] = json!({});
@@ -905,19 +925,7 @@ impl InterceptorManager {
             }
 
             let selected_model = self.get_effective_tool_model("claude_code");
-            if let Some(ref m) = selected_model {
-                settings_val["model"] = json!(m);
-                if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
-                    env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
-                }
-            } else {
-                if let Some(obj) = settings_val.as_object_mut() {
-                    obj.remove("model");
-                }
-                if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
-                    env_obj.remove("ANTHROPIC_MODEL");
-                }
-            }
+            apply_claude_selected_model(&mut settings_val, selected_model.as_deref());
 
             if let Ok(new_settings) = serde_json::to_string_pretty(&settings_val) {
                 atomic_write(&settings_path, &new_settings).map_err(|e| e.to_string())?;
@@ -945,6 +953,8 @@ impl InterceptorManager {
                 "orig_auth_token": orig_auth_token,
                 "orig_env_model": orig_env_model,
                 "orig_top_model": orig_top_model,
+                "orig_small_fast_model": orig_small_fast_model,
+                "orig_default_haiku_model": orig_default_haiku_model,
             });
             let _ = self.db.save_interceptor_state(
                 "claude_code",
@@ -1000,10 +1010,16 @@ impl InterceptorManager {
                                 }
 
                                 if let Some(ref b) = backup_val {
-                                    if let Some(orig_em) = b.get("orig_env_model").and_then(|m| m.as_str()) {
-                                        env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(orig_em));
-                                    } else {
-                                        env_obj.remove("ANTHROPIC_MODEL");
+                                    for (backup_key, env_key) in [
+                                        ("orig_env_model", "ANTHROPIC_MODEL"),
+                                        ("orig_small_fast_model", "ANTHROPIC_SMALL_FAST_MODEL"),
+                                        ("orig_default_haiku_model", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+                                    ] {
+                                        if let Some(orig_val) = b.get(backup_key).and_then(|m| m.as_str()) {
+                                            env_obj.insert(env_key.to_string(), json!(orig_val));
+                                        } else {
+                                            env_obj.remove(env_key);
+                                        }
                                     }
                                 }
                             }
@@ -1085,19 +1101,7 @@ impl InterceptorManager {
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 let selected_model = self.get_effective_tool_model("claude_code");
-                if let Some(ref m) = selected_model {
-                    v["model"] = json!(m);
-                    if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
-                        env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
-                    }
-                } else {
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.remove("model");
-                    }
-                    if let Some(env_obj) = v.get_mut("env").and_then(|e| e.as_object_mut()) {
-                        env_obj.remove("ANTHROPIC_MODEL");
-                    }
-                }
+                apply_claude_selected_model(&mut v, selected_model.as_deref());
                 if let Ok(updated) = serde_json::to_string_pretty(&v) {
                     atomic_write(&settings_path, &updated).map_err(|e| e.to_string())?;
                 }
@@ -2977,6 +2981,27 @@ pub fn resolve_claude_behaves_as(model_name: &str) -> &'static str {
     }
 }
 
+/// Applies (or clears) the selected model and auxiliary lightweight env vars for Claude Code.
+fn apply_claude_selected_model(settings_val: &mut Value, selected_model: Option<&str>) {
+    if let Some(m) = selected_model {
+        settings_val["model"] = json!(m);
+        if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
+            env_obj.insert("ANTHROPIC_MODEL".to_string(), json!(m));
+            env_obj.insert("ANTHROPIC_SMALL_FAST_MODEL".to_string(), json!(m));
+            env_obj.insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), json!(m));
+        }
+    } else {
+        if let Some(obj) = settings_val.as_object_mut() {
+            obj.remove("model");
+        }
+        if let Some(env_obj) = settings_val.get_mut("env").and_then(|e| e.as_object_mut()) {
+            env_obj.remove("ANTHROPIC_MODEL");
+            env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+            env_obj.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+        }
+    }
+}
+
 /// Generates the modelPicker configuration for ~/.claude/settings.json
 pub fn generate_claude_model_picker(
     providers: &[Provider],
@@ -4115,6 +4140,77 @@ base_url = "https://api.other.com/v1"
         let providers = tbl.get("model_providers").unwrap().as_table().unwrap();
         assert!(!providers.contains_key("custom"));
         assert!(providers.contains_key("other"));
+    }
+
+    #[test]
+    fn test_claude_code_syncs_and_restores_small_fast_and_haiku_models() {
+        let home = std::env::temp_dir().join(format!(
+            "pivot-claude-aux-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let result = (|| -> Result<(), String> {
+            let db_path = home.join("state.db");
+            let db = Database::new(db_path).map_err(|e| e.to_string())?;
+            let manager = InterceptorManager::new(db, 16888);
+
+            let claude_dir = home.join(".claude");
+            fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
+            let settings_file = claude_dir.join("settings.json");
+
+            let initial = r#"{
+  "env": {
+    "ANTHROPIC_SMALL_FAST_MODEL": "legacy-fast"
+  },
+  "theme": "dark"
+}"#;
+            fs::write(&settings_file, initial).map_err(|e| e.to_string())?;
+
+            manager.set_tool_model("claude_code", Some("gemini-4-hydrogen-high"))?;
+            manager.toggle_claude_code(true)?;
+
+            let intercepted: Value = serde_json::from_str(
+                &fs::read_to_string(&settings_file).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            assert_eq!(intercepted["model"], "gemini-4-hydrogen-high");
+            assert_eq!(intercepted["env"]["ANTHROPIC_MODEL"], "gemini-4-hydrogen-high");
+            assert_eq!(
+                intercepted["env"]["ANTHROPIC_SMALL_FAST_MODEL"],
+                "gemini-4-hydrogen-high"
+            );
+            assert_eq!(
+                intercepted["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+                "gemini-4-hydrogen-high"
+            );
+
+            manager.toggle_claude_code(false)?;
+            let restored: Value = serde_json::from_str(
+                &fs::read_to_string(&settings_file).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            assert_eq!(restored["env"].get("ANTHROPIC_MODEL"), None);
+            assert_eq!(
+                restored["env"].get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+                None
+            );
+            assert_eq!(restored["env"]["ANTHROPIC_SMALL_FAST_MODEL"], "legacy-fast");
+            Ok(())
+        })();
+
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(&home);
+        result.unwrap();
     }
 }
 
