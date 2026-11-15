@@ -596,6 +596,7 @@ fn upsert_subscription_account_from_token(
             .map_err(|e| e.to_string())?;
 
         let _ = state.db.set_account_cooldown(&target.id, 0);
+        oauth::clear_all_account_memory_cooldowns(&target.id);
         if let Some(ref pt) = plan_type {
             let _ = state.db.update_account_plan_type(&target.id, pt);
         }
@@ -726,6 +727,7 @@ pub fn delete_subscription_account(
     state: &AppState,
     account_id: String,
 ) -> Result<(), String> {
+    oauth::clear_all_account_memory_cooldowns(&account_id);
     state
         .db
         .delete_subscription_account(&account_id)
@@ -1049,6 +1051,7 @@ pub async fn consume_subscription_reset_credit(
 
     // 重置本地冷却时间
     let _ = state.db.set_account_cooldown(&account.id, 0);
+    oauth::clear_all_account_memory_cooldowns(&account.id);
 
     // 重新拉取最新额度并返回
     let (buckets, reset_credits, plan_type) =

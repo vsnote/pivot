@@ -273,7 +273,8 @@ pub fn render_provider_context_menu(
                                                         .as_ref()
                                                         .map(|a| a.id == acc.id)
                                                         .unwrap_or(false);
-                                                    let is_cd = acc.cooldown_until > now_sec;
+                                                    let is_cd = acc.cooldown_until > now_sec
+                                                        || pivot_core::oauth::get_account_active_family_cooldown(&acc.id, now_sec).is_some();
                                                     let short_name = acc
                                                         .email
                                                         .as_deref()
@@ -376,6 +377,11 @@ pub fn render_provider_context_menu(
                                         short_id
                                     )
                                 });
+                                let family_cd = if acc.cooldown_until <= now_sec {
+                                    pivot_core::oauth::get_account_active_family_cooldown(&acc.id, now_sec)
+                                } else {
+                                    None
+                                };
                                 let is_cd = acc.cooldown_until > now_sec;
                                 let cd_mins = ((acc.cooldown_until - now_sec + 59) / 60).max(1);
 
@@ -401,6 +407,16 @@ pub fn render_provider_context_menu(
                                                     "429 {} ({}m)",
                                                     locale.pick("冷却中", "Cooldown"),
                                                     cd_mins
+                                                ))
+                                        } else if let Some((fam_name, fam_rem)) = family_cd {
+                                            div()
+                                                .text_color(palette.amber_text)
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(format!(
+                                                    "{} {} ({}m)",
+                                                    fam_name,
+                                                    locale.pick("冷却中", "Cooldown"),
+                                                    ((fam_rem + 59) / 60).max(1)
                                                 ))
                                         } else if !acc.enabled {
                                             div()

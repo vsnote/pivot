@@ -469,7 +469,12 @@ fn render_account_row(
 
     let auth_expired = is_account_auth_expired(acc, quota, now_ts);
     let cooldown_remaining = (acc.cooldown_until - now_ts).max(0);
-    let in_cooldown = acc.enabled && !auth_expired && cooldown_remaining > 0;
+    let family_cd = if cooldown_remaining == 0 {
+        pivot_core::oauth::get_account_active_family_cooldown(&acc.id, now_ts)
+    } else {
+        None
+    };
+    let in_cooldown = acc.enabled && !auth_expired && (cooldown_remaining > 0 || family_cd.is_some());
 
     let dot_color = if !acc.enabled {
         palette.subtext
@@ -589,6 +594,27 @@ fn render_account_row(
                             )
                         })
                         .when(in_cooldown, |el| {
+                            let badge_text = if cooldown_remaining > 0 {
+                                format!("{} {}s", locale.pick("冷却", "Cooldown"), cooldown_remaining)
+                            } else if let Some((fam_name, fam_rem)) = family_cd {
+                                if fam_rem >= 60 {
+                                    format!(
+                                        "{} {} {}m",
+                                        fam_name,
+                                        locale.pick("冷却", "CD"),
+                                        (fam_rem + 59) / 60
+                                    )
+                                } else {
+                                    format!(
+                                        "{} {} {}s",
+                                        fam_name,
+                                        locale.pick("冷却", "CD"),
+                                        fam_rem
+                                    )
+                                }
+                            } else {
+                                locale.pick("冷却", "Cooldown").to_string()
+                            };
                             el.child(
                                 div()
                                     .px(px(5.0))
@@ -600,11 +626,7 @@ fn render_account_row(
                                     .text_size(px(10.0))
                                     .text_color(palette.amber_text)
                                     .flex_shrink_0()
-                                    .child(format!(
-                                        "{} {}s",
-                                        locale.pick("冷却", "Cooldown"),
-                                        cooldown_remaining
-                                    )),
+                                    .child(badge_text),
                             )
                         }),
                 )

@@ -596,6 +596,186 @@ pub fn codex_user_agent() -> String {
     format!("codex-cli/{}", codex_client_version())
 }
 
+static ANTIGRAVITY_UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn map_antigravity_os_type(os: &str) -> &str {
+    match os {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "windows",
+        other => other,
+    }
+}
+
+fn map_antigravity_arch(arch: &str) -> &str {
+    match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    }
+}
+
+fn extract_semver_token(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        if i > 0 && (bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b'.') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut p = i;
+        let mut ok = true;
+        for dot_idx in 0..3 {
+            let seg_start = p;
+            while p < bytes.len() && bytes[p].is_ascii_digit() {
+                p += 1;
+            }
+            if p == seg_start {
+                ok = false;
+                break;
+            }
+            if dot_idx < 2 {
+                if p >= bytes.len() || bytes[p] != b'.' {
+                    ok = false;
+                    break;
+                }
+                p += 1;
+            }
+        }
+        if !ok {
+            i += 1;
+            continue;
+        }
+        if p < bytes.len() && (bytes[p] == b'.' || bytes[p].is_ascii_digit()) {
+            i = p;
+            continue;
+        }
+        if p < bytes.len() && bytes[p] == b'-' {
+            let pre_start = p + 1;
+            let mut pre_end = pre_start;
+            while pre_end < bytes.len()
+                && (bytes[pre_end].is_ascii_alphanumeric()
+                    || bytes[pre_end] == b'.'
+                    || bytes[pre_end] == b'-')
+            {
+                pre_end += 1;
+            }
+            if pre_end > pre_start && bytes[pre_end - 1] != b'.' && bytes[pre_end - 1] != b'-' {
+                p = pre_end;
+            }
+        }
+        return Some(s[start..p].to_string());
+    }
+    None
+}
+
+fn extract_cl_number(s: &str) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    for pat in ["cl=", "cl:"] {
+        let mut offset = 0;
+        while let Some(pos) = lower[offset..].find(pat) {
+            let abs = offset + pos;
+            let prev_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+            let num_start = abs + pat.len();
+            if prev_ok && num_start < bytes.len() && bytes[num_start].is_ascii_digit() {
+                let mut num_end = num_start;
+                while num_end < bytes.len() && bytes[num_end].is_ascii_digit() {
+                    num_end += 1;
+                }
+                return Some(s[num_start..num_end].to_string());
+            }
+            offset = abs + pat.len();
+        }
+    }
+    None
+}
+
+/// 根据运行时平台和本机 `agy` CLI 探测结果构造自洽的 Antigravity User-Agent
+pub(crate) fn build_antigravity_ua_string(
+    os: &str,
+    arch: &str,
+    detected_cli_output: Option<&str>,
+) -> String {
+    let os_type = map_antigravity_os_type(os);
+    let arch_str = map_antigravity_arch(arch);
+
+    if let Some(output) = detected_cli_output.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(ver) = extract_semver_token(output) {
+            if let Some(cl_num) = extract_cl_number(output) {
+                return format!(
+                    "antigravity/cli/{} (aidev_client; os_type={}; arch={}; cl={}; auth_method=consumer)",
+                    ver, os_type, arch_str, cl_num
+                );
+            }
+            return format!(
+                "antigravity/cli/{} (aidev_client; os_type={}; arch={}; auth_method=consumer)",
+                ver, os_type, arch_str
+            );
+        }
+    }
+
+    format!(
+        "antigravity/cli/1.4.6 (aidev_client; os_type={}; arch={}; cl=964361259; auth_method=consumer)",
+        os_type, arch_str
+    )
+}
+
+fn detect_local_agy_cli_version_output() -> Option<String> {
+    let bin_name = if cfg!(windows) { "agy.exe" } else { "agy" };
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            candidates.push(dir.join(bin_name));
+        }
+    }
+    if let Some(home) =
+        dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
+    {
+        candidates.push(home.join(".local").join("bin").join(bin_name));
+    }
+    #[cfg(not(windows))]
+    {
+        candidates.push(std::path::PathBuf::from("/opt/homebrew/bin/agy"));
+        candidates.push(std::path::PathBuf::from("/usr/local/bin/agy"));
+    }
+
+    for bin in candidates {
+        if !bin.is_file() {
+            continue;
+        }
+        if let Ok(output) = std::process::Command::new(&bin).arg("--version").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{} {}", stdout.trim(), stderr.trim());
+            let trimmed = combined.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 获取进程内缓存的 Antigravity User-Agent（优先读取本机 `agy` CLI 版本，未安装时回退配套快照）
+pub fn antigravity_user_agent() -> &'static str {
+    ANTIGRAVITY_UA
+        .get_or_init(|| {
+            let detected = detect_local_agy_cli_version_output();
+            build_antigravity_ua_string(
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                detected.as_deref(),
+            )
+        })
+        .as_str()
+}
+
 /// 尝试从本地 ~/.codex/models_cache.json 直接读取并解析模型列表（按 priority 排序并过滤掉内部审查机器人）
 pub fn get_local_codex_cached_models() -> Option<Vec<String>> {
     let home = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))?;
@@ -1082,6 +1262,140 @@ pub fn is_account_family_cooled_down(account_id: &str, model: &str, now_sec: i64
     map.get(&key).copied().unwrap_or(0) > now_sec
 }
 
+/// 查询账号当前仍处于硬冷却的模型族名称与剩余秒数（取剩余时间最长的一项，用于 UI 与网关状态对齐）
+pub fn get_account_active_family_cooldown(
+    account_id: &str,
+    now_sec: i64,
+) -> Option<(&'static str, i64)> {
+    let lock = FAMILY_COOLDOWNS.get()?;
+    let map = lock.lock().unwrap();
+    let mut best: Option<(&'static str, i64)> = None;
+    for (family, display) in [("claude", "Claude"), ("gemini", "Gemini")] {
+        let key = format!("{}:{}", account_id, family);
+        let until = map.get(&key).copied().unwrap_or(0);
+        if until > now_sec {
+            let rem = until - now_sec;
+            if best.map(|(_, prev)| rem > prev).unwrap_or(true) {
+                best = Some((display, rem));
+            }
+        }
+    }
+    best
+}
+
+static MODEL_SOFT_BACKOFFS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, i64>>,
+> = std::sync::OnceLock::new();
+
+fn model_soft_backoff_key(account_id: &str, model: &str) -> String {
+    format!("{}:{}", account_id, model.trim().to_ascii_lowercase())
+}
+
+/// 标记账号下单个具体模型的瞬时软退避（不连坐同家族其他模型，仅在存在健康替代账号时避让）
+pub fn mark_account_model_soft_backoff(account_id: &str, model: &str, backoff_seconds: i64) {
+    let model_trimmed = model.trim();
+    if model_trimmed.is_empty() || backoff_seconds <= 0 {
+        return;
+    }
+    let lock = MODEL_SOFT_BACKOFFS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = lock.lock().unwrap();
+    let until = chrono::Utc::now().timestamp() + backoff_seconds;
+    let key = model_soft_backoff_key(account_id, model_trimmed);
+    let prev = map.get(&key).copied().unwrap_or(0);
+    if until > prev {
+        map.insert(key, until);
+    }
+}
+
+pub fn clear_account_model_soft_backoff(account_id: &str, model: &str) {
+    let model_trimmed = model.trim();
+    if model_trimmed.is_empty() {
+        return;
+    }
+    if let Some(lock) = MODEL_SOFT_BACKOFFS.get() {
+        let mut map = lock.lock().unwrap();
+        map.remove(&model_soft_backoff_key(account_id, model_trimmed));
+    }
+}
+
+pub fn is_account_model_backed_off(account_id: &str, model: &str, now_sec: i64) -> bool {
+    let model_trimmed = model.trim();
+    if model_trimmed.is_empty() {
+        return false;
+    }
+    let Some(lock) = MODEL_SOFT_BACKOFFS.get() else {
+        return false;
+    };
+    let map = lock.lock().unwrap();
+    map.get(&model_soft_backoff_key(account_id, model_trimmed))
+        .copied()
+        .unwrap_or(0)
+        > now_sec
+}
+
+/// 清理指定账号在内存中的模型族硬冷却与单模型软退避记录
+pub fn clear_all_account_memory_cooldowns(account_id: &str) {
+    let prefix = format!("{}:", account_id);
+    if let Some(lock) = FAMILY_COOLDOWNS.get() {
+        let mut map = lock.lock().unwrap();
+        map.retain(|k, _| !k.starts_with(&prefix));
+    }
+    if let Some(lock) = MODEL_SOFT_BACKOFFS.get() {
+        let mut map = lock.lock().unwrap();
+        map.retain(|k, _| !k.starts_with(&prefix));
+    }
+}
+
+fn parse_retry_delay_value(val: &serde_json::Value) -> Option<i64> {
+    if let Some(n) = val.as_i64() {
+        return (n > 0).then_some(n);
+    }
+    if let Some(f) = val.as_f64() {
+        return (f > 0.0).then_some(f.ceil() as i64);
+    }
+    if let Some(s) = val.as_str() {
+        let trimmed = s.trim();
+        let num_str = trimmed.strip_suffix('s').unwrap_or(trimmed).trim();
+        if let Ok(f) = num_str.parse::<f64>() {
+            if f > 0.0 {
+                return Some(f.ceil() as i64);
+            }
+        }
+    }
+    None
+}
+
+/// 从上游 429/503 错误响应体提取建议退避秒数（如 Google `RetryInfo.retryDelay` 或 `retry_after`），并封顶在 `max_secs`
+pub fn parse_upstream_retry_backoff_secs(body: &str, default_secs: i64, max_secs: i64) -> i64 {
+    let max_cap = max_secs.max(1);
+    let fallback = default_secs.clamp(1, max_cap);
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return fallback;
+    };
+
+    if let Some(details) = json["error"]["details"].as_array() {
+        for detail in details {
+            if let Some(secs) = parse_retry_delay_value(&detail["retryDelay"]) {
+                return secs.clamp(1, max_cap);
+            }
+        }
+    }
+
+    for candidate in [
+        &json["error"]["retry_after"],
+        &json["retry_after"],
+        &json["error"]["resets_in_seconds"],
+        &json["resets_in_seconds"],
+    ] {
+        if let Some(secs) = parse_retry_delay_value(candidate) {
+            return secs.clamp(1, max_cap);
+        }
+    }
+
+    fallback
+}
+
 /// 按账号加单飞锁检查/刷新 Token，保留上游轮换下发的新 refresh_token，不清除已有配额冷却
 pub async fn ensure_or_refresh_account_token(
     db: &crate::db::Database,
@@ -1232,7 +1546,7 @@ pub async fn acquire_subscription_account_for_model(
     }
 
     let now_sec = chrono::Utc::now().timestamp();
-    let available: Vec<_> = valid_auth
+    let hard_available: Vec<_> = valid_auth
         .into_iter()
         .filter(|a| {
             a.cooldown_until <= now_sec
@@ -1242,7 +1556,7 @@ pub async fn acquire_subscription_account_for_model(
         })
         .collect();
 
-    if available.is_empty() {
+    if hard_available.is_empty() {
         let msg = if let Some(model) = model_trimmed {
             format!(
                 "支持模型 '{}' 的订阅账号当前均在配额冷却中，请稍后重试",
@@ -1253,6 +1567,22 @@ pub async fn acquire_subscription_account_for_model(
         };
         return Err((axum::http::StatusCode::TOO_MANY_REQUESTS, msg));
     }
+
+    let available: Vec<_> = if let Some(model) = model_trimmed {
+        let not_backed_off: Vec<_> = hard_available
+            .iter()
+            .filter(|a| !is_account_model_backed_off(&a.id, model, now_sec))
+            .cloned()
+            .collect();
+        if not_backed_off.is_empty() {
+            // 所有支持该模型的可用账号均仅处于瞬时软退避（无其他可替代健康账号），直接放行避免本地自锁
+            hard_available
+        } else {
+            not_backed_off
+        }
+    } else {
+        hard_available
+    };
 
     static SUB_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let start_idx = SUB_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % available.len();
@@ -1467,10 +1797,7 @@ pub async fn fetch_antigravity_models(
     let resp = client
         .post(&endpoint)
         .header("authorization", format!("Bearer {}", access_token))
-        .header(
-            "user-agent",
-            "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
-        )
+        .header("user-agent", antigravity_user_agent())
         .header("content-type", "application/json")
         .json(&serde_json::json!({}))
         .send()
@@ -1702,6 +2029,9 @@ pub fn parse_antigravity_quota_json(json: &serde_json::Value) -> Vec<QuotaBucket
     let mut claude_bucket: Option<QuotaBucket> = None;
     let mut gemini_bucket: Option<QuotaBucket> = None;
     let mut gpt_bucket: Option<QuotaBucket> = None;
+    let mut claude_all_exhausted = true;
+    let mut gemini_all_exhausted = true;
+    let mut gpt_all_exhausted = true;
 
     for item in raw_items {
         let id = item["modelId"]
@@ -1732,11 +2062,11 @@ pub fn parse_antigravity_quota_json(json: &serde_json::Value) -> Vec<QuotaBucket
         };
 
         if id_lower.contains("claude") {
+            claude_all_exhausted &= is_exhausted;
             if let Some(ref mut c) = claude_bucket {
                 if remaining < c.remaining_fraction {
                     c.remaining_fraction = remaining;
                     c.reset_time = entry.reset_time;
-                    c.is_exhausted = is_exhausted;
                 }
             } else {
                 let mut c = entry;
@@ -1744,11 +2074,11 @@ pub fn parse_antigravity_quota_json(json: &serde_json::Value) -> Vec<QuotaBucket
                 claude_bucket = Some(c);
             }
         } else if id_lower.contains("gemini") {
+            gemini_all_exhausted &= is_exhausted;
             if let Some(ref mut g) = gemini_bucket {
                 if remaining < g.remaining_fraction {
                     g.remaining_fraction = remaining;
                     g.reset_time = entry.reset_time;
-                    g.is_exhausted = is_exhausted;
                 }
             } else {
                 let mut g = entry;
@@ -1756,11 +2086,11 @@ pub fn parse_antigravity_quota_json(json: &serde_json::Value) -> Vec<QuotaBucket
                 gemini_bucket = Some(g);
             }
         } else if id_lower.contains("gpt") {
+            gpt_all_exhausted &= is_exhausted;
             if let Some(ref mut p) = gpt_bucket {
                 if remaining < p.remaining_fraction {
                     p.remaining_fraction = remaining;
                     p.reset_time = entry.reset_time;
-                    p.is_exhausted = is_exhausted;
                 }
             } else {
                 let mut p = entry;
@@ -1770,13 +2100,16 @@ pub fn parse_antigravity_quota_json(json: &serde_json::Value) -> Vec<QuotaBucket
         }
     }
 
-    if let Some(c) = claude_bucket {
+    if let Some(mut c) = claude_bucket {
+        c.is_exhausted = claude_all_exhausted;
         result.push(c);
     }
-    if let Some(g) = gemini_bucket {
+    if let Some(mut g) = gemini_bucket {
+        g.is_exhausted = gemini_all_exhausted;
         result.push(g);
     }
-    if let Some(p) = gpt_bucket {
+    if let Some(mut p) = gpt_bucket {
+        p.is_exhausted = gpt_all_exhausted;
         result.push(p);
     }
 
@@ -1812,10 +2145,7 @@ pub async fn fetch_antigravity_quota(
             let resp = client
                 .post(&endpoint)
                 .header("authorization", format!("Bearer {}", access_token))
-                .header(
-                    "user-agent",
-                    "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)",
-                )
+                .header("user-agent", antigravity_user_agent())
                 .header("content-type", "application/json")
                 .json(&serde_json::json!({}))
                 .send()
@@ -2237,5 +2567,168 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn test_soft_backoff_prefers_healthy_but_never_locks_single_candidate() {
+        let dir = std::env::temp_dir().join(format!("pivot-oauth-backoff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let db = crate::db::Database::new(db_path.clone()).unwrap();
+        let client = reqwest::Client::new();
+        let future_exp = chrono::Utc::now().timestamp() + 3600;
+
+        let acc_a_id = format!("acc_a_{}", uuid::Uuid::new_v4().simple());
+        let acc_b_id = format!("acc_b_{}", uuid::Uuid::new_v4().simple());
+
+        // 账号 A：支持基础与高阶独享模型
+        db.save_subscription_account(&crate::db::SubscriptionAccount {
+            id: acc_a_id.clone(),
+            provider_id: "antigravity_pool".to_string(),
+            account_type: "antigravity".to_string(),
+            email: Some("a@example.com".to_string()),
+            access_token: "tok_a".to_string(),
+            refresh_token: None,
+            expires_at: future_exp,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: None,
+            supported_models: Some(vec![
+                "gemini-3.8-flash-high".to_string(),
+                "gemini-4-hydrogen-high".to_string(),
+            ]),
+            auth_invalid: false,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        // 账号 B：仅支持基础模型
+        db.save_subscription_account(&crate::db::SubscriptionAccount {
+            id: acc_b_id.clone(),
+            provider_id: "antigravity_pool".to_string(),
+            account_type: "antigravity".to_string(),
+            email: Some("b@example.com".to_string()),
+            access_token: "tok_b".to_string(),
+            refresh_token: None,
+            expires_at: future_exp,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: None,
+            supported_models: Some(vec!["gemini-3.8-flash-high".to_string()]),
+            auth_invalid: false,
+            created_at: "2026-01-02T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        // 1. 双账号均支持 gemini-3.8-flash-high，对 A 标记该模型的软退避 -> 100% 自动避让路由给 B
+        mark_account_model_soft_backoff(&acc_a_id, "gemini-3.8-flash-high", 30);
+        for _ in 0..5 {
+            let picked = acquire_subscription_account_for_model(
+                &db,
+                &client,
+                "antigravity_pool",
+                Some("gemini-3.8-flash-high"),
+                &[],
+            )
+            .await
+            .unwrap();
+            assert_eq!(picked.id, acc_b_id);
+        }
+
+        // 2. 标记 A 的 gemini-4-hydrogen-high 软退避后：
+        // 2a. 不会连坐 gemini-3.8-flash-high（清除前者后依然平等轮询；先验证 A 的另一个模型未受任何软退避标记）
+        clear_account_model_soft_backoff(&acc_a_id, "gemini-3.8-flash-high");
+        mark_account_model_soft_backoff(&acc_a_id, "gemini-4-hydrogen-high", 30);
+        let now_sec = chrono::Utc::now().timestamp();
+        assert!(!is_account_model_backed_off(&acc_a_id, "gemini-3.8-flash-high", now_sec));
+        assert!(is_account_model_backed_off(&acc_a_id, "gemini-4-hydrogen-high", now_sec));
+
+        // 2b. 池中仅账号 A 支持 gemini-4-hydrogen-high，即使处于软退避状态，也必须直接放行而非本地自锁 429
+        let picked = acquire_subscription_account_for_model(
+            &db,
+            &client,
+            "antigravity_pool",
+            Some("gemini-4-hydrogen-high"),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(picked.id, acc_a_id);
+
+        clear_all_account_memory_cooldowns(&acc_a_id);
+        clear_all_account_memory_cooldowns(&acc_b_id);
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_parse_antigravity_quota_flat_partial_exhausted_no_family_lock() {
+        let partial = serde_json::json!({
+            "buckets": [
+                { "modelId": "gemini-2.5-pro", "remainingFraction": 0.0, "resetTime": "2026-11-15T12:00:00Z" },
+                { "modelId": "gemini-2.5-flash", "remainingFraction": 0.8, "resetTime": "2026-11-15T12:00:00Z" }
+            ]
+        });
+        let buckets = parse_antigravity_quota_json(&partial);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].remaining_fraction, 0.0);
+        assert!(!buckets[0].is_exhausted);
+
+        let all_empty = serde_json::json!({
+            "buckets": [
+                { "modelId": "gemini-2.5-pro", "remainingFraction": 0.0, "resetTime": "2026-11-15T12:00:00Z" },
+                { "modelId": "gemini-2.5-flash", "remainingFraction": 0.002, "resetTime": "2026-11-15T12:00:00Z" }
+            ]
+        });
+        let buckets_empty = parse_antigravity_quota_json(&all_empty);
+        assert_eq!(buckets_empty.len(), 1);
+        assert!(buckets_empty[0].is_exhausted);
+    }
+
+    #[test]
+    fn test_build_antigravity_ua_string_variants() {
+        assert_eq!(
+            build_antigravity_ua_string("macos", "aarch64", None),
+            "antigravity/cli/1.4.6 (aidev_client; os_type=darwin; arch=arm64; cl=964361259; auth_method=consumer)"
+        );
+        assert_eq!(
+            build_antigravity_ua_string("linux", "x86_64", None),
+            "antigravity/cli/1.4.6 (aidev_client; os_type=linux; arch=amd64; cl=964361259; auth_method=consumer)"
+        );
+        assert_eq!(
+            build_antigravity_ua_string("macos", "aarch64", Some("agy 1.8.2")),
+            "antigravity/cli/1.8.2 (aidev_client; os_type=darwin; arch=arm64; auth_method=consumer)"
+        );
+        assert_eq!(
+            build_antigravity_ua_string("windows", "x86_64", Some("agy version v2.1.0-beta.1 (cl=1024000)")),
+            "antigravity/cli/2.1.0-beta.1 (aidev_client; os_type=windows; arch=amd64; cl=1024000; auth_method=consumer)"
+        );
+        // 测试解析 RetryInfo 与 retry_after
+        assert_eq!(
+            parse_upstream_retry_backoff_secs(
+                r#"{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"11.2s"}]}}"#,
+                15,
+                30
+            ),
+            12
+        );
+        assert_eq!(
+            parse_upstream_retry_backoff_secs(
+                r#"{"error":{"code":429,"details":[{"retryDelay":"120s"}]}}"#,
+                15,
+                30
+            ),
+            30
+        );
+        assert_eq!(
+            parse_upstream_retry_backoff_secs(
+                r#"{"error":{"code":429,"message":"Resource has been exhausted"}}"#,
+                15,
+                30
+            ),
+            15
+        );
     }
 }
