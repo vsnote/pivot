@@ -2138,7 +2138,7 @@ impl PivotApp {
         let locale = self.prefs.locale;
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(locale.pick("搜索模型...", "Search models..."))
+                .placeholder(locale.pick("搜索模型…", "Search models…"))
         });
         let focus = search_input.read(cx).focus_handle(cx);
         focus.focus(window, cx);
@@ -2149,6 +2149,9 @@ impl PivotApp {
             window,
             move |this, state, event: &InputEvent, _, cx| match event {
                 InputEvent::Change => {
+                    if let Some(ref s) = this.client_model_select {
+                        s.scroll_handle.set_offset(point(px(0.0), px(0.0)));
+                    }
                     cx.notify();
                 }
                 InputEvent::PressEnter { .. } => {
@@ -2190,12 +2193,24 @@ impl PivotApp {
         )
         .detach();
 
+        let scroll_handle = ScrollHandle::new();
+        let init_groups =
+            crate::views::clients::model_select::build_grouped_models(&self.providers);
+        if let Some(sel_idx) = crate::views::clients::model_select::find_selected_flat_index(
+            &current_value,
+            &init_groups,
+        ) {
+            if sel_idx > 1 {
+                scroll_handle.scroll_to_item(sel_idx);
+            }
+        }
+
         self.client_model_select = Some(ClientModelSelectState {
             client_id,
             current_value,
             trigger_bounds,
             search_input,
-            scroll_handle: ScrollHandle::new(),
+            scroll_handle,
         });
         cx.notify();
     }
@@ -2852,6 +2867,7 @@ impl PivotApp {
             }
             if self.client_model_select.is_some() {
                 self.client_model_select = None;
+                self.root_focus.focus(window, cx);
                 cx.notify();
                 return;
             }

@@ -523,8 +523,8 @@ fn render_universal_client_card(
                             .line_height(rems(1.4))
                             .text_color(palette.muted_foreground)
                             .child(locale.pick(
-                                "适用于 Cursor、Cline、Roo Code、Cherry Studio 等任意自定义 API 工具，API Key 可填任意非空字符（如 pivot）",
-                                "Works with Cursor, Cline, Roo Code, Cherry Studio, or any custom client. Use any non-empty string (e.g. pivot) as API Key.",
+                                "API Key 可填任意非空字符（如 pivot）",
+                                "Use any non-empty string (e.g. pivot) as API Key.",
                             )),
                     )
                     .child(if is_wide {

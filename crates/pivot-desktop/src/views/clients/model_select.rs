@@ -3,7 +3,6 @@ use crate::components::text_input::NativeTextInput;
 use crate::theme::ThemePalette;
 use crate::PivotApp;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{Align, Placement, Positioner};
 use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -300,6 +299,115 @@ pub fn render_client_model_trigger(
         .into_any_element()
 }
 
+const HEADER_SAFE_TOP: f32 = 54.0;
+const VIEWPORT_MARGIN: f32 = 10.0;
+const TRIGGER_OFFSET: f32 = 4.0;
+const POPOVER_CHROME_H: f32 = 43.0;
+const IDEAL_LIST_MAX_H: f32 = 200.0;
+const MIN_LIST_MAX_H: f32 = 56.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PopoverGeometry {
+    pub width: f32,
+    pub left: f32,
+    /// Some(top) 表示向下弹出锚定 top；None 表示向上弹出锚定 bottom
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
+    pub list_max_h: f32,
+}
+
+pub fn is_model_option_selected(cur_val: &str, opt: &GroupedModelOption) -> bool {
+    let has_dup = opt.value != opt.label;
+    cur_val == opt.value || (!has_dup && cur_val == opt.label && !cur_val.contains('/'))
+}
+
+pub fn find_selected_flat_index(cur_val: &str, groups: &[GroupedModel]) -> Option<usize> {
+    let mut flat_idx = 0usize;
+    for grp in groups {
+        // 分组标题占 1 个子元素槽位
+        flat_idx += 1;
+        for opt in &grp.models {
+            if is_model_option_selected(cur_val, opt) {
+                return Some(flat_idx);
+            }
+            flat_idx += 1;
+        }
+    }
+    None
+}
+
+fn estimate_list_height(groups: &[GroupedModel]) -> f32 {
+    if groups.is_empty() {
+        return 52.0;
+    }
+    let mut h = 8.0; // 滚动列表上下 padding (4px * 2)
+    for (g_idx, grp) in groups.iter().enumerate() {
+        if g_idx > 0 {
+            h += 9.0; // mt(4) + 1px border + extra pt(4)
+        }
+        h += 22.0; // 分组标题高度
+        h += grp.models.len() as f32 * 28.0; // 每项 27px + mt(1)
+    }
+    h
+}
+
+pub fn compute_popover_geometry(
+    win_w: f32,
+    win_h: f32,
+    trigger: Bounds<Pixels>,
+    unfiltered_groups: &[GroupedModel],
+) -> PopoverGeometry {
+    let win_w = win_w.max(320.0);
+    let win_h = win_h.max(320.0);
+    let width = 244.0f32.min(win_w - 20.0);
+
+    let trig_top = f32::from(trigger.top());
+    let trig_bottom = f32::from(trigger.bottom());
+    let trig_right = f32::from(trigger.right());
+
+    let left = (trig_right - width).clamp(
+        VIEWPORT_MARGIN,
+        (win_w - width - VIEWPORT_MARGIN).max(VIEWPORT_MARGIN),
+    );
+
+    let bottom_bound = (win_h - VIEWPORT_MARGIN).max(HEADER_SAFE_TOP + 80.0);
+    let space_below = (bottom_bound - trig_bottom - TRIGGER_OFFSET).max(0.0);
+    let space_above = (trig_top - TRIGGER_OFFSET - HEADER_SAFE_TOP).max(0.0);
+
+    let desired_list_h = estimate_list_height(unfiltered_groups).min(IDEAL_LIST_MAX_H);
+    let desired_panel_h = POPOVER_CHROME_H + desired_list_h;
+
+    let place_above = space_below < desired_panel_h && space_above > space_below;
+    let avail_panel_h = if place_above {
+        space_above
+    } else {
+        space_below
+    };
+    let list_max_h = (avail_panel_h - POPOVER_CHROME_H)
+        .min(IDEAL_LIST_MAX_H)
+        .max(MIN_LIST_MAX_H);
+
+    if place_above {
+        let anchor_bottom = (win_h - (trig_top - TRIGGER_OFFSET)).max(VIEWPORT_MARGIN);
+        PopoverGeometry {
+            width,
+            left,
+            top: None,
+            bottom: Some(anchor_bottom),
+            list_max_h,
+        }
+    } else {
+        let anchor_top = (trig_bottom + TRIGGER_OFFSET).max(HEADER_SAFE_TOP);
+        PopoverGeometry {
+            width,
+            left,
+            top: Some(anchor_top),
+            bottom: None,
+            list_max_h,
+        }
+    }
+}
+
 pub fn render_client_model_popover(
     app: &PivotApp,
     state: &ClientModelSelectState,
@@ -337,9 +445,6 @@ pub fn render_client_model_popover(
     }
 
     let viewport = window.viewport_size();
-    let win_w = f32::from(viewport.width).max(320.0);
-    let pop_w = 244.0f32.min(win_w - 20.0);
-
     let live_trigger_bounds = app
         .trigger_bounds
         .borrow()
@@ -347,12 +452,23 @@ pub fn render_client_model_popover(
         .copied()
         .unwrap_or(state.trigger_bounds);
 
+    let geom = compute_popover_geometry(
+        f32::from(viewport.width),
+        f32::from(viewport.height),
+        live_trigger_bounds,
+        &groups,
+    );
+
     let client_id = state.client_id.clone();
     let cur_val = state.current_value.clone();
 
     let popover_panel = div()
         .id("client_model_select_popover")
-        .w(px(pop_w))
+        .absolute()
+        .left(px(geom.left))
+        .when_some(geom.top, |el, t| el.top(px(t)))
+        .when_some(geom.bottom, |el, b| el.bottom(px(b)))
+        .w(px(geom.width))
         .rounded(px(8.0))
         .bg(palette.popover)
         .border_1()
@@ -365,22 +481,27 @@ pub fn render_client_model_popover(
         .on_mouse_down(MouseButton::Left, |_, _, app_cx| {
             app_cx.stop_propagation();
         })
+        .on_mouse_down(MouseButton::Right, |_, _, app_cx| {
+            app_cx.stop_propagation();
+        })
         .on_scroll(|_, _, app_cx| {
             app_cx.stop_propagation();
         })
         // 1. 顶部轻量单层搜索框（无粗糙外扩光环）
         .child(
             div()
+                .flex_shrink_0()
                 .p(px(6.0))
                 .border_b_1()
                 .border_color(palette.border_subtle)
                 .child(NativeTextInput::search(&state.search_input, palette).render(window, cx)),
         )
-        // 2. 分组模型无轨道滚动列表
+        // 2. 分组模型无轨道滚动列表（扁平直接子元素以匹配 ScrollHandle::scroll_to_item 索引）
         .child({
             let mut list = div()
                 .id("client_model_popover_scroll")
-                .max_h(px(224.0))
+                .min_h_0()
+                .max_h(px(geom.list_max_h))
                 .overflow_y_scroll()
                 .track_scroll(&state.scroll_handle)
                 .p(px(4.0))
@@ -390,6 +511,7 @@ pub fn render_client_model_popover(
             if filtered_groups.is_empty() {
                 list = list.child(
                     div()
+                        .flex_shrink_0()
                         .py(px(18.0))
                         .px(px(8.0))
                         .text_size(px(11.5))
@@ -399,41 +521,38 @@ pub fn render_client_model_popover(
                 );
             } else {
                 for (g_idx, grp) in filtered_groups.iter().enumerate() {
-                    let mut grp_block = div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .when(g_idx > 0, |el| {
-                            el.mt(px(4.0))
-                                .pt(px(4.0))
-                                .border_t_1()
-                                .border_color(palette.border_subtle)
-                        })
-                        .child(
-                            div()
-                                .px(px(8.0))
-                                .pt(px(3.0))
-                                .pb(px(2.5))
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(palette.muted_foreground)
-                                .truncate()
-                                .child(grp.name.clone()),
-                        );
+                    list = list.child(
+                        div()
+                            .flex_shrink_0()
+                            .when(g_idx > 0, |el| {
+                                el.mt(px(4.0))
+                                    .pt(px(7.0))
+                                    .border_t_1()
+                                    .border_color(palette.border_subtle)
+                            })
+                            .when(g_idx == 0, |el| el.pt(px(3.0)))
+                            .px(px(8.0))
+                            .pb(px(2.5))
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(palette.muted_foreground)
+                            .truncate()
+                            .child(grp.name.clone()),
+                    );
 
                     for (m_idx, opt) in grp.models.iter().enumerate() {
-                        let has_dup = opt.value != opt.label;
-                        let is_selected = cur_val == opt.value
-                            || (!has_dup && cur_val == opt.label && !cur_val.contains('/'));
+                        let is_selected = is_model_option_selected(&cur_val, opt);
                         let cid = client_id.clone();
                         let next_val = opt.value.clone();
 
-                        grp_block = grp_block.child(
+                        list = list.child(
                             div()
                                 .id(SharedString::from(format!(
                                     "cmodel_opt_{}_{}",
                                     g_idx, m_idx
                                 )))
+                                .flex_shrink_0()
+                                .mt(px(1.0))
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
@@ -489,8 +608,6 @@ pub fn render_client_model_popover(
                                 ),
                         );
                     }
-
-                    list = list.child(grp_block);
                 }
             }
 
@@ -503,24 +620,130 @@ pub fn render_client_model_popover(
         .top_0()
         .left_0()
         .size_full()
+        .occlude()
         .on_scroll(|_, _, app_cx| {
             app_cx.stop_propagation();
         })
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
                 this.client_model_select = None;
+                this.root_focus.focus(window, cx);
                 cx.notify();
             }),
         )
-        .child(
-            Positioner::side(live_trigger_bounds)
-                .placement(Placement::Bottom)
-                .align(Align::End)
-                .offset(px(4.0))
-                .margin(px(10.0))
-                .occlude()
-                .child(popover_panel),
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.client_model_select = None;
+                this.root_focus.focus(window, cx);
+                cx.notify();
+            }),
         )
+        .child(popover_panel)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_groups(counts: &[usize]) -> Vec<GroupedModel> {
+        counts
+            .iter()
+            .enumerate()
+            .map(|(gi, &count)| GroupedModel {
+                id: format!("p{}", gi),
+                name: format!("Provider {}", gi),
+                protocol: "openai".to_string(),
+                preset_id: None,
+                models: (0..count)
+                    .map(|mi| GroupedModelOption {
+                        value: format!("m-{}-{}", gi, mi),
+                        label: format!("m-{}-{}", gi, mi),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[::core::prelude::v1::test]
+    fn mid_trigger_places_below_and_fits_viewport() {
+        let trigger = Bounds::new(point(px(218.0), px(160.5)), size(px(120.0), px(28.0)));
+        let groups = make_groups(&[4, 4]);
+        let geom = compute_popover_geometry(416.0, 460.0, trigger, &groups);
+
+        assert_eq!(geom.top, Some(192.5));
+        assert_eq!(geom.bottom, None);
+        let panel_bottom = geom.top.unwrap() + POPOVER_CHROME_H + geom.list_max_h;
+        assert!(panel_bottom <= 450.0, "panel bottom {} exceeds 450", panel_bottom);
+    }
+
+    #[::core::prelude::v1::test]
+    fn bottom_trigger_with_many_models_flips_above_without_covering_header_or_trigger() {
+        let trigger = Bounds::new(point(px(218.0), px(249.5)), size(px(120.0), px(28.0)));
+        let groups = make_groups(&[4, 4]);
+        let win_h = 460.0;
+        let geom = compute_popover_geometry(416.0, win_h, trigger, &groups);
+
+        assert_eq!(geom.top, None);
+        let anchor_bottom = geom.bottom.expect("should anchor bottom");
+        let panel_bottom = win_h - anchor_bottom;
+        assert!((panel_bottom - 245.5).abs() < 1e-3);
+        let panel_top = panel_bottom - (POPOVER_CHROME_H + geom.list_max_h);
+        assert!(
+            panel_top >= HEADER_SAFE_TOP,
+            "panel top {} overlaps header",
+            panel_top
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn bottom_trigger_with_two_models_stays_below() {
+        let trigger = Bounds::new(point(px(218.0), px(249.5)), size(px(120.0), px(28.0)));
+        let groups = make_groups(&[2]);
+        let geom = compute_popover_geometry(416.0, 460.0, trigger, &groups);
+
+        assert_eq!(geom.top, Some(281.5));
+        assert_eq!(geom.bottom, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn find_selected_flat_index_handles_groups_and_prefixed_duplicates() {
+        let groups = vec![
+            GroupedModel {
+                id: "p1".to_string(),
+                name: "Antigravity".to_string(),
+                protocol: "antigravity".to_string(),
+                preset_id: None,
+                models: vec![
+                    GroupedModelOption {
+                        value: "antigravity/gpt-4o".to_string(),
+                        label: "gpt-4o".to_string(),
+                    },
+                    GroupedModelOption {
+                        value: "claude-opus".to_string(),
+                        label: "claude-opus".to_string(),
+                    },
+                ],
+            },
+            GroupedModel {
+                id: "p2".to_string(),
+                name: "ChatGPT".to_string(),
+                protocol: "chatgpt".to_string(),
+                preset_id: None,
+                models: vec![GroupedModelOption {
+                    value: "chatgpt/gpt-4o".to_string(),
+                    label: "gpt-4o".to_string(),
+                }],
+            },
+        ];
+
+        assert_eq!(find_selected_flat_index("antigravity/gpt-4o", &groups), Some(1));
+        assert_eq!(find_selected_flat_index("claude-opus", &groups), Some(2));
+        assert_eq!(find_selected_flat_index("chatgpt/gpt-4o", &groups), Some(4));
+        assert_eq!(find_selected_flat_index("gpt-4o", &groups), None);
+    }
 }
