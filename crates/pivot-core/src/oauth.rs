@@ -1488,6 +1488,26 @@ pub async fn acquire_subscription_account_for_model(
     target_model: Option<&str>,
     exclude_account_ids: &[String],
 ) -> Result<crate::db::SubscriptionAccount, (axum::http::StatusCode, String)> {
+    acquire_subscription_account_with_options(
+        db,
+        http_client,
+        provider_id,
+        target_model,
+        exclude_account_ids,
+        true,
+    )
+    .await
+}
+
+/// 从指定 provider 获取一个可用的订阅账号，可选是否强制要求模型存在于 `supported_models` 快照中
+pub async fn acquire_subscription_account_with_options(
+    db: &crate::db::Database,
+    http_client: &reqwest::Client,
+    provider_id: &str,
+    target_model: Option<&str>,
+    exclude_account_ids: &[String],
+    enforce_supported_models: bool,
+) -> Result<crate::db::SubscriptionAccount, (axum::http::StatusCode, String)> {
     let accounts = db.get_subscription_accounts(provider_id).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1504,21 +1524,25 @@ pub async fn acquire_subscription_account_for_model(
     }
 
     let model_trimmed = target_model.map(str::trim).filter(|m| !m.is_empty());
-    let model_matched: Vec<_> = if let Some(model) = model_trimmed {
-        let matched: Vec<_> = enabled_accounts
-            .into_iter()
-            .filter(|a| account_supports_model(a, model))
-            .collect();
-        if matched.is_empty() {
-            return Err((
-                axum::http::StatusCode::FORBIDDEN,
-                format!(
-                    "当前已启用的订阅账号等级均不支持模型 '{}'，请连接支持该模型的订阅账号或在客户端切换其他模型",
-                    model
-                ),
-            ));
+    let model_matched: Vec<_> = if enforce_supported_models {
+        if let Some(model) = model_trimmed {
+            let matched: Vec<_> = enabled_accounts
+                .into_iter()
+                .filter(|a| account_supports_model(a, model))
+                .collect();
+            if matched.is_empty() {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    format!(
+                        "当前已启用的订阅账号等级均不支持模型 '{}'，请连接支持该模型的订阅账号或在客户端切换其他模型",
+                        model
+                    ),
+                ));
+            }
+            matched
+        } else {
+            enabled_accounts
         }
-        matched
     } else {
         enabled_accounts
     };

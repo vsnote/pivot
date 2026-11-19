@@ -460,8 +460,12 @@ pub fn render_model_pool_section(
                             .as_ref()
                             .map(|up| !up.contains(model_id.as_str()))
                             .unwrap_or(false);
+                        let known_in_any_account_pool = editor.sub_accounts.iter().any(|acc| {
+                            acc.supported_models.is_some()
+                                && pivot_core::oauth::account_supports_model(acc, model_id)
+                        });
                         let no_supporting_account = is_subscription
-                            && !editor.sub_accounts.is_empty()
+                            && known_in_any_account_pool
                             && !editor.sub_accounts.iter().any(|acc| {
                                 acc.enabled
                                     && pivot_core::oauth::account_supports_model(acc, model_id)

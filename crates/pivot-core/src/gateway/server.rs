@@ -696,9 +696,17 @@ pub fn create_gateway_router(state: GatewayState) -> Router {
         .route("/v1/health", get(health_check))
         .route("/v1/models", get(list_models))
         .route("/v1/messages", post(handle_messages))
+        .route("/messages", post(handle_messages))
         .route("/v1/messages/count_tokens", post(handle_messages_count_tokens))
+        .route("/messages/count_tokens", post(handle_messages_count_tokens))
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/chat/completions", post(handle_chat_completions))
         .route("/v1/responses", post(handle_responses).get(handle_responses_get))
+        .route("/responses", post(handle_responses).get(handle_responses_get))
+        .route("/v1/images/generations", post(handle_images_generations))
+        .route("/images/generations", post(handle_images_generations))
+        .route("/v1/images/edits", post(handle_images_edits))
+        .route("/images/edits", post(handle_images_edits))
         .route("/v1beta/models", get(handle_gemini_list_models))
         .route("/v1beta/models/{*action}", post(handle_gemini_generate_content).get(handle_gemini_get_model))
         .route("/models", get(handle_gemini_list_models))
@@ -1299,6 +1307,20 @@ fn resolve_upstream_endpoint(base_url: &str, suffix: &str) -> String {
         format!("{clean}/v1{suffix}")
     } else {
         format!("{clean}{suffix}")
+    }
+}
+
+fn resolve_chatgpt_codex_endpoint(base_url: &str, suffix: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let base = if trimmed.is_empty() {
+        "https://chatgpt.com/backend-api"
+    } else {
+        trimmed
+    };
+    if base.ends_with("/codex") {
+        format!("{base}{suffix}")
+    } else {
+        format!("{base}/codex{suffix}")
     }
 }
 
@@ -3198,6 +3220,1069 @@ async fn dispatch_chatgpt_request(
     }
 }
 
+#[derive(Debug, Clone)]
+struct MultipartPart {
+    name: String,
+    filename: Option<String>,
+    content_type: Option<String>,
+    raw_headers: Vec<u8>,
+    data: Vec<u8>,
+}
+
+enum ImageRequestPayload {
+    Json(Value),
+    Multipart {
+        boundary: String,
+        content_type: String,
+        raw_body: axum::body::Bytes,
+        parts: Vec<MultipartPart>,
+    },
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn extract_multipart_boundary(content_type: &str) -> Option<String> {
+    let mut segments = content_type.split(';');
+    let media_type = segments.next()?.trim().to_ascii_lowercase();
+    if media_type != "multipart/form-data" {
+        return None;
+    }
+    for param in segments {
+        if let Some((k, v)) = param.trim().split_once('=') {
+            if k.trim().eq_ignore_ascii_case("boundary") {
+                let boundary = v.trim().trim_matches('"').trim();
+                if !boundary.is_empty() {
+                    return Some(boundary.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn split_header_params(val: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = val.as_bytes();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_quotes = false;
+            }
+        } else if b == b'"' {
+            in_quotes = true;
+        } else if b == b';' {
+            parts.push(&val[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&val[start..]);
+    parts
+}
+
+fn parse_content_disposition(val: &str) -> (String, Option<String>) {
+    let mut name = String::new();
+    let mut filename = None;
+    for seg in split_header_params(val) {
+        if let Some((k, v)) = seg.trim().split_once('=') {
+            let key = k.trim();
+            let raw_val = v.trim();
+            let unquoted = raw_val
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(raw_val)
+                .to_string();
+            if key.eq_ignore_ascii_case("name") {
+                name = unquoted;
+            } else if key.eq_ignore_ascii_case("filename") {
+                filename = Some(unquoted);
+            }
+        }
+    }
+    (name, filename)
+}
+
+fn consume_line_ending_after_boundary(slice: &[u8]) -> Option<usize> {
+    let mut idx = 0usize;
+    while idx < slice.len() && (slice[idx] == b' ' || slice[idx] == b'\t') {
+        idx += 1;
+    }
+    if slice[idx..].starts_with(b"\r\n") {
+        Some(idx + 2)
+    } else if slice[idx..].starts_with(b"\n") {
+        Some(idx + 1)
+    } else {
+        None
+    }
+}
+
+fn parse_multipart_parts(body: &[u8], boundary: &str) -> Result<Vec<MultipartPart>, String> {
+    let delim_str = format!("--{}", boundary);
+    let delim = delim_str.as_bytes();
+    let mut cursor = 0usize;
+    let mut delim_pos = loop {
+        let rel = find_subslice(&body[cursor..], delim)
+            .ok_or_else(|| "Malformed multipart/form-data body: missing boundary".to_string())?;
+        let pos = cursor + rel;
+        let line_start_ok = pos == 0 || body[pos - 1] == b'\n';
+        let tail = &body[pos + delim.len()..];
+        if line_start_ok
+            && (tail.starts_with(b"--") || consume_line_ending_after_boundary(tail).is_some())
+        {
+            break pos;
+        }
+        cursor = pos + delim.len();
+    };
+
+    let mut parts = Vec::new();
+    loop {
+        let tail = &body[delim_pos + delim.len()..];
+        if tail.starts_with(b"--") {
+            break;
+        }
+        let eol_len = consume_line_ending_after_boundary(tail).ok_or_else(|| {
+            "Malformed multipart/form-data body: invalid boundary ending".to_string()
+        })?;
+        let part_start = delim_pos + delim.len() + eol_len;
+
+        let mut search = part_start;
+        let (next_delim_pos, body_end) = loop {
+            let rel = find_subslice(&body[search..], delim).ok_or_else(|| {
+                "Malformed multipart/form-data body: missing closing boundary".to_string()
+            })?;
+            let cand_pos = search + rel;
+            let cand_tail = &body[cand_pos + delim.len()..];
+            let valid_tail =
+                cand_tail.starts_with(b"--") || consume_line_ending_after_boundary(cand_tail).is_some();
+            if cand_pos > part_start && body[cand_pos - 1] == b'\n' && valid_tail {
+                let end = if cand_pos >= part_start + 2 && &body[cand_pos - 2..cand_pos] == b"\r\n" {
+                    cand_pos - 2
+                } else {
+                    cand_pos - 1
+                };
+                break (cand_pos, end);
+            }
+            search = cand_pos + delim.len();
+        };
+
+        let part_slice = &body[part_start..body_end];
+        let crlf_sep = find_subslice(part_slice, b"\r\n\r\n").map(|p| (p, 4usize));
+        let lf_sep = find_subslice(part_slice, b"\n\n").map(|p| (p, 2usize));
+        let (sep_pos, sep_len) = match (crlf_sep, lf_sep) {
+            (Some(a), Some(b)) => if a.0 <= b.0 { a } else { b },
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => {
+                return Err("Malformed multipart/form-data part: missing header separator".to_string());
+            }
+        };
+
+        let raw_headers = part_slice[..sep_pos].to_vec();
+        let data = part_slice[sep_pos + sep_len..].to_vec();
+        let headers_str = String::from_utf8_lossy(&raw_headers);
+        let mut name = String::new();
+        let mut filename = None;
+        let mut content_type = None;
+
+        for line in headers_str.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some((hk, hv)) = line.split_once(':') {
+                if hk.trim().eq_ignore_ascii_case("content-disposition") {
+                    let (parsed_name, parsed_file) = parse_content_disposition(hv);
+                    name = parsed_name;
+                    filename = parsed_file;
+                } else if hk.trim().eq_ignore_ascii_case("content-type") {
+                    let ct = hv.split(';').next().unwrap_or(hv).trim().to_lowercase();
+                    if !ct.is_empty() {
+                        content_type = Some(ct);
+                    }
+                }
+            }
+        }
+
+        if !name.is_empty() {
+            parts.push(MultipartPart {
+                name,
+                filename,
+                content_type,
+                raw_headers,
+                data,
+            });
+        }
+
+        delim_pos = next_delim_pos;
+    }
+
+    Ok(parts)
+}
+
+fn infer_image_mime_type(part: &MultipartPart) -> &'static str {
+    if let Some(ref ct) = part.content_type {
+        let lower = ct.trim().to_ascii_lowercase();
+        if !lower.is_empty() && lower != "application/octet-stream" {
+            return match lower.as_str() {
+                "image/jpeg" | "image/jpg" => "image/jpeg",
+                "image/webp" => "image/webp",
+                "image/gif" => "image/gif",
+                _ => "image/png",
+            };
+        }
+    }
+    if let Some(ref name) = part.filename {
+        let lower = name.trim().to_ascii_lowercase();
+        if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            return "image/jpeg";
+        }
+        if lower.ends_with(".webp") {
+            return "image/webp";
+        }
+        if lower.ends_with(".gif") {
+            return "image/gif";
+        }
+    }
+    "image/png"
+}
+
+fn multipart_to_chatgpt_edits_json(
+    parts: &[MultipartPart],
+    target_model: &str,
+) -> Result<Value, String> {
+    let mut obj = serde_json::Map::new();
+    let mut images_arr = Vec::new();
+    let mut prompt = String::new();
+
+    for part in parts {
+        let is_image_field = part.name == "image"
+            || part.name == "image[]"
+            || part.name == "images"
+            || (part.filename.is_some() && part.name != "mask");
+
+        if is_image_field {
+            if part.filename.is_none() {
+                if let Ok(text) = std::str::from_utf8(&part.data) {
+                    let trimmed = text.trim();
+                    if trimmed.starts_with("http://")
+                        || trimmed.starts_with("https://")
+                        || trimmed.starts_with("data:")
+                    {
+                        images_arr.push(json!({ "image_url": trimmed }));
+                        continue;
+                    }
+                }
+            }
+            if !part.data.is_empty() {
+                let mime = infer_image_mime_type(part);
+                let b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &part.data,
+                );
+                images_arr.push(json!({
+                    "image_url": format!("data:{};base64,{}", mime, b64)
+                }));
+            }
+            continue;
+        }
+
+        if part.name == "model" || (part.name == "mask" && part.filename.is_some()) {
+            continue;
+        }
+
+        if let Ok(text) = std::str::from_utf8(&part.data) {
+            let trimmed = text.trim();
+            if part.name == "prompt" {
+                prompt = trimmed.to_string();
+                if !trimmed.is_empty() {
+                    obj.insert("prompt".to_string(), json!(trimmed));
+                }
+            } else if !trimmed.is_empty() {
+                if part.name == "n" || part.name == "output_compression" {
+                    if let Ok(num) = trimmed.parse::<u64>() {
+                        obj.insert(part.name.clone(), json!(num));
+                    } else {
+                        obj.insert(part.name.clone(), json!(trimmed));
+                    }
+                } else {
+                    obj.insert(part.name.clone(), json!(trimmed));
+                }
+            }
+        }
+    }
+
+    if prompt.is_empty() {
+        return Err("Missing required parameter: 'prompt'".to_string());
+    }
+
+    obj.insert("model".to_string(), json!(target_model));
+    obj.insert("images".to_string(), Value::Array(images_arr));
+    Ok(Value::Object(obj))
+}
+
+fn rewrite_multipart_model(parts: &[MultipartPart], boundary: &str, target_model: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in parts {
+        out.extend_from_slice(b"--");
+        out.extend_from_slice(boundary.as_bytes());
+        out.extend_from_slice(b"\r\n");
+        if part.name == "model" {
+            out.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
+            out.extend_from_slice(target_model.as_bytes());
+        } else {
+            out.extend_from_slice(&part.raw_headers);
+            out.extend_from_slice(b"\r\n\r\n");
+            out.extend_from_slice(&part.data);
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"--");
+    out.extend_from_slice(boundary.as_bytes());
+    out.extend_from_slice(b"--\r\n");
+    out
+}
+
+fn normalize_chatgpt_edits_json(body: &Value, target_model: &str) -> Value {
+    let mut obj = body.as_object().cloned().unwrap_or_default();
+    obj.insert("model".to_string(), json!(target_model));
+
+    if !obj.contains_key("images") {
+        if let Some(img_val) = obj.remove("image") {
+            let converted = match img_val {
+                Value::String(s) => vec![json!({ "image_url": s })],
+                Value::Array(arr) => arr
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        Value::String(s) => Some(json!({ "image_url": s })),
+                        Value::Object(_) => Some(item),
+                        _ => None,
+                    })
+                    .collect(),
+                Value::Object(_) => vec![img_val],
+                _ => Vec::new(),
+            };
+            obj.insert("images".to_string(), Value::Array(converted));
+        }
+    } else if let Some(Value::Array(arr)) = obj.get_mut("images") {
+        for item in arr.iter_mut() {
+            if let Some(s) = item.as_str().map(str::to_string) {
+                *item = json!({ "image_url": s });
+            }
+        }
+    }
+
+    Value::Object(obj)
+}
+
+fn extract_image_usage_tokens(resp_bytes: &[u8], fallback_prompt: u32) -> (u32, u32) {
+    let Ok(val) = serde_json::from_slice::<Value>(resp_bytes) else {
+        return (fallback_prompt, 0);
+    };
+    let Some(usage) = val.get("usage") else {
+        return (fallback_prompt, 0);
+    };
+    let prompt_tokens = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .filter(|&n| n > 0)
+        .map(|n| n as u32)
+        .unwrap_or(fallback_prompt);
+    let completion_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .map(|n| n as u32)
+        .unwrap_or(0);
+    (prompt_tokens, completion_tokens)
+}
+
+fn build_json_passthru_response(
+    status: StatusCode,
+    content_type: &str,
+    bytes: axum::body::Bytes,
+) -> Response {
+    Response::builder()
+        .status(status)
+        .header("content-type", content_type)
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn dispatch_chatgpt_image_json(
+    state: &GatewayState,
+    cand: &RouteCandidate,
+    endpoint_suffix: &str,
+    payload: &Value,
+    estimated_prompt: u32,
+) -> Result<DispatchResult, (StatusCode, String)> {
+    let client = &state.http_client;
+    let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
+    let upstream_url = resolve_chatgpt_codex_endpoint(&cand.provider.base_url, endpoint_suffix);
+
+    const MAX_ACCOUNT_ATTEMPTS: usize = 4;
+    let mut excluded_accounts: Vec<String> = Vec::new();
+    let mut last_upstream_err: Option<(StatusCode, String)> = None;
+    let mut res_opt = None;
+
+    let send_with_token = |token: &str| {
+        client
+            .post(&upstream_url)
+            .timeout(timeout)
+            .header("authorization", format!("Bearer {}", token))
+            .header("user-agent", crate::oauth::codex_user_agent())
+            .header("content-type", "application/json")
+            .json(payload)
+            .send()
+    };
+
+    for attempt_idx in 0..MAX_ACCOUNT_ATTEMPTS {
+        let account = match crate::oauth::acquire_subscription_account_with_options(
+            &state.db,
+            client,
+            &cand.provider.id,
+            Some(&cand.target_model),
+            &excluded_accounts,
+            false,
+        )
+        .await
+        {
+            Ok(acc) => acc,
+            Err(e) => {
+                if attempt_idx > 0 && last_upstream_err.is_some() {
+                    break;
+                }
+                return Err(e);
+            }
+        };
+
+        let mut res = match send_with_token(&account.access_token).await {
+            Ok(r) => r,
+            Err(e) => {
+                let is_req_timeout = e.is_timeout() && !e.is_connect();
+                let (err_status, err_msg) = map_upstream_request_error(&e, timeout);
+                if !is_req_timeout && attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
+                    crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                    excluded_accounts.push(account.id.clone());
+                    last_upstream_err = Some((err_status, err_msg));
+                    continue;
+                }
+                return Err((err_status, err_msg));
+            }
+        };
+
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            match crate::oauth::ensure_or_refresh_account_token(
+                &state.db,
+                client,
+                &account.id,
+                Some(&account.access_token),
+            )
+            .await
+            {
+                Ok(refreshed) => match send_with_token(&refreshed.access_token).await {
+                    Ok(retried) => {
+                        res = retried;
+                        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+                            let _ = state.db.set_account_auth_invalid(&refreshed.id, true);
+                        }
+                    }
+                    Err(retry_err) => {
+                        let (_, err_msg) = map_upstream_request_error(&retry_err, timeout);
+                        crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                        excluded_accounts.push(account.id.clone());
+                        last_upstream_err = Some((
+                            StatusCode::BAD_GATEWAY,
+                            format!("Upstream retry network error: {}", err_msg),
+                        ));
+                        continue;
+                    }
+                },
+                Err(refresh_err) => {
+                    if !crate::oauth::is_token_revoked_or_invalid(&refresh_err) {
+                        crate::oauth::mark_account_cooldown(&state.db, &account.id, 30);
+                    }
+                    excluded_accounts.push(account.id.clone());
+                    last_upstream_err = Some((StatusCode::UNAUTHORIZED, refresh_err));
+                    continue;
+                }
+            }
+        }
+
+        if res.status().is_success() {
+            crate::oauth::clear_account_model_soft_backoff(&account.id, &cand.target_model);
+            res_opt = Some(res);
+            break;
+        }
+
+        let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let text = res.text().await.unwrap_or_default();
+
+        if status == StatusCode::UNAUTHORIZED {
+            let _ = state.db.set_account_auth_invalid(&account.id, true);
+            excluded_accounts.push(account.id.clone());
+            last_upstream_err = Some((status, text));
+            continue;
+        }
+
+        if crate::oauth::is_model_unsupported_for_account(status, &text) {
+            tracing::warn!(
+                "ChatGPT account {} rejected image model '{}', backing off and trying next account...",
+                account.id,
+                cand.target_model
+            );
+            crate::oauth::mark_account_model_soft_backoff(&account.id, &cand.target_model, 300);
+            excluded_accounts.push(account.id.clone());
+            last_upstream_err = Some((status, text));
+            continue;
+        }
+
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let lower = text.to_lowercase();
+            if lower.contains("usage_limit_reached") || lower.contains("quota_exceeded") {
+                crate::oauth::mark_account_cooldown(&state.db, &account.id, 300);
+            } else {
+                let backoff = crate::oauth::parse_upstream_retry_backoff_secs(&text, 15, 30);
+                crate::oauth::mark_account_model_soft_backoff(
+                    &account.id,
+                    &cand.target_model,
+                    backoff,
+                );
+            }
+            if attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
+                excluded_accounts.push(account.id.clone());
+                last_upstream_err = Some((status, text));
+                continue;
+            }
+        } else if status == StatusCode::SERVICE_UNAVAILABLE {
+            let backoff = crate::oauth::parse_upstream_retry_backoff_secs(&text, 10, 30);
+            crate::oauth::mark_account_model_soft_backoff(
+                &account.id,
+                &cand.target_model,
+                backoff,
+            );
+            if attempt_idx + 1 < MAX_ACCOUNT_ATTEMPTS {
+                excluded_accounts.push(account.id.clone());
+                last_upstream_err = Some((status, text));
+                continue;
+            }
+        }
+
+        return Err((status, text));
+    }
+
+    let res = match res_opt {
+        Some(r) => r,
+        None => {
+            return Err(last_upstream_err.unwrap_or_else(|| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "No response from ChatGPT image upstream".to_string(),
+                )
+            }))
+        }
+    };
+
+    let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::OK);
+    let content_type = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to read ChatGPT image response: {}", e)))?;
+    let (prompt_tokens, completion_tokens) = extract_image_usage_tokens(&bytes, estimated_prompt);
+
+    Ok(DispatchResult {
+        response: build_json_passthru_response(status, &content_type, bytes),
+        prompt_tokens,
+        completion_tokens,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_image_candidate(
+    state: &GatewayState,
+    cand: &RouteCandidate,
+    incoming_model: &str,
+    endpoint_suffix: &str,
+    payload: &ImageRequestPayload,
+    estimated_prompt: u32,
+    req_id: &str,
+    client_key: Option<&str>,
+    client_ua: Option<&str>,
+    client_type: &str,
+    headers: &HeaderMap,
+) -> Result<DispatchResult, (StatusCode, String)> {
+    match cand.provider.protocol.as_str() {
+        "chatgpt" => {
+            let chatgpt_body = match (endpoint_suffix, payload) {
+                ("/images/generations", ImageRequestPayload::Json(val)) => {
+                    let mut obj = val.as_object().cloned().unwrap_or_default();
+                    obj.insert("model".to_string(), json!(cand.target_model));
+                    Value::Object(obj)
+                }
+                ("/images/edits", ImageRequestPayload::Json(val)) => {
+                    normalize_chatgpt_edits_json(val, &cand.target_model)
+                }
+                ("/images/edits", ImageRequestPayload::Multipart { parts, .. }) => {
+                    multipart_to_chatgpt_edits_json(parts, &cand.target_model)
+                        .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?
+                }
+                _ => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Unsupported payload format for ChatGPT image endpoint".to_string(),
+                    ));
+                }
+            };
+            dispatch_chatgpt_image_json(
+                state,
+                cand,
+                endpoint_suffix,
+                &chatgpt_body,
+                estimated_prompt,
+            )
+            .await
+        }
+        "openai" | "openrouter" | "ollama" => {
+            let url = resolve_upstream_endpoint(&cand.provider.base_url, endpoint_suffix);
+            let timeout = resolve_dispatch_timeout(cand, estimated_prompt);
+            let effective_key = cand.api_key.as_deref().or(client_key);
+            let forward_ua = resolve_forward_user_agent(client_ua, client_type);
+
+            let mut req_builder = state
+                .http_client
+                .post(&url)
+                .timeout(timeout)
+                .header("user-agent", &forward_ua);
+
+            req_builder =
+                apply_upstream_headers(req_builder, &cand.provider, headers, None, req_id);
+
+            if let Some(key) = effective_key {
+                req_builder = req_builder.header("authorization", format!("Bearer {}", key));
+            }
+
+            req_builder = match payload {
+                ImageRequestPayload::Json(val) => {
+                    let mut obj = val.as_object().cloned().unwrap_or_default();
+                    obj.insert("model".to_string(), json!(cand.target_model));
+                    req_builder
+                        .header("content-type", "application/json")
+                        .json(&Value::Object(obj))
+                }
+                ImageRequestPayload::Multipart {
+                    boundary,
+                    content_type,
+                    raw_body,
+                    parts,
+                } => {
+                    if cand.target_model == incoming_model {
+                        req_builder
+                            .header("content-type", content_type.as_str())
+                            .body(raw_body.clone())
+                    } else {
+                        let rewritten =
+                            rewrite_multipart_model(parts, boundary, &cand.target_model);
+                        req_builder
+                            .header(
+                                "content-type",
+                                format!("multipart/form-data; boundary={}", boundary),
+                            )
+                            .body(rewritten)
+                    }
+                }
+            };
+
+            let res = req_builder
+                .send()
+                .await
+                .map_err(|e| map_upstream_request_error(&e, timeout))?;
+
+            if !res.status().is_success() {
+                let status =
+                    StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let text = res.text().await.unwrap_or_default();
+                return Err((status, text));
+            }
+
+            let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::OK);
+            let content_type = res
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            let bytes = res
+                .bytes()
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            let (prompt_tokens, completion_tokens) =
+                extract_image_usage_tokens(&bytes, estimated_prompt);
+
+            Ok(DispatchResult {
+                response: build_json_passthru_response(status, &content_type, bytes),
+                prompt_tokens,
+                completion_tokens,
+            })
+        }
+        _ => Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Provider '{}' (protocol '{}') does not support OpenAI images endpoint",
+                cand.provider.name, cand.provider.protocol
+            ),
+        )),
+    }
+}
+
+async fn execute_image_endpoint(
+    state: GatewayState,
+    headers: HeaderMap,
+    path_label: &'static str,
+    endpoint_suffix: &'static str,
+    incoming_model: String,
+    estimated_prompt: u32,
+    payload: ImageRequestPayload,
+) -> Response {
+    let start_time = Instant::now();
+    let req_id = uuid::Uuid::new_v4().to_string();
+    state.stats.active_requests.fetch_add(1, Ordering::Relaxed);
+    state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+
+    let client_type = detect_client_type(&headers, "openai_api");
+    let session_id = extract_session_id(&headers);
+    let client_key = extract_client_api_key(&headers);
+    let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
+    let providers = state.db.get_providers().unwrap_or_default();
+
+    let route_match = match state
+        .router
+        .resolve_route(&incoming_model, session_id.as_deref(), &providers)
+    {
+        Ok(rm) => rm,
+        Err(err) => {
+            state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+            log_request(
+                &state,
+                RequestLog {
+                    id: req_id.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    method: "POST".to_string(),
+                    path: path_label.to_string(),
+                    client_type,
+                    incoming_model,
+                    routed_provider_id: "none".to_string(),
+                    routed_provider_name: None,
+                    routed_model: String::new(),
+                    status_code: StatusCode::BAD_GATEWAY.as_u16() as i32,
+                    latency_ms: start_time.elapsed().as_millis() as i64,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error_message: Some(err.clone()),
+                    is_stream: false,
+                    fallback_used: false,
+                    attempts: Vec::new(),
+                },
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": { "message": err, "type": "routing_error" } })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut candidates = vec![route_match.primary];
+    candidates.extend(route_match.fallbacks);
+
+    let mut attempts: Vec<LogAttempt> = Vec::new();
+    let mut last_error = String::new();
+    let mut last_status = StatusCode::BAD_GATEWAY;
+    let mut fallback_used = false;
+
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        if cand_idx > 0 {
+            fallback_used = true;
+            tracing::warn!(
+                "Failing over {} to fallback candidate {} ({})",
+                path_label,
+                cand.provider.name,
+                cand.target_model
+            );
+        }
+
+        let attempt_started = Instant::now();
+        match dispatch_image_candidate(
+            &state,
+            cand,
+            &incoming_model,
+            endpoint_suffix,
+            &payload,
+            estimated_prompt,
+            &req_id,
+            client_key.as_deref(),
+            client_ua,
+            &client_type,
+            &headers,
+        )
+        .await
+        {
+            Ok(result) => {
+                let latency_ms = start_time.elapsed().as_millis() as i64;
+                attempts.push(attempt(
+                    cand,
+                    StatusCode::OK,
+                    None,
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
+                state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_prompt_tokens
+                    .fetch_add(result.prompt_tokens as u64, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_completion_tokens
+                    .fetch_add(result.completion_tokens as u64, Ordering::Relaxed);
+
+                log_request(
+                    &state,
+                    RequestLog {
+                        id: req_id,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        method: "POST".to_string(),
+                        path: path_label.to_string(),
+                        client_type,
+                        incoming_model,
+                        routed_provider_id: cand.provider.id.clone(),
+                        routed_provider_name: Some(cand.provider.name.clone()),
+                        routed_model: cand.target_model.clone(),
+                        status_code: 200,
+                        latency_ms,
+                        prompt_tokens: result.prompt_tokens as i32,
+                        completion_tokens: result.completion_tokens as i32,
+                        error_message: None,
+                        is_stream: false,
+                        fallback_used,
+                        attempts,
+                    },
+                );
+
+                return result.response;
+            }
+            Err((status, err_msg)) => {
+                attempts.push(attempt(
+                    cand,
+                    status,
+                    Some(summarize_error(&err_msg)),
+                    attempt_started.elapsed().as_millis() as i64,
+                ));
+                last_error = err_msg;
+                last_status = status;
+                if status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED {
+                    break;
+                }
+            }
+        }
+    }
+
+    state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+    state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+    let latency_ms = start_time.elapsed().as_millis() as i64;
+
+    log_request(
+        &state,
+        RequestLog {
+            id: req_id,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: "POST".to_string(),
+            path: path_label.to_string(),
+            client_type,
+            incoming_model,
+            routed_provider_id: candidates
+                .first()
+                .map(|c| c.provider.id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            routed_provider_name: candidates.first().map(|c| c.provider.name.clone()),
+            routed_model: candidates
+                .first()
+                .map(|c| c.target_model.clone())
+                .unwrap_or_default(),
+            status_code: last_status.as_u16() as i32,
+            latency_ms,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error_message: Some(last_error.clone()),
+            is_stream: false,
+            fallback_used,
+            attempts,
+        },
+    );
+
+    if let Ok(val) = serde_json::from_str::<Value>(&last_error) {
+        if val.get("error").is_some() {
+            return (last_status, Json(val)).into_response();
+        }
+    }
+
+    (
+        last_status,
+        Json(json!({ "error": { "message": last_error, "type": "upstream_error" } })),
+    )
+        .into_response()
+}
+
+fn image_invalid_request(msg: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "message": msg.into(),
+                "type": "invalid_request_error"
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn parse_json_image_request(body_bytes: &[u8]) -> Result<(String, u32, Value), Response> {
+    let body: Value = match serde_json::from_slice::<Value>(body_bytes) {
+        Ok(v) if v.is_object() => v,
+        Ok(_) => return Err(image_invalid_request("Request body must be a JSON object")),
+        Err(e) => {
+            return Err(image_invalid_request(format!(
+                "Failed to parse request body as JSON: {}",
+                e
+            )))
+        }
+    };
+
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if model.is_empty() {
+        return Err(image_invalid_request("Missing required parameter: 'model'"));
+    }
+
+    let prompt = body
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if prompt.is_empty() {
+        return Err(image_invalid_request("Missing required parameter: 'prompt'"));
+    }
+
+    Ok((model, estimate_text_tokens(prompt), body))
+}
+
+/// Handler for OpenAI-compatible image generation calling `/v1/images/generations` (and `/images/generations`)
+async fn handle_images_generations(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body_bytes: axum::body::Bytes,
+) -> Response {
+    let (model, estimated_prompt, body) = match parse_json_image_request(&body_bytes) {
+        Ok(parsed) => parsed,
+        Err(resp) => return resp,
+    };
+    execute_image_endpoint(
+        state,
+        headers,
+        "/v1/images/generations",
+        "/images/generations",
+        model,
+        estimated_prompt,
+        ImageRequestPayload::Json(body),
+    )
+    .await
+}
+
+/// Handler for OpenAI-compatible image editing calling `/v1/images/edits` (and `/images/edits`)
+async fn handle_images_edits(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body_bytes: axum::body::Bytes,
+) -> Response {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if let Some(boundary) = extract_multipart_boundary(content_type) {
+        let parts = match parse_multipart_parts(&body_bytes, &boundary) {
+            Ok(p) => p,
+            Err(e) => return image_invalid_request(e),
+        };
+        let extract_text_field = |field: &str| {
+            parts
+                .iter()
+                .find(|p| p.name == field)
+                .and_then(|p| std::str::from_utf8(&p.data).ok())
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string()
+        };
+        let model = extract_text_field("model");
+        if model.is_empty() {
+            return image_invalid_request("Missing required parameter: 'model'");
+        }
+        let prompt = extract_text_field("prompt");
+        if prompt.is_empty() {
+            return image_invalid_request("Missing required parameter: 'prompt'");
+        }
+        let estimated_prompt = estimate_text_tokens(&prompt);
+        let ct_owned = content_type.to_string();
+        return execute_image_endpoint(
+            state,
+            headers,
+            "/v1/images/edits",
+            "/images/edits",
+            model,
+            estimated_prompt,
+            ImageRequestPayload::Multipart {
+                boundary,
+                content_type: ct_owned,
+                raw_body: body_bytes,
+                parts,
+            },
+        )
+        .await;
+    }
+
+    let (model, estimated_prompt, body) = match parse_json_image_request(&body_bytes) {
+        Ok(parsed) => parsed,
+        Err(resp) => return resp,
+    };
+    execute_image_endpoint(
+        state,
+        headers,
+        "/v1/images/edits",
+        "/images/edits",
+        model,
+        estimated_prompt,
+        ImageRequestPayload::Json(body),
+    )
+    .await
+}
+
 async fn dispatch_openai_request(
     state: &GatewayState,
     req: &OpenAIChatRequest,
@@ -4927,5 +6012,431 @@ mod tests {
         let claude_est = estimate_anthropic_count_tokens_fallback(&req, "claude-sonnet-4-6");
         assert!(claude_est > 20);
         assert!(gem_est > claude_est);
+    }
+
+    async fn spawn_test_gateway(db: Database) -> (String, tokio::task::JoinHandle<()>) {
+        let state = GatewayState {
+            db,
+            router: Arc::new(RoutingEngine::new()),
+            http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            stats: Arc::new(GatewayStatsInternal::default()),
+            log_sender: None,
+        };
+        let app = create_gateway_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn test_temp_db(tag: &str) -> (Database, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pivot-img-{}-{}", tag, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let db = Database::new(db_path.clone()).unwrap();
+        (db, dir)
+    }
+
+    #[tokio::test]
+    async fn chatgpt_subscription_images_generations_and_401_failover() {
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String, Value)>::new()));
+        let captured_clone = captured.clone();
+
+        let upstream_app = Router::new().route(
+            "/backend-api/codex/images/generations",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let cap = captured_clone.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let ua = headers
+                        .get("user-agent")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    cap.lock().await.push((auth.clone(), ua, body));
+                    if auth == "Bearer tok_bad" {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({ "error": { "message": "expired", "type": "auth_error" } })),
+                        )
+                            .into_response();
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "created": 1700000000,
+                            "data": [{ "b64_json": "iVBORw0KGgo=" }],
+                            "usage": { "input_tokens": 12, "output_tokens": 100 }
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+
+        let up_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = up_listener.local_addr().unwrap();
+        let up_handle = tokio::spawn(async move {
+            axum::serve(up_listener, upstream_app).await.unwrap();
+        });
+
+        let (db, tmp_dir) = test_temp_db("gen");
+        db.save_provider(&crate::db::Provider {
+            id: "prov_chatgpt".to_string(),
+            name: "ChatGPT".to_string(),
+            protocol: "chatgpt".to_string(),
+            base_url: format!("http://{}/backend-api", up_addr),
+            preset_id: Some("chatgpt_subscription".to_string()),
+            auth_type: Some("subscription_pool".to_string()),
+            api_keys: vec![],
+            models: vec![
+                "gpt-image-2.6-flare".to_string(),
+                "gpt-image-2.6-sunburst".to_string(),
+            ],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .unwrap();
+
+        let future_exp = chrono::Utc::now().timestamp() + 3600;
+        for (id, tok) in [("acc_1", "tok_bad"), ("acc_2", "tok_good")] {
+            db.save_subscription_account(&crate::db::SubscriptionAccount {
+                id: id.to_string(),
+                provider_id: "prov_chatgpt".to_string(),
+                account_type: "chatgpt".to_string(),
+                email: Some(format!("{}@example.com", id)),
+                access_token: tok.to_string(),
+                refresh_token: None,
+                expires_at: future_exp,
+                cooldown_until: 0,
+                enabled: true,
+                plan_type: Some("Pro".to_string()),
+                // Deliberately only contains chat models, NOT image models
+                supported_models: Some(vec!["gpt-6.2-sol".to_string()]),
+                auth_invalid: false,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .unwrap();
+        }
+
+        let (gw_base, gw_handle) = spawn_test_gateway(db.clone()).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 1. Standard /v1/images/generations
+        let resp1 = client
+            .post(format!("{}/v1/images/generations", gw_base))
+            .json(&json!({
+                "model": "gpt-image-2.6-flare",
+                "prompt": "draw a sunset",
+                "size": "1024x1024"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1: Value = resp1.json().await.unwrap();
+        assert_eq!(body1["data"][0]["b64_json"], "iVBORw0KGgo=");
+
+        // 2. No-/v1 alias /images/generations with provider prefix routing
+        let resp2 = client
+            .post(format!("{}/images/generations", gw_base))
+            .json(&json!({
+                "model": "chatgpt/gpt-image-2.6-flare",
+                "prompt": "draw a cat"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2: Value = resp2.json().await.unwrap();
+        assert_eq!(body2["data"][0]["b64_json"], "iVBORw0KGgo=");
+
+        let calls = captured.lock().await;
+        assert!(calls.iter().all(|(_, ua, body)| {
+            ua.starts_with("codex-cli/") && body["model"] == "gpt-image-2.6-flare"
+        }));
+        assert!(calls.iter().any(|(auth, _, _)| auth == "Bearer tok_good"));
+
+        let logs = db.get_logs(10, 0).unwrap();
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().all(|l| l.status_code == 200 && l.routed_model == "gpt-image-2.6-flare"));
+
+        let acc2 = db.get_subscription_account_by_id("acc_2").unwrap().unwrap();
+        assert_eq!(acc2.supported_models, Some(vec!["gpt-6.2-sol".to_string()]));
+
+        gw_handle.abort();
+        up_handle.abort();
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn chatgpt_and_openai_images_edits_support_json_and_multipart() {
+        let chatgpt_edits = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let openai_edits = Arc::new(tokio::sync::Mutex::new(Vec::<(String, String, Vec<u8>)>::new()));
+
+        let cg_cap = chatgpt_edits.clone();
+        let oai_cap = openai_edits.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/backend-api/codex/images/edits",
+                post(move |Json(body): Json<Value>| {
+                    let cap = cg_cap.clone();
+                    async move {
+                        cap.lock().await.push(body);
+                        Json(json!({ "data": [{ "b64_json": "cg_edited" }] }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/images/edits",
+                post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                    let cap = oai_cap.clone();
+                    async move {
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let ct = headers
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        cap.lock().await.push((auth, ct, body.to_vec()));
+                        Json(json!({ "data": [{ "b64_json": "oai_edited" }] }))
+                    }
+                }),
+            );
+
+        let up_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = up_listener.local_addr().unwrap();
+        let up_handle = tokio::spawn(async move {
+            axum::serve(up_listener, upstream_app).await.unwrap();
+        });
+
+        let (db, tmp_dir) = test_temp_db("edits");
+        db.save_provider(&crate::db::Provider {
+            id: "prov_chatgpt".to_string(),
+            name: "ChatGPT".to_string(),
+            protocol: "chatgpt".to_string(),
+            base_url: format!("http://{}/backend-api", up_addr),
+            preset_id: Some("chatgpt_subscription".to_string()),
+            auth_type: Some("subscription_pool".to_string()),
+            api_keys: vec![],
+            models: vec!["gpt-image-2.6-flare".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 20,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .unwrap();
+
+        db.save_provider(&crate::db::Provider {
+            id: "prov_openai".to_string(),
+            name: "openai".to_string(),
+            protocol: "openai".to_string(),
+            base_url: format!("http://{}/v1", up_addr),
+            preset_id: None,
+            auth_type: None,
+            api_keys: vec!["sk-openai-test".to_string()],
+            models: vec!["gpt-image-2.6-sunburst".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .unwrap();
+
+        db.save_subscription_account(&crate::db::SubscriptionAccount {
+            id: "acc_cg".to_string(),
+            provider_id: "prov_chatgpt".to_string(),
+            account_type: "chatgpt".to_string(),
+            email: Some("cg@example.com".to_string()),
+            access_token: "tok_cg".to_string(),
+            refresh_token: None,
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+            cooldown_until: 0,
+            enabled: true,
+            plan_type: Some("Pro".to_string()),
+            supported_models: Some(vec!["gpt-6.2-sol".to_string()]),
+            auth_invalid: false,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        let (gw_base, gw_handle) = spawn_test_gateway(db).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let fake_png = b"\x89PNG\r\n\x1a\nfake-png-bytes";
+        let build_mp = |model_val: &str, boundary: &str| {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model_val}\r\n").as_bytes());
+            buf.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n").as_bytes());
+            buf.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n2\r\n").as_bytes());
+            buf.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"test.png\"\r\nContent-Type: image/png\r\n\r\n").as_bytes());
+            buf.extend_from_slice(fake_png);
+            buf.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            buf
+        };
+
+        // 1. Multipart to ChatGPT subscription
+        let boundary1 = "PivotTestBoundary123";
+        let resp1 = client
+            .post(format!("{}/v1/images/edits", gw_base))
+            .header("content-type", format!("multipart/form-data; boundary={}", boundary1))
+            .body(build_mp("gpt-image-2.6-flare", boundary1))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let j1: Value = resp1.json().await.unwrap();
+        assert_eq!(j1["data"][0]["b64_json"], "cg_edited");
+
+        // 2. JSON edit with single "image" field to ChatGPT subscription
+        let resp_json = client
+            .post(format!("{}/v1/images/edits", gw_base))
+            .json(&json!({
+                "model": "gpt-image-2.6-flare",
+                "prompt": "add sunglasses",
+                "image": "https://example.com/a.png"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_json.status(), StatusCode::OK);
+
+        // 3. Multipart to OpenAI provider with prefix routing (rewrites model field)
+        let boundary2 = "PivotOpenAIBoundary456";
+        let resp2 = client
+            .post(format!("{}/images/edits", gw_base))
+            .header("content-type", format!("multipart/form-data; boundary={}", boundary2))
+            .body(build_mp("openai/gpt-image-2.6-sunburst", boundary2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let j2: Value = resp2.json().await.unwrap();
+        assert_eq!(j2["data"][0]["b64_json"], "oai_edited");
+
+        let cg_reqs = chatgpt_edits.lock().await;
+        assert_eq!(cg_reqs.len(), 2);
+        assert_eq!(cg_reqs[0]["model"], "gpt-image-2.6-flare");
+        assert_eq!(cg_reqs[0]["prompt"], "make it blue");
+        assert_eq!(cg_reqs[0]["n"], 2);
+        let expected_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, fake_png);
+        assert_eq!(
+            cg_reqs[0]["images"][0]["image_url"],
+            format!("data:image/png;base64,{}", expected_b64)
+        );
+        assert_eq!(
+            cg_reqs[1]["images"][0]["image_url"],
+            "https://example.com/a.png"
+        );
+
+        let oai_reqs = openai_edits.lock().await;
+        assert_eq!(oai_reqs.len(), 1);
+        assert_eq!(oai_reqs[0].0, "Bearer sk-openai-test");
+        let parsed_back = parse_multipart_parts(&oai_reqs[0].2, boundary2).unwrap();
+        let model_part = parsed_back.iter().find(|p| p.name == "model").unwrap();
+        assert_eq!(model_part.data, b"gpt-image-2.6-sunburst");
+        let img_part = parsed_back.iter().find(|p| p.name == "image").unwrap();
+        assert_eq!(img_part.data, fake_png);
+
+        gw_handle.abort();
+        up_handle.abort();
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn root_alias_routes_work_without_v1_prefix() {
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "chatcmpl_test",
+                    "object": "chat.completion",
+                    "created": 1700000000,
+                    "model": "gpt-4o",
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "pong" },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": { "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 }
+                }))
+            }),
+        );
+        let up_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = up_listener.local_addr().unwrap();
+        let up_handle = tokio::spawn(async move {
+            axum::serve(up_listener, upstream_app).await.unwrap();
+        });
+
+        let (db, tmp_dir) = test_temp_db("alias");
+        db.save_provider(&crate::db::Provider {
+            id: "prov_oai".to_string(),
+            name: "OpenAI".to_string(),
+            protocol: "openai".to_string(),
+            base_url: format!("http://{}/v1", up_addr),
+            preset_id: None,
+            auth_type: None,
+            api_keys: vec!["sk-test".to_string()],
+            models: vec!["gpt-4o".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .unwrap();
+
+        let (gw_base, gw_handle) = spawn_test_gateway(db).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let resp = client
+            .post(format!("{}/chat/completions", gw_base))
+            .json(&json!({
+                "model": "gpt-4o",
+                "messages": [{ "role": "user", "content": "ping" }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let val: Value = resp.json().await.unwrap();
+        assert_eq!(val["choices"][0]["message"]["content"], "pong");
+
+        gw_handle.abort();
+        up_handle.abort();
+        let _ = std::fs::remove_dir_all(tmp_dir);
     }
 }
