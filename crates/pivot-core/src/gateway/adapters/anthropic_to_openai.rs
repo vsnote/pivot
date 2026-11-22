@@ -256,25 +256,7 @@ pub fn convert_anthropic_req_to_openai(
             .collect()
     });
 
-    let reasoning_effort = if let Some(ref th) = req.thinking {
-        // Only map reasoning_effort for models that officially support it (e.g. OpenAI o1/o3)
-        // DeepSeek and standard models reject unexpected reasoning_effort values with 400 Bad Request
-        let is_o_series = target_model.contains("o1") || target_model.contains("o3");
-        if is_o_series && th.thinking_type == "enabled" {
-            let budget = th.budget_tokens.unwrap_or(8192);
-            if budget <= 3000 {
-                Some("low".to_string())
-            } else if budget <= 12000 {
-                Some("medium".to_string())
-            } else {
-                Some("high".to_string())
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let reasoning_effort = resolve_openai_reasoning_effort(req, target_model);
 
     let tool_choice = convert_anthropic_tool_choice_to_openai(&req.tool_choice);
 
@@ -293,6 +275,68 @@ pub fn convert_anthropic_req_to_openai(
             .filter(|s| *s)
             .map(|_| json!({ "include_usage": true })),
     }
+}
+
+fn is_openai_reasoning_target(target_model: &str) -> bool {
+    let lower = target_model.trim().to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    (name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+        || name.starts_with("gpt-5")
+        || name.starts_with("gpt-6"))
+        && !name.contains("preview")
+        && !name.contains("image")
+}
+
+fn resolve_openai_reasoning_effort(
+    req: &AnthropicMessageRequest,
+    target_model: &str,
+) -> Option<String> {
+    if !is_openai_reasoning_target(target_model) {
+        return None;
+    }
+    if req
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type.eq_ignore_ascii_case("disabled"))
+    {
+        return None;
+    }
+
+    if let Some(eff) = req.output_effort() {
+        return match eff.to_ascii_lowercase().as_str() {
+            "none" => None,
+            "minimal" | "low" => Some("low".to_string()),
+            "medium" => Some("medium".to_string()),
+            "high" => Some("high".to_string()),
+            "xhigh" | "max" | "ultra" => Some("xhigh".to_string()),
+            _ => None,
+        };
+    }
+
+    if let Some(ref th) = req.thinking {
+        if th.thinking_type.eq_ignore_ascii_case("enabled") {
+            let budget = th.budget_tokens.unwrap_or(8192);
+            return Some(
+                if budget <= 3000 {
+                    "low"
+                } else if budget <= 12000 {
+                    "medium"
+                } else if budget <= 24000 {
+                    "high"
+                } else {
+                    "xhigh"
+                }
+                .to_string(),
+            );
+        }
+        if th.thinking_type.eq_ignore_ascii_case("adaptive") {
+            return Some("high".to_string());
+        }
+    }
+
+    None
 }
 
 pub fn convert_anthropic_tool_choice_to_openai(choice: &Option<Value>) -> Option<Value> {
@@ -440,6 +484,7 @@ mod tests {
             tool_choice: None,
             stream: Some(true),
             thinking: None,
+            output_config: None,
             metadata: None,
         };
 
@@ -508,6 +553,7 @@ mod tests {
             tool_choice: None,
             stream: None,
             thinking: None,
+            output_config: None,
             metadata: None,
         };
 
@@ -566,6 +612,7 @@ mod tests {
             tool_choice: None,
             stream: None,
             thinking: None,
+            output_config: None,
             metadata: None,
         };
 
@@ -586,5 +633,79 @@ mod tests {
         let m3 = oai.messages[3].content.as_ref().unwrap().as_array().unwrap();
         assert_eq!(m3[0]["type"], "image_url");
         assert_eq!(m3[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_effort_and_adaptive_mapping() {
+        let base_req = AnthropicMessageRequest {
+            model: "gpt-6.2-astra".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: Value::String("Think deeply".to_string()),
+            }],
+            system: None,
+            max_tokens: Some(4096),
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            thinking: Some(crate::gateway::types::AnthropicThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+                budget_tokens: None,
+            }),
+            output_config: Some(json!({ "effort": "max" })),
+            metadata: None,
+        };
+
+        // GPT-6.2 Astra + adaptive + max -> xhigh
+        let gpt6_max = convert_anthropic_req_to_openai(&base_req, "gpt-6.2-astra");
+        assert_eq!(gpt6_max.reasoning_effort.as_deref(), Some("xhigh"));
+
+        // GPT-6.2 Astra + low -> low
+        let mut req_low = base_req.clone();
+        req_low.output_config = Some(json!({ "effort": "low" }));
+        assert_eq!(
+            convert_anthropic_req_to_openai(&req_low, "gpt-6.2-astra")
+                .reasoning_effort
+                .as_deref(),
+            Some("low")
+        );
+
+        // adaptive 无 output_config 时默认 high
+        let mut req_adaptive_only = base_req.clone();
+        req_adaptive_only.output_config = None;
+        assert_eq!(
+            convert_anthropic_req_to_openai(&req_adaptive_only, "o3-mini")
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+
+        // o4 系列支持，非推理/生图模型被保护为 None
+        assert_eq!(
+            convert_anthropic_req_to_openai(&base_req, "o4-mini")
+                .reasoning_effort
+                .as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            convert_anthropic_req_to_openai(&base_req, "deepseek-chat").reasoning_effort,
+            None
+        );
+        assert_eq!(
+            convert_anthropic_req_to_openai(&base_req, "gpt-image-2.6-flare").reasoning_effort,
+            None
+        );
+
+        // thinking.type = disabled 时即便带 output_config 也关闭推理
+        let mut req_disabled = base_req;
+        req_disabled.thinking = Some(crate::gateway::types::AnthropicThinkingConfig {
+            thinking_type: "disabled".to_string(),
+            budget_tokens: None,
+        });
+        assert_eq!(
+            convert_anthropic_req_to_openai(&req_disabled, "gpt-6.2-astra").reasoning_effort,
+            None
+        );
     }
 }

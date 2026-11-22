@@ -701,6 +701,10 @@ pub fn render_model_pool_section(
                                 let hover_key = format!("group:{}", group_key);
                                 let is_hovered =
                                     editor.hovered_pool_model.as_deref() == Some(hover_key.as_str());
+                                let expand_key =
+                                    format!("{}|{}", group_key, extra_tags.join(","));
+                                let is_expanded =
+                                    editor.expanded_pool_groups.contains(&expand_key);
                                 let wrap_pills = (base_name.chars().count() > 22
                                     && variants.len() >= 4)
                                     || (disambiguation.is_some() && variants.len() >= 3);
@@ -708,6 +712,8 @@ pub fn render_model_pool_section(
                                 let m_hover_enter = hover_key.clone();
                                 let m_hover_leave = hover_key;
                                 let group_ids_toggle = group_ids.clone();
+                                let group_ids_del = group_ids.clone();
+                                let expand_key_btn = expand_key;
                                 let next_group_select = !all_checked;
 
                                 let mut pills_row = div()
@@ -929,6 +935,82 @@ pub fn render_model_pool_section(
                                     );
                                 }
 
+                                if is_hovered || is_expanded {
+                                    header_left = header_left.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "btn_expand_group_{}",
+                                                idx
+                                            )))
+                                            .size(px(18.0))
+                                            .rounded(px(4.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(palette.secondary))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.editor_toggle_pool_group_expanded(
+                                                        expand_key_btn.clone(),
+                                                        cx,
+                                                    );
+                                                }),
+                                            )
+                                            .child(lucide_icon(
+                                                if is_expanded {
+                                                    IconName::ChevronUp
+                                                } else {
+                                                    IconName::ChevronDown
+                                                },
+                                                11.0,
+                                                palette.muted_foreground,
+                                            )),
+                                    );
+                                }
+
+                                if is_hovered {
+                                    let del_tip = locale
+                                        .pick("移除该组模型", "Remove group")
+                                        .to_string();
+                                    header_left = header_left.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "btn_del_group_{}",
+                                                idx
+                                            )))
+                                            .size(px(18.0))
+                                            .rounded(px(4.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(palette.destructive_soft_bg))
+                                            .tooltip(move |w, cx| {
+                                                Tooltip::new(del_tip.clone()).build(w, cx)
+                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.editor_delete_pool_models(
+                                                        group_ids_del.clone(),
+                                                        cx,
+                                                    );
+                                                }),
+                                            )
+                                            .child(lucide_icon(
+                                                IconName::Trash,
+                                                11.0,
+                                                palette.muted_foreground,
+                                            )),
+                                    );
+                                }
+
                                 let row_el = div()
                                     .id(SharedString::from(format!(
                                         "pool_group_row_{}_{}",
@@ -1002,6 +1084,250 @@ pub fn render_model_pool_section(
                                 };
 
                                 scroll_list = scroll_list.child(row_el);
+
+                                if is_expanded {
+                                    let mut sub_list = div()
+                                        .ml(px(14.0))
+                                        .pl(px(8.0))
+                                        .border_l_1()
+                                        .border_color(palette.border_subtle)
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(1.0));
+
+                                    for (v_idx, variant) in variants.iter().enumerate() {
+                                        let is_sub_checked =
+                                            selected_set.contains(variant.model_id.as_str());
+                                        let sub_stale = is_model_stale(&variant.model_id);
+                                        let sub_no_acc = is_model_no_account(&variant.model_id);
+                                        let is_sub_hovered = editor.hovered_pool_model.as_deref()
+                                            == Some(variant.model_id.as_str());
+                                        let sub_copy_key =
+                                            format!("pool_copy_{}", variant.model_id);
+                                        let is_sub_copied =
+                                            app.copied_id.as_deref() == Some(sub_copy_key.as_str());
+
+                                        let m_sub_hover = variant.model_id.clone();
+                                        let m_sub_toggle = variant.model_id.clone();
+                                        let m_sub_copy_val = variant.model_id.clone();
+                                        let m_sub_copy_id = sub_copy_key;
+                                        let m_sub_delete = variant.model_id.clone();
+
+                                        let sub_left = div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.0))
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .size(px(12.0))
+                                                    .rounded(px(3.0))
+                                                    .flex_shrink_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .mr(px(1.0))
+                                                    .border_1()
+                                                    .border_color(if is_sub_checked {
+                                                        palette.primary
+                                                    } else {
+                                                        palette.input
+                                                    })
+                                                    .bg(if is_sub_checked {
+                                                        palette.primary
+                                                    } else {
+                                                        palette.background
+                                                    })
+                                                    .when(is_sub_checked, |box_el| {
+                                                        box_el.child(lucide_icon(
+                                                            IconName::Check,
+                                                            8.5,
+                                                            palette.primary_foreground,
+                                                        ))
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_size(px(11.0))
+                                                    .font_weight(if is_sub_checked {
+                                                        FontWeight::MEDIUM
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
+                                                    .text_color(if is_sub_checked {
+                                                        palette.foreground
+                                                    } else {
+                                                        palette.muted_foreground
+                                                    })
+                                                    .truncate()
+                                                    .child(variant.model_id.clone()),
+                                            )
+                                            .when(is_sub_hovered || is_sub_copied, |el| {
+                                                el.child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "btn_copy_sub_{}_{}",
+                                                            idx, v_idx
+                                                        )))
+                                                        .size(px(17.0))
+                                                        .rounded(px(3.5))
+                                                        .flex_shrink_0()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .cursor_pointer()
+                                                        .hover(move |s| s.bg(palette.secondary))
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                cx.stop_propagation();
+                                                                this.copy_to_clipboard(
+                                                                    m_sub_copy_id.clone(),
+                                                                    m_sub_copy_val.clone(),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                        .child(lucide_icon(
+                                                            if is_sub_copied {
+                                                                IconName::Check
+                                                            } else {
+                                                                IconName::Copy
+                                                            },
+                                                            10.5,
+                                                            if is_sub_copied {
+                                                                palette.emerald_text
+                                                            } else {
+                                                                palette.muted_foreground
+                                                            },
+                                                        )),
+                                                )
+                                            })
+                                            .when(sub_stale && is_sub_checked, |el| {
+                                                el.child(
+                                                    div()
+                                                        .px(px(4.5))
+                                                        .py(px(0.5))
+                                                        .rounded(px(3.0))
+                                                        .bg(palette.amber_soft_bg)
+                                                        .text_size(px(9.5))
+                                                        .text_color(palette.amber_text)
+                                                        .flex_shrink_0()
+                                                        .child(locale.pick("上游未见", "Unlisted")),
+                                                )
+                                            })
+                                            .when(
+                                                is_sub_checked && !sub_stale && sub_no_acc,
+                                                |el| {
+                                                    el.child(
+                                                        div()
+                                                            .px(px(4.5))
+                                                            .py(px(0.5))
+                                                            .rounded(px(3.0))
+                                                            .bg(palette.amber_soft_bg)
+                                                            .text_size(px(9.5))
+                                                            .text_color(palette.amber_text)
+                                                            .flex_shrink_0()
+                                                            .child(locale.pick(
+                                                                "无可用账号",
+                                                                "No active account",
+                                                            )),
+                                                    )
+                                                },
+                                            );
+
+                                        sub_list = sub_list.child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "pool_sub_row_{}_{}_{}",
+                                                    idx, v_idx, variant.model_id
+                                                )))
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap(px(6.0))
+                                                .h(px(24.0))
+                                                .px(px(6.0))
+                                                .rounded(px(4.5))
+                                                .flex_shrink_0()
+                                                .cursor_pointer()
+                                                .bg(if is_sub_hovered {
+                                                    palette.accent
+                                                } else if is_sub_checked {
+                                                    palette.muted_subtle
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .on_hover(cx.listener(
+                                                    move |this, hovered: &bool, _, cx| {
+                                                        if let Some(ed) = this.editor.as_mut() {
+                                                            if *hovered {
+                                                                ed.hovered_pool_model =
+                                                                    Some(m_sub_hover.clone());
+                                                            } else if ed
+                                                                .hovered_pool_model
+                                                                .as_deref()
+                                                                == Some(m_sub_hover.as_str())
+                                                            {
+                                                                ed.hovered_pool_model = None;
+                                                            }
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                ))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.editor_toggle_single_model(
+                                                            m_sub_toggle.clone(),
+                                                            cx,
+                                                        );
+                                                    }),
+                                                )
+                                                .child(sub_left)
+                                                .when(is_sub_hovered, |el| {
+                                                    el.child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "btn_del_sub_{}_{}",
+                                                                idx, v_idx
+                                                            )))
+                                                            .size(px(18.0))
+                                                            .rounded(px(3.5))
+                                                            .flex_shrink_0()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .cursor_pointer()
+                                                            .hover(move |s| {
+                                                                s.bg(palette.destructive_soft_bg)
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.editor_delete_pool_model(
+                                                                            m_sub_delete.clone(),
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .child(lucide_icon(
+                                                                IconName::Trash,
+                                                                10.5,
+                                                                palette.muted_foreground,
+                                                            )),
+                                                    )
+                                                }),
+                                        );
+                                    }
+
+                                    scroll_list = scroll_list.child(sub_list);
+                                }
                             }
                             PoolRow::Single {
                                 model_id,

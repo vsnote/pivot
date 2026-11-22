@@ -73,6 +73,7 @@ pub struct ProviderEditorState {
     pub pool_scroll_handle: ScrollHandle,
     pub fetching_models: bool,
     pub hovered_pool_model: Option<String>,
+    pub expanded_pool_groups: HashSet<String>,
 
     pub sub_accounts: Vec<SubscriptionAccount>,
     pub sub_quotas: HashMap<String, AccountQuota>,
@@ -367,6 +368,7 @@ impl ProviderEditorState {
                 pool_scroll_handle: ScrollHandle::new(),
                 fetching_models: false,
                 hovered_pool_model: None,
+                expanded_pool_groups: HashSet::new(),
                 sub_accounts,
                 sub_quotas: HashMap::new(),
                 loading_quotas: HashMap::new(),
@@ -456,6 +458,7 @@ impl ProviderEditorState {
                 pool_scroll_handle: ScrollHandle::new(),
                 fetching_models: false,
                 hovered_pool_model: None,
+                expanded_pool_groups: HashSet::new(),
                 sub_accounts: Vec::new(),
                 sub_quotas: HashMap::new(),
                 loading_quotas: HashMap::new(),
@@ -482,6 +485,7 @@ impl ProviderEditorState {
         self.endpoint_latency = None;
         self.endpoint_error = None;
         self.protocol_picker_open = false;
+        self.expanded_pool_groups.clear();
 
         if let Some(pr) = preset {
             let clean_name = clean_preset_name(&pr.name);

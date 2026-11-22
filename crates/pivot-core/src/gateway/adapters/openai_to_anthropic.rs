@@ -267,6 +267,7 @@ pub fn convert_openai_req_to_anthropic(
         tool_choice,
         stream: req.stream,
         thinking,
+        output_config: None,
         metadata: None,
     }
 }

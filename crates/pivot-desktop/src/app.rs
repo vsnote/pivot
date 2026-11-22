@@ -1684,6 +1684,31 @@ impl PivotApp {
         }
     }
 
+    pub fn editor_toggle_pool_group_expanded(
+        &mut self,
+        group_key: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ed) = self.editor.as_mut() {
+            if !ed.expanded_pool_groups.remove(&group_key) {
+                ed.expanded_pool_groups.insert(group_key);
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn editor_delete_pool_models(&mut self, models: Vec<String>, cx: &mut Context<Self>) {
+        if let Some(ed) = self.editor.as_mut() {
+            let remove_set: HashSet<&str> = models.iter().map(|s| s.as_str()).collect();
+            ed.model_pool.retain(|m| !remove_set.contains(m.as_str()));
+            ed.selected_models
+                .retain(|m| !remove_set.contains(m.as_str()));
+            save_provider_pool(&ed.provider_id, &ed.model_pool);
+            ed.auto_saved = false;
+            cx.notify();
+        }
+    }
+
     pub fn editor_add_custom_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut ed) = self.editor.take() else {
             return;

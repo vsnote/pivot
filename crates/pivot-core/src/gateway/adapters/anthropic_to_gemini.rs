@@ -521,13 +521,10 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
     if let Some(mt) = req.max_tokens {
         gen_config["maxOutputTokens"] = json!(mt);
     }
-    if let Some(ref th) = req.thinking {
-        if th.thinking_type == "enabled" {
-            let budget = th.budget_tokens.unwrap_or(2048);
-            gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
-            if let Some(mt) = req.max_tokens {
-                gen_config["maxOutputTokens"] = json!(mt.max(budget + 2048));
-            }
+    if let Some(budget) = resolve_gemini_thinking_budget(req) {
+        gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+        if let Some(mt) = req.max_tokens {
+            gen_config["maxOutputTokens"] = json!(mt.max(budget + 2048));
         }
     }
 
@@ -537,6 +534,63 @@ pub fn convert_anthropic_req_to_gemini(req: &AnthropicMessageRequest) -> GeminiR
         tools,
         generation_config: Some(gen_config),
     }
+}
+
+fn effort_to_gemini_budget(effort: &str) -> Option<u32> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "none" => None,
+        "minimal" => Some(1024),
+        "low" => Some(2048),
+        "medium" => Some(8192),
+        "high" => Some(16384),
+        "xhigh" | "max" | "ultra" => Some(32768),
+        "" => None,
+        _ => Some(8192),
+    }
+}
+
+fn resolve_gemini_thinking_budget(req: &AnthropicMessageRequest) -> Option<u32> {
+    let lower = req.model.trim().to_lowercase();
+    let tail = lower.rsplit('/').next().unwrap_or(&lower);
+    let allow_effort_thinking = !tail.contains("image") && !tail.starts_with("gemini-1.");
+
+    if let Some(ref th) = req.thinking {
+        let kind = th.thinking_type.trim().to_ascii_lowercase();
+        match kind.as_str() {
+            "disabled" => return None,
+            "enabled" => {
+                let derived = th
+                    .budget_tokens
+                    .or_else(|| {
+                        if allow_effort_thinking {
+                            req.output_effort().and_then(effort_to_gemini_budget)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(2048);
+                return Some(derived);
+            }
+            "adaptive" => {
+                if !allow_effort_thinking {
+                    return None;
+                }
+                return match req.output_effort() {
+                    Some(eff) => effort_to_gemini_budget(eff),
+                    None => Some(8192),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    if allow_effort_thinking {
+        if let Some(eff) = req.output_effort() {
+            return effort_to_gemini_budget(eff);
+        }
+    }
+
+    None
 }
 
 pub fn convert_gemini_resp_to_anthropic(
@@ -738,6 +792,7 @@ mod tests {
             stream: None,
             metadata: None,
             thinking: None,
+            output_config: None,
             tool_choice: None,
             tools: Some(vec![]),
         };
@@ -758,6 +813,7 @@ mod tests {
             stream: None,
             metadata: None,
             thinking: None,
+            output_config: None,
             tool_choice: None,
             tools: Some(vec![AnthropicTool {
                 name: "no_desc_tool".to_string(),
@@ -811,6 +867,7 @@ mod tests {
             stream: Some(false),
             metadata: None,
             thinking: None,
+            output_config: None,
             tool_choice: None,
             tools: Some(vec![AnthropicTool {
                 name: "Bash".to_string(),
@@ -881,6 +938,7 @@ mod tests {
             stream: None,
             metadata: None,
             thinking: None,
+            output_config: None,
             tool_choice: None,
             tools: None,
         };
@@ -910,6 +968,7 @@ mod tests {
                 thinking_type: "enabled".to_string(),
                 budget_tokens: Some(4000),
             }),
+            output_config: None,
             tool_choice: None,
             tools: None,
         };
@@ -919,6 +978,53 @@ mod tests {
         let thinking_config = gen_config.get("thinkingConfig").expect("should have thinkingConfig");
         assert_eq!(thinking_config["thinkingBudget"], 4000);
         assert_eq!(gen_config["maxOutputTokens"], 6048);
+
+        // adaptive + output_config.effort = max -> 32768
+        let mut adaptive_max = req.clone();
+        adaptive_max.thinking = Some(crate::gateway::types::AnthropicThinkingConfig {
+            thinking_type: "adaptive".to_string(),
+            budget_tokens: None,
+        });
+        adaptive_max.output_config = Some(json!({ "effort": "max" }));
+        let gem_max = convert_anthropic_req_to_gemini(&adaptive_max);
+        let gc_max = gem_max.generation_config.unwrap();
+        assert_eq!(gc_max["thinkingConfig"]["thinkingBudget"], 32768);
+        assert_eq!(gc_max["maxOutputTokens"], 34816);
+
+        // adaptive + output_config.effort = low -> 2048
+        let mut adaptive_low = adaptive_max.clone();
+        adaptive_low.output_config = Some(json!({ "effort": "low" }));
+        let gc_low = convert_anthropic_req_to_gemini(&adaptive_low)
+            .generation_config
+            .unwrap();
+        assert_eq!(gc_low["thinkingConfig"]["thinkingBudget"], 2048);
+
+        // adaptive + effort = none -> 不生成 thinkingConfig
+        let mut adaptive_none = adaptive_max.clone();
+        adaptive_none.output_config = Some(json!({ "effort": "none" }));
+        let gc_none = convert_anthropic_req_to_gemini(&adaptive_none)
+            .generation_config
+            .unwrap();
+        assert!(gc_none.get("thinkingConfig").is_none());
+
+        // thinking = disabled -> 即便带 effort 也不生成 thinkingConfig
+        let mut disabled_req = adaptive_max.clone();
+        disabled_req.thinking = Some(crate::gateway::types::AnthropicThinkingConfig {
+            thinking_type: "disabled".to_string(),
+            budget_tokens: None,
+        });
+        let gc_dis = convert_anthropic_req_to_gemini(&disabled_req)
+            .generation_config
+            .unwrap();
+        assert!(gc_dis.get("thinkingConfig").is_none());
+
+        // 生图模型跳过 adaptive / effort 推导
+        let mut img_req = adaptive_max;
+        img_req.model = "gemini-3.1-flash-image".to_string();
+        let gc_img = convert_anthropic_req_to_gemini(&img_req)
+            .generation_config
+            .unwrap();
+        assert!(gc_img.get("thinkingConfig").is_none());
     }
 
     #[test]
@@ -968,6 +1074,7 @@ mod tests {
             stream: None,
             metadata: None,
             thinking: None,
+            output_config: None,
             tool_choice: None,
             tools: None,
         };

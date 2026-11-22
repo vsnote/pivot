@@ -21,8 +21,22 @@ pub struct AnthropicMessageRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<AnthropicThinkingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+}
+
+impl AnthropicMessageRequest {
+    /// 提取新版 Anthropic API 的 `output_config.effort`（如 "low" / "medium" / "high" / "max"）
+    pub fn output_effort(&self) -> Option<&str> {
+        self.output_config
+            .as_ref()
+            .and_then(|v| v.get("effort"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

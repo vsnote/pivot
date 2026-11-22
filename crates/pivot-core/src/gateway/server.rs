@@ -913,6 +913,21 @@ fn derive_opencode_session_id(
     }
 }
 
+fn apply_anthropic_beta_header(
+    mut builder: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+) -> reqwest::RequestBuilder {
+    if let Some(beta) = headers
+        .get("anthropic-beta")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        builder = builder.header("anthropic-beta", beta);
+    }
+    builder
+}
+
 fn apply_upstream_headers(
     mut builder: reqwest::RequestBuilder,
     provider: &Provider,
@@ -1221,9 +1236,8 @@ async fn handle_messages_count_tokens(
                 .header("user-agent", &forward_ua)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
-            if let Some(beta) = headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
-                req_builder = req_builder.header("anthropic-beta", beta);
-            }
+
+            req_builder = apply_anthropic_beta_header(req_builder, &headers);
             req_builder = apply_upstream_headers(
                 req_builder,
                 &cand.provider,
@@ -1649,6 +1663,8 @@ async fn dispatch_anthropic_request(
                 .header("user-agent", &forward_ua)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
+
+            req_builder = apply_anthropic_beta_header(req_builder, headers);
 
             req_builder = apply_upstream_headers(
                 req_builder,
@@ -4469,6 +4485,8 @@ async fn dispatch_openai_request(
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");
 
+            req_builder = apply_anthropic_beta_header(req_builder, headers);
+
             req_builder = apply_upstream_headers(
                 req_builder,
                 &cand.provider,
@@ -6005,6 +6023,7 @@ mod tests {
             tool_choice: None,
             stream: None,
             thinking: None,
+            output_config: None,
             metadata: None,
         };
 
@@ -6434,6 +6453,88 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let val: Value = resp.json().await.unwrap();
         assert_eq!(val["choices"][0]["message"]["content"], "pong");
+
+        gw_handle.abort();
+        up_handle.abort();
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_forwards_output_config_and_beta_header() {
+        let seen_req = Arc::new(tokio::sync::Mutex::new(None::<(Option<String>, Value)>));
+        let seen_clone = seen_req.clone();
+
+        let upstream_app = axum::Router::new().route(
+            "/v1/messages",
+            axum::routing::post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let seen_clone = seen_clone.clone();
+                async move {
+                    let beta = headers
+                        .get("anthropic-beta")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    *seen_clone.lock().await = Some((beta, body));
+                    axum::Json(json!({
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-opus-4-7",
+                        "content": [{ "type": "text", "text": "ok" }],
+                        "stop_reason": "end_turn",
+                        "usage": { "input_tokens": 10, "output_tokens": 2 }
+                    }))
+                }
+            }),
+        );
+        let up_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = up_listener.local_addr().unwrap();
+        let up_handle = tokio::spawn(async move {
+            axum::serve(up_listener, upstream_app).await.unwrap();
+        });
+
+        let (db, tmp_dir) = test_temp_db("anth_effort");
+        db.save_provider(&crate::db::Provider {
+            id: "prov_anth".to_string(),
+            name: "Anthropic".to_string(),
+            protocol: "anthropic".to_string(),
+            base_url: format!("http://{}/v1", up_addr),
+            preset_id: None,
+            auth_type: None,
+            api_keys: vec!["sk-ant-test".to_string()],
+            models: vec!["claude-opus-4-7".to_string()],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .unwrap();
+
+        let (gw_base, gw_handle) = spawn_test_gateway(db).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let resp = client
+            .post(format!("{}/v1/messages", gw_base))
+            .header("anthropic-beta", "effort-2025-11-24")
+            .json(&json!({
+                "model": "claude-opus-4-7",
+                "max_tokens": 1024,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "thinking": { "type": "adaptive" },
+                "output_config": { "effort": "max" }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (beta, captured) = seen_req.lock().await.clone().expect("upstream called");
+        assert_eq!(beta.as_deref(), Some("effort-2025-11-24"));
+        assert_eq!(captured["thinking"]["type"], "adaptive");
+        assert_eq!(captured["output_config"]["effort"], "max");
 
         gw_handle.abort();
         up_handle.abort();
