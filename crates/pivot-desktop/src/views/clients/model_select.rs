@@ -429,6 +429,7 @@ pub fn render_client_model_popover(
                 || opt.label.to_lowercase().contains(&q)
                 || opt.value.to_lowercase().contains(&q)
                 || g.name.to_lowercase().contains(&q)
+                || app.model_display_name(&opt.label).to_lowercase().contains(&q)
             {
                 matched.push(opt.clone());
             }

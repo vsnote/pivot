@@ -74,46 +74,179 @@ struct CatalogFile {
 
 static CATALOG: OnceLock<RwLock<Catalog>> = OnceLock::new();
 static DYNAMIC_NAMES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+static DYNAMIC_NAMES_PATH: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+impl ModelEffort {
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Minimal => "Min",
+            Self::Low => "Low",
+            Self::Medium => "Med",
+            Self::High => "High",
+            Self::XHigh => "XHigh",
+        }
+    }
+
+    pub fn full_label(self) -> &'static str {
+        match self {
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::XHigh => "XHigh",
+        }
+    }
+
+    /// 仅从模型 ID 尾部识别规则推理强度后缀，严禁把 `-max` 当作 effort 剥离
+    pub fn from_suffix(id: &str) -> Option<(&str, Self)> {
+        let lower = id.to_ascii_lowercase();
+        for (suffix, effort) in [
+            ("-xhigh", Self::XHigh),
+            ("-high", Self::High),
+            ("-medium", Self::Medium),
+            ("-low", Self::Low),
+            ("-minimal", Self::Minimal),
+        ] {
+            if lower.ends_with(suffix) && id.len() > suffix.len() {
+                let stem = &id[..id.len() - suffix.len()];
+                if !stem.ends_with('/') {
+                    return Some((stem, effort));
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDisplayInfo {
+    pub raw_id: String,
+    /// 用于同源档位聚合的规范化键（小写；保留 org/ 前缀；不含 effort，保留 tiered/thinking/extra 等本质区别）
+    pub group_key: String,
+    /// 清晰的基础名称（不含 effort，但融入 Tiered / Thinking 等本质型号修饰）
+    pub base_name: String,
+    /// 识别出的规则推理档位
+    pub effort: Option<ModelEffort>,
+    /// 除 effort 外保留的语义/渠道/容量标签（如 "1M", "cc-format", "reversed", "Free"）
+    pub extra_tags: Vec<String>,
+    /// 完整无损单行显示名（如 "Gemini 4 Neon (XHigh)"、"Gemini 4 Hydrogen Tiered (High)"、"GPT-6 Astra (cc-format)"）
+    pub display_name: String,
+}
 
 fn dynamic_names() -> &'static RwLock<HashMap<String, String>> {
     DYNAMIC_NAMES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// 动态注册服务商返回的模型友好名称（如 DeepSeek-V4.1-Flash）
-pub fn register_dynamic_model(id: &str, name: &str, _provider: Option<&str>) {
+fn dynamic_names_path() -> &'static RwLock<Option<PathBuf>> {
+    DYNAMIC_NAMES_PATH.get_or_init(|| RwLock::new(None))
+}
+
+pub fn is_meaningful_dynamic_name(id: &str, name: &str) -> bool {
     let clean_id = id.trim();
     let clean_name = name.trim();
     if clean_id.is_empty() || clean_name.is_empty() {
-        return;
+        return false;
     }
-    if let Ok(mut map) = dynamic_names().write() {
-        map.insert(clean_id.to_lowercase(), clean_name.to_string());
+    let name_lower = clean_name.to_lowercase();
+    if name_lower == "undefined" || name_lower.starts_with("models/") {
+        return false;
+    }
+    let tail = clean_id.rsplit('/').next().unwrap_or(clean_id);
+    if clean_name.eq_ignore_ascii_case(clean_id) || clean_name.eq_ignore_ascii_case(tail) {
+        return false;
+    }
+    true
+}
+
+fn load_dynamic_names_from_path(path: &Path) -> HashMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(raw) = serde_json::from_str::<HashMap<String, String>>(&text) else {
+        return HashMap::new();
+    };
+    let mut cleaned = HashMap::new();
+    for (k, v) in raw {
+        let key = k.trim().to_lowercase();
+        let val = v.trim().to_string();
+        if is_meaningful_dynamic_name(&key, &val) {
+            cleaned.insert(key, val);
+        }
+    }
+    cleaned
+}
+
+fn save_dynamic_names_to_path(path: &Path, map: &HashMap<String, String>) {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    if let Ok(text) = serde_json::to_string(map) {
+        let _ = std::fs::write(path, text);
     }
 }
 
-/// 解析模型的用户友好显示名称 (name)，无法匹配时回落至 model_id
-pub fn resolve_model_display_name(model_id: &str, provider_hint: Option<&str>) -> String {
-    let trimmed = model_id.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let lower = trimmed.to_lowercase();
-    let sub = lower.split('/').last().unwrap_or(&lower);
-
-    // 1. 优先查动态获取的最新官方名字
-    if let Ok(map) = dynamic_names().read() {
-        if let Some(name) = map.get(&lower).or_else(|| map.get(sub)) {
-            return name.clone();
+/// 批量动态注册服务商返回的模型友好名称并按需持久化
+pub fn register_dynamic_models(entries: &[(String, String)]) {
+    let mut cleaned = Vec::new();
+    for (id, name) in entries {
+        let clean_id = id.trim();
+        let clean_name = name.trim();
+        if is_meaningful_dynamic_name(clean_id, clean_name) {
+            cleaned.push((clean_id.to_lowercase(), clean_name.to_string()));
         }
     }
+    if cleaned.is_empty() {
+        return;
+    }
 
-    // 2. 查静态知名模型映射表
-    let known_name = match sub {
+    let snapshot = {
+        let Ok(mut map) = dynamic_names().write() else {
+            return;
+        };
+        let mut changed = false;
+        for (k, v) in cleaned {
+            if map.get(&k) != Some(&v) {
+                map.insert(k, v);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        map.clone()
+    };
+
+    if let Ok(guard) = dynamic_names_path().read() {
+        if let Some(path) = guard.as_ref() {
+            save_dynamic_names_to_path(path, &snapshot);
+        }
+    }
+}
+
+/// 动态注册服务商返回的模型友好名称（如 DeepSeek-V4.1-Flash）
+pub fn register_dynamic_model(id: &str, name: &str, _provider: Option<&str>) {
+    register_dynamic_models(&[(id.to_string(), name.to_string())]);
+}
+
+fn known_static_name(sub_lower: &str) -> Option<&'static str> {
+    match sub_lower {
         "deepseek-flash" => Some("DeepSeek-V4.1-Flash"),
         "deepseek-v4-pro" => Some("DeepSeek-V4-Pro"),
         "deepseek-chat" => Some("DeepSeek-V3"),
         "deepseek-reasoner" => Some("DeepSeek-R1"),
-        "gemini-3.8-flash-high" => Some("Gemini 3.8 Flash (High)"),
         "gemini-3.8-flash" => Some("Gemini 3.8 Flash"),
         "gemini-3-flash" => Some("Gemini 3 Flash"),
         "gemini-2.5-pro" => Some("Gemini 2.5 Pro"),
@@ -137,21 +270,401 @@ pub fn resolve_model_display_name(model_id: &str, provider_hint: Option<&str>) -
         "o1" => Some("o1"),
         "o3-mini" => Some("o3-mini"),
         _ => None,
-    };
-    if let Some(n) = known_name {
-        return n.to_string();
+    }
+}
+
+fn split_capacity_brackets(id: &str) -> (&str, Vec<String>) {
+    let mut cur = id.trim();
+    let mut tags = Vec::new();
+    while cur.ends_with(']') {
+        let Some(pos) = cur.rfind('[') else {
+            break;
+        };
+        let inner = cur[pos + 1..cur.len() - 1].trim();
+        let prefix = cur[..pos].trim_end();
+        if prefix.is_empty() {
+            break;
+        }
+        if !inner.is_empty() {
+            tags.push(inner.to_ascii_uppercase());
+        }
+        cur = prefix;
+    }
+    tags.reverse();
+    (cur, tags)
+}
+
+fn strip_effort_decoration_from_name(name: &str, effort: ModelEffort) -> String {
+    let trimmed = name.trim();
+    let mut patterns: Vec<String> = Vec::new();
+    let full = effort.full_label().to_ascii_lowercase();
+    let short = effort.short_label().to_ascii_lowercase();
+    for tok in if full == short { vec![full] } else { vec![full, short] } {
+        patterns.push(format!(" ({})", tok));
+        patterns.push(format!("({})", tok));
+        patterns.push(format!(" - {}", tok));
+        patterns.push(format!(" {}", tok));
     }
 
-    // 3. 查本地模型目录 (models.dev 缓存)
-    if let Some(m) = lookup(trimmed, provider_hint) {
-        if let Some(n) = m.name {
-            if !n.trim().is_empty() {
-                return n.trim().to_string();
+    let lower = trimmed.to_ascii_lowercase();
+    for pat in patterns {
+        if lower.ends_with(&pat) && trimmed.len() > pat.len() {
+            let stripped = trimmed[..trimmed.len() - pat.len()].trim_end();
+            if !stripped.is_empty() {
+                return stripped.to_string();
             }
         }
     }
-
     trimmed.to_string()
+}
+
+fn push_unique_tag_ci(tags: &mut Vec<String>, base_name_lower: &str, tag: String) {
+    let t = tag.trim();
+    if t.is_empty() {
+        return;
+    }
+    let t_lower = t.to_lowercase();
+    if base_name_lower.contains(&t_lower) {
+        return;
+    }
+    if !tags.iter().any(|existing| existing.eq_ignore_ascii_case(t)) {
+        tags.push(t.to_string());
+    }
+}
+
+enum SemanticSuffix {
+    ModelModifier(&'static str),
+    ExtraTag(&'static str),
+}
+
+fn strip_one_semantic_suffix(id: &str) -> Option<(&str, SemanticSuffix)> {
+    let lower = id.to_ascii_lowercase();
+    for (suffix, kind) in [
+        ("-tiered", SemanticSuffix::ModelModifier("Tiered")),
+        ("-nothinking", SemanticSuffix::ExtraTag("No-Think")),
+        ("-nothink", SemanticSuffix::ExtraTag("No-Think")),
+        ("-thinking", SemanticSuffix::ModelModifier("Thinking")),
+        ("-thought", SemanticSuffix::ModelModifier("Thinking")),
+        ("-think", SemanticSuffix::ModelModifier("Thinking")),
+        ("-cc-format", SemanticSuffix::ExtraTag("cc-format")),
+        ("-cc", SemanticSuffix::ExtraTag("cc")),
+        ("-reversed", SemanticSuffix::ExtraTag("reversed")),
+        ("-preview", SemanticSuffix::ExtraTag("Preview")),
+        ("-exp", SemanticSuffix::ExtraTag("Exp")),
+        ("-search", SemanticSuffix::ExtraTag("Search")),
+        ("-online", SemanticSuffix::ExtraTag("Online")),
+        ("-free", SemanticSuffix::ExtraTag("Free")),
+        ("-fc", SemanticSuffix::ExtraTag("fc")),
+    ] {
+        if lower.ends_with(suffix) && id.len() > suffix.len() {
+            let prefix = &id[..id.len() - suffix.len()];
+            if !prefix.ends_with('/') {
+                return Some((prefix, kind));
+            }
+        }
+    }
+    None
+}
+
+fn exact_catalog_match(model: &CatalogModel, target_id: &str) -> bool {
+    let target_lower = target_id.trim().to_lowercase();
+    let target_tail = target_lower.rsplit('/').next().unwrap_or(&target_lower);
+    let target_no_date = strip_version_suffix(&target_lower);
+    let target_tail_no_date = strip_version_suffix(target_tail);
+
+    let m_lower = model.id.trim().to_lowercase();
+    let m_tail = m_lower.rsplit('/').next().unwrap_or(&m_lower);
+    let m_no_date = strip_version_suffix(&m_lower);
+    let m_tail_no_date = strip_version_suffix(m_tail);
+
+    let mut targets = vec![target_lower.as_str(), target_tail];
+    if let Some(ref nd) = target_no_date {
+        targets.push(nd.as_str());
+    }
+    if let Some(ref nd) = target_tail_no_date {
+        targets.push(nd.as_str());
+    }
+
+    let mut m_forms = vec![m_lower.as_str(), m_tail];
+    if let Some(ref nd) = m_no_date {
+        m_forms.push(nd.as_str());
+    }
+    if let Some(ref nd) = m_tail_no_date {
+        m_forms.push(nd.as_str());
+    }
+
+    targets.iter().any(|t| m_forms.contains(t))
+}
+
+fn exact_catalog_name_from_slice(
+    candidates: &[CatalogModel],
+    query_id: &str,
+    provider_hint: Option<&str>,
+) -> Option<String> {
+    let matched: Vec<CatalogModel> = candidates
+        .iter()
+        .filter(|m| exact_catalog_match(m, query_id))
+        .filter(|m| {
+            m.name
+                .as_deref()
+                .map(|n| !n.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    if matched.is_empty() {
+        return None;
+    }
+    let chosen = pick(&matched, provider_hint);
+    chosen
+        .name
+        .as_deref()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+}
+
+fn exact_catalog_name_in_store(query_id: &str, provider_hint: Option<&str>) -> Option<String> {
+    let guard = store().read().ok()?;
+    if guard.index.is_empty() {
+        return None;
+    }
+    let lower = query_id.trim().to_lowercase();
+    let mut keys = vec![lower.clone()];
+    if let Some((_, rest)) = lower.rsplit_once('/') {
+        if !rest.is_empty() && !keys.contains(&rest.to_string()) {
+            keys.push(rest.to_string());
+        }
+    }
+    for k in keys.clone() {
+        if let Some(nd) = strip_version_suffix(&k) {
+            if !keys.contains(&nd) {
+                keys.push(nd);
+            }
+        }
+    }
+    for key in keys {
+        if let Some(candidates) = guard.index.get(&key) {
+            if let Some(name) = exact_catalog_name_from_slice(candidates, query_id, provider_hint) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn lookup_exact_base_name_with<C>(
+    query: &str,
+    provider_hint: Option<&str>,
+    catalog_exact: &C,
+) -> Option<String>
+where
+    C: Fn(&str, Option<&str>) -> Option<String>,
+{
+    let lower = query.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let tail = lower.rsplit('/').next().unwrap_or(&lower);
+    let tail_no_date = strip_version_suffix(tail);
+
+    if let Some(n) = known_static_name(&lower)
+        .or_else(|| known_static_name(tail))
+        .or_else(|| tail_no_date.as_deref().and_then(known_static_name))
+    {
+        return Some(n.to_string());
+    }
+
+    if let Some(n) = catalog_exact(query, provider_hint) {
+        return Some(n);
+    }
+    if let Some((_, rest)) = query.rsplit_once('/') {
+        if !rest.is_empty() {
+            if let Some(n) = catalog_exact(rest, provider_hint) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn parse_model_display_with<D, C>(
+    model_id: &str,
+    provider_hint: Option<&str>,
+    dynamic_lookup: D,
+    catalog_exact: C,
+) -> ModelDisplayInfo
+where
+    D: Fn(&str) -> Option<String>,
+    C: Fn(&str, Option<&str>) -> Option<String>,
+{
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return ModelDisplayInfo {
+            raw_id: String::new(),
+            group_key: String::new(),
+            base_name: String::new(),
+            effort: None,
+            extra_tags: Vec::new(),
+            display_name: String::new(),
+        };
+    }
+
+    let (without_brackets, capacity_tags) = split_capacity_brackets(trimmed);
+    let (stem, effort) = match ModelEffort::from_suffix(without_brackets) {
+        Some((s, eff)) => (s, Some(eff)),
+        None => (without_brackets, None),
+    };
+    let group_key = stem.to_lowercase();
+
+    let raw_lower = trimmed.to_lowercase();
+    let raw_tail_lower = raw_lower.rsplit('/').next().unwrap_or(&raw_lower).to_string();
+    let wb_lower = without_brackets.to_lowercase();
+    let wb_tail_lower = wb_lower.rsplit('/').next().unwrap_or(&wb_lower).to_string();
+
+    let dyn_hit = dynamic_lookup(&raw_lower)
+        .or_else(|| dynamic_lookup(&wb_lower))
+        .or_else(|| dynamic_lookup(&raw_tail_lower))
+        .or_else(|| dynamic_lookup(&wb_tail_lower));
+
+    let mut extra_tags: Vec<String> = Vec::new();
+    let base_name = if let Some(dyn_name) = dyn_hit {
+        let clean_base = if let Some(eff) = effort {
+            strip_effort_decoration_from_name(&dyn_name, eff)
+        } else {
+            dyn_name.trim().to_string()
+        };
+        let base_lower = clean_base.to_lowercase();
+        for cap in capacity_tags {
+            push_unique_tag_ci(&mut extra_tags, &base_lower, cap);
+        }
+        clean_base
+    } else if let Some(exact_name) =
+        lookup_exact_base_name_with(stem, provider_hint, &catalog_exact)
+    {
+        let base_lower = exact_name.to_lowercase();
+        for cap in capacity_tags {
+            push_unique_tag_ci(&mut extra_tags, &base_lower, cap);
+        }
+        exact_name
+    } else {
+        // 逐层剥离已知语义修饰后缀并记录，试图匹配基础型号
+        let mut cur = stem;
+        let mut mods_rev: Vec<&'static str> = Vec::new();
+        let mut tags_rev: Vec<&'static str> = Vec::new();
+        let mut matched_base: Option<String> = None;
+
+        for _ in 0..8 {
+            if let Some((next_cur, kind)) = strip_one_semantic_suffix(cur) {
+                match kind {
+                    SemanticSuffix::ModelModifier(m) => mods_rev.push(m),
+                    SemanticSuffix::ExtraTag(t) => tags_rev.push(t),
+                }
+                cur = next_cur;
+                if let Some(found) =
+                    lookup_exact_base_name_with(cur, provider_hint, &catalog_exact)
+                {
+                    matched_base = Some(found);
+                    break;
+                }
+            } else if let Some(no_ver) = strip_version_suffix(cur) {
+                // 剥离日期/latest 后继续尝试，使用临时拥有的 String 转接
+                let mut cur_owned = no_ver;
+                let mut inner_found: Option<String> =
+                    lookup_exact_base_name_with(&cur_owned, provider_hint, &catalog_exact);
+                if inner_found.is_none() {
+                    for _ in 0..4 {
+                        if let Some((next_inner, kind)) = strip_one_semantic_suffix(&cur_owned) {
+                            match kind {
+                                SemanticSuffix::ModelModifier(m) => mods_rev.push(m),
+                                SemanticSuffix::ExtraTag(t) => tags_rev.push(t),
+                            }
+                            cur_owned = next_inner.to_string();
+                            if let Some(found) = lookup_exact_base_name_with(
+                                &cur_owned,
+                                provider_hint,
+                                &catalog_exact,
+                            ) {
+                                inner_found = Some(found);
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                matched_base = inner_found;
+                break;
+            } else {
+                break;
+            }
+        }
+
+        if let Some(mut found_name) = matched_base {
+            mods_rev.reverse();
+            for m in mods_rev {
+                if !found_name.to_lowercase().contains(&m.to_lowercase()) {
+                    found_name.push(' ');
+                    found_name.push_str(m);
+                }
+            }
+            let base_lower = found_name.to_lowercase();
+            tags_rev.reverse();
+            for t in tags_rev {
+                push_unique_tag_ci(&mut extra_tags, &base_lower, t.to_string());
+            }
+            for cap in capacity_tags {
+                push_unique_tag_ci(&mut extra_tags, &base_lower, cap);
+            }
+            found_name
+        } else if effort.is_some() || !capacity_tags.is_empty() {
+            let base_lower = stem.to_lowercase();
+            for cap in capacity_tags {
+                push_unique_tag_ci(&mut extra_tags, &base_lower, cap);
+            }
+            stem.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    let mut suffix_parts = extra_tags.clone();
+    if let Some(eff) = effort {
+        suffix_parts.push(eff.full_label().to_string());
+    }
+    let display_name = if suffix_parts.is_empty() {
+        base_name.clone()
+    } else {
+        format!("{} ({})", base_name, suffix_parts.join(", "))
+    };
+
+    ModelDisplayInfo {
+        raw_id: trimmed.to_string(),
+        group_key,
+        base_name,
+        effort,
+        extra_tags,
+        display_name,
+    }
+}
+
+/// 解析结构化的无损模型显示信息，保留推理档位与渠道/容量变体
+pub fn parse_model_display(model_id: &str, provider_hint: Option<&str>) -> ModelDisplayInfo {
+    parse_model_display_with(
+        model_id,
+        provider_hint,
+        |key| {
+            dynamic_names()
+                .read()
+                .ok()
+                .and_then(|map| map.get(key).cloned())
+        },
+        exact_catalog_name_in_store,
+    )
+}
+
+/// 解析模型的用户友好显示名称 (name)，无损保留档位与变体后缀，无法匹配时回落至 model_id
+pub fn resolve_model_display_name(model_id: &str, provider_hint: Option<&str>) -> String {
+    parse_model_display(model_id, provider_hint).display_name
 }
 
 fn store() -> &'static RwLock<Catalog> {
@@ -167,6 +680,19 @@ fn now_secs() -> i64 {
 
 /// 启动时加载本地缓存。缓存缺失或损坏时留空，等后台刷新填充。
 pub fn init(cache_path: PathBuf) {
+    let dyn_path = cache_path.with_file_name("model-display-names.json");
+    if let Ok(mut guard) = dynamic_names_path().write() {
+        *guard = Some(dyn_path.clone());
+    }
+    let loaded_dyn = load_dynamic_names_from_path(&dyn_path);
+    if !loaded_dyn.is_empty() {
+        if let Ok(mut map) = dynamic_names().write() {
+            for (k, v) in loaded_dyn {
+                map.entry(k).or_insert(v);
+            }
+        }
+    }
+
     let Ok(text) = std::fs::read_to_string(&cache_path) else {
         return;
     };
@@ -425,6 +951,7 @@ fn strip_variant_suffix(id: &str) -> Option<String> {
         "-think",
         "-nothink",
         "-nothinking",
+        "-tiered",
         "-reversed",
         "-cc-format",
         "-cc",
@@ -626,5 +1153,245 @@ mod tests {
         assert_eq!(pick(candidates, Some("anthropic")).context_window, Some(200000));
         // 无提示时选第一方条目，而不是字典序更靠前的聚合商
         assert_eq!(pick(candidates, None).provider, "anthropic");
+    }
+
+    fn test_catalog_index() -> HashMap<String, Vec<CatalogModel>> {
+        let models = parse_catalog(&serde_json::json!({
+            "google": {
+                "id": "google",
+                "models": {
+                    "gemini-4-neon": {
+                        "id": "gemini-4-neon",
+                        "name": "Gemini 4 Neon"
+                    },
+                    "gemini-4-hydrogen": {
+                        "id": "gemini-4-hydrogen",
+                        "name": "Gemini 4 Hydrogen"
+                    }
+                }
+            },
+            "anthropic": {
+                "id": "anthropic",
+                "models": {
+                    "claude-sonnet-5-5": {
+                        "id": "claude-sonnet-5-5",
+                        "name": "Claude Sonnet 5.5"
+                    },
+                    "claude-fable-5-1": {
+                        "id": "claude-fable-5-1",
+                        "name": "Claude Fable 5.1"
+                    }
+                }
+            },
+            "openai": {
+                "id": "openai",
+                "models": {
+                    "gpt-6-astra": {
+                        "id": "gpt-6-astra",
+                        "name": "GPT-6 Astra"
+                    }
+                }
+            }
+        }));
+        build_index(models)
+    }
+
+    fn catalog_exact_from_index(
+        index: &HashMap<String, Vec<CatalogModel>>,
+        query_id: &str,
+        hint: Option<&str>,
+    ) -> Option<String> {
+        let lower = query_id.trim().to_lowercase();
+        let mut keys = vec![lower.clone()];
+        if let Some((_, rest)) = lower.rsplit_once('/') {
+            if !rest.is_empty() && !keys.contains(&rest.to_string()) {
+                keys.push(rest.to_string());
+            }
+        }
+        for k in keys.clone() {
+            if let Some(nd) = strip_version_suffix(&k) {
+                if !keys.contains(&nd) {
+                    keys.push(nd);
+                }
+            }
+        }
+        for k in keys {
+            if let Some(cands) = index.get(&k) {
+                if let Some(name) = exact_catalog_name_from_slice(cands, query_id, hint) {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn parse_model_display_preserves_efforts_and_variants() {
+        let index = test_catalog_index();
+        let dyn_map: HashMap<String, String> = HashMap::new();
+        let parse = |id: &str| {
+            parse_model_display_with(
+                id,
+                None,
+                |k| dyn_map.get(k).cloned(),
+                |q, h| catalog_exact_from_index(&index, q, h),
+            )
+        };
+
+        for (id, eff, disp) in [
+            ("gemini-4-neon-low", ModelEffort::Low, "Gemini 4 Neon (Low)"),
+            ("gemini-4-neon-medium", ModelEffort::Medium, "Gemini 4 Neon (Medium)"),
+            ("gemini-4-neon-high", ModelEffort::High, "Gemini 4 Neon (High)"),
+            ("gemini-4-neon-xhigh", ModelEffort::XHigh, "Gemini 4 Neon (XHigh)"),
+        ] {
+            let info = parse(id);
+            assert_eq!(info.group_key, "gemini-4-neon");
+            assert_eq!(info.base_name, "Gemini 4 Neon");
+            assert_eq!(info.effort, Some(eff));
+            assert!(info.extra_tags.is_empty());
+            assert_eq!(info.display_name, disp);
+        }
+
+        let tiered_high = parse("gemini-4-hydrogen-tiered-high");
+        assert_eq!(tiered_high.group_key, "gemini-4-hydrogen-tiered");
+        assert_eq!(tiered_high.base_name, "Gemini 4 Hydrogen Tiered");
+        assert_eq!(tiered_high.effort, Some(ModelEffort::High));
+        assert_eq!(tiered_high.display_name, "Gemini 4 Hydrogen Tiered (High)");
+
+        let tiered_xhigh = parse("gemini-4-hydrogen-tiered-xhigh");
+        assert_eq!(tiered_xhigh.group_key, "gemini-4-hydrogen-tiered");
+        assert_eq!(tiered_xhigh.base_name, "Gemini 4 Hydrogen Tiered");
+        assert_eq!(tiered_xhigh.effort, Some(ModelEffort::XHigh));
+        assert_eq!(tiered_xhigh.display_name, "Gemini 4 Hydrogen Tiered (XHigh)");
+
+        let g38_high = parse("gemini-3.8-flash-high");
+        let g38_low = parse("gemini-3.8-flash-low");
+        assert_eq!(g38_high.group_key, "gemini-3.8-flash");
+        assert_eq!(g38_low.group_key, "gemini-3.8-flash");
+        assert_eq!(g38_high.base_name, "Gemini 3.8 Flash");
+        assert_eq!(g38_high.display_name, "Gemini 3.8 Flash (High)");
+        assert_eq!(g38_low.display_name, "Gemini 3.8 Flash (Low)");
+
+        let cc_fmt = parse("gpt-6-astra-cc-format");
+        assert_eq!(cc_fmt.base_name, "GPT-6 Astra");
+        assert_eq!(cc_fmt.extra_tags, vec!["cc-format"]);
+        assert_eq!(cc_fmt.display_name, "GPT-6 Astra (cc-format)");
+
+        let rev_1m = parse("claude-fable-5-1-reversed[1M]");
+        assert_eq!(rev_1m.base_name, "Claude Fable 5.1");
+        assert_eq!(rev_1m.extra_tags, vec!["reversed", "1M"]);
+        assert_eq!(rev_1m.display_name, "Claude Fable 5.1 (reversed, 1M)");
+
+        // 严禁把 -max 当成 effort 剥离
+        let qwen_max = parse("qwen-max");
+        assert_eq!(qwen_max.effort, None);
+        assert_eq!(qwen_max.base_name, "qwen-max");
+        assert_eq!(qwen_max.display_name, "qwen-max");
+
+        // 保留 org/ 前缀，防止跨服务商错合并
+        let a = parse("openai/foo-high");
+        let b = parse("anthropic/foo-low");
+        assert_ne!(a.group_key, b.group_key);
+        assert_eq!(a.group_key, "openai/foo");
+        assert_eq!(b.group_key, "anthropic/foo");
+    }
+
+    #[test]
+    fn parse_model_display_handles_dynamic_names_without_double_effort() {
+        let index = test_catalog_index();
+        let mut dyn_map = HashMap::new();
+        dyn_map.insert("gemini-4-neon-low".to_string(), "Gemini 4 Neon".to_string());
+        dyn_map.insert(
+            "gemini-4-neon-xhigh".to_string(),
+            "Gemini 4 Neon (XHigh)".to_string(),
+        );
+        dyn_map.insert(
+            "gemini-4-neon-high".to_string(),
+            "Gemini 4 Neon - High".to_string(),
+        );
+        dyn_map.insert(
+            "gemini-4-neon-medium".to_string(),
+            "Gemini 4 Neon (Med)".to_string(),
+        );
+
+        let parse = |id: &str| {
+            parse_model_display_with(
+                id,
+                None,
+                |k| dyn_map.get(k).cloned(),
+                |q, h| catalog_exact_from_index(&index, q, h),
+            )
+        };
+
+        assert_eq!(parse("gemini-4-neon-low").display_name, "Gemini 4 Neon (Low)");
+        assert_eq!(parse("gemini-4-neon-xhigh").base_name, "Gemini 4 Neon");
+        assert_eq!(
+            parse("gemini-4-neon-xhigh").display_name,
+            "Gemini 4 Neon (XHigh)"
+        );
+        assert_eq!(parse("gemini-4-neon-high").base_name, "Gemini 4 Neon");
+        assert_eq!(parse("gemini-4-neon-high").display_name, "Gemini 4 Neon (High)");
+        assert_eq!(parse("gemini-4-neon-medium").base_name, "Gemini 4 Neon");
+        assert_eq!(
+            parse("gemini-4-neon-medium").display_name,
+            "Gemini 4 Neon (Medium)"
+        );
+    }
+
+    #[test]
+    fn dynamic_name_validation_and_persistence_roundtrip() {
+        assert!(!is_meaningful_dynamic_name("gemini-2.5-pro", ""));
+        assert!(!is_meaningful_dynamic_name("gemini-2.5-pro", "undefined"));
+        assert!(!is_meaningful_dynamic_name(
+            "gemini-2.5-pro",
+            "models/gemini-2.5-pro"
+        ));
+        assert!(!is_meaningful_dynamic_name(
+            "gemini-2.5-pro",
+            "Gemini-2.5-Pro"
+        ));
+        assert!(!is_meaningful_dynamic_name(
+            "google/gemini-2.5-pro",
+            "gemini-2.5-pro"
+        ));
+        assert!(is_meaningful_dynamic_name(
+            "gemini-4-neon-xhigh",
+            "Gemini 4 Neon"
+        ));
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "pivot-dyn-names-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file_path = temp_dir.join("model-display-names.json");
+
+        let mut map = HashMap::new();
+        map.insert(
+            "gemini-4-neon-xhigh".to_string(),
+            "Gemini 4 Neon".to_string(),
+        );
+        map.insert(
+            "bad-id".to_string(),
+            "models/bad-id".to_string(),
+        );
+        save_dynamic_names_to_path(&file_path, &map);
+
+        let reloaded = load_dynamic_names_from_path(&file_path);
+        assert_eq!(
+            reloaded.get("gemini-4-neon-xhigh").map(String::as_str),
+            Some("Gemini 4 Neon")
+        );
+        assert!(!reloaded.contains_key("bad-id"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn canonical_keys_still_strip_tiered_for_capability_lookup() {
+        assert!(canonical_keys("gemini-4-hydrogen-tiered-xhigh")
+            .contains(&"gemini-4-hydrogen".to_string()));
     }
 }

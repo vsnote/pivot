@@ -134,7 +134,7 @@ pub struct PivotApp {
     pub saved_pools: HashMap<String, Vec<String>>,
     pub sub_account_stats: HashMap<String, SubAccountStat>,
     pub model_rates: HashMap<String, ModelRate>,
-    pub model_display_names: HashMap<String, String>,
+    pub model_display_infos: HashMap<String, pivot_core::model_catalog::ModelDisplayInfo>,
 
     pub hovered_provider_id: Option<String>,
     pub copied_id: Option<String>,
@@ -191,28 +191,43 @@ fn collect_sub_stats(state: &AppState, providers: &[Provider]) -> HashMap<String
     map
 }
 
-fn resolve_display_names_for_models<'a>(
+fn resolve_display_infos_for_models<'a>(
     names: impl Iterator<Item = &'a String>,
-    existing: &mut HashMap<String, String>,
+    existing: &mut HashMap<String, pivot_core::model_catalog::ModelDisplayInfo>,
+    force_refresh: bool,
 ) {
-    let missing: Vec<String> = names
-        .filter(|m| !m.trim().is_empty() && !existing.contains_key(*m))
-        .cloned()
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    let caps = service::get_model_capabilities(missing);
-    if let Some(obj) = caps.as_object() {
-        for (k, v) in obj {
-            if let Some(dn) = v.get("displayName").and_then(|d| d.as_str()) {
-                existing.insert(k.clone(), dn.to_string());
-            }
+    for name in names {
+        if name.trim().is_empty() {
+            continue;
         }
+        if !force_refresh && existing.contains_key(name) {
+            continue;
+        }
+        let info = pivot_core::model_catalog::parse_model_display(name, None);
+        existing.insert(name.clone(), info);
     }
 }
 
 impl PivotApp {
+    pub fn model_display_info(
+        &self,
+        model_id: &str,
+    ) -> pivot_core::model_catalog::ModelDisplayInfo {
+        self.model_display_infos
+            .get(model_id)
+            .cloned()
+            .unwrap_or_else(|| pivot_core::model_catalog::parse_model_display(model_id, None))
+    }
+
+    pub fn model_display_name(&self, model_id: &str) -> String {
+        self.model_display_infos
+            .get(model_id)
+            .map(|i| i.display_name.clone())
+            .unwrap_or_else(|| {
+                pivot_core::model_catalog::resolve_model_display_name(model_id, None)
+            })
+    }
+
     pub fn new(
         core_state: AppState,
         tokio_handle: tokio::runtime::Handle,
@@ -229,9 +244,13 @@ impl PivotApp {
         let root_focus = cx.focus_handle();
         root_focus.focus(window, cx);
 
-        let mut model_display_names = HashMap::new();
+        let mut model_display_infos = HashMap::new();
         for pr in &presets {
-            resolve_display_names_for_models(pr.default_models.iter(), &mut model_display_names);
+            resolve_display_infos_for_models(
+                pr.default_models.iter(),
+                &mut model_display_infos,
+                false,
+            );
         }
 
         let mut app = Self {
@@ -253,7 +272,7 @@ impl PivotApp {
             saved_pools,
             sub_account_stats: HashMap::new(),
             model_rates,
-            model_display_names,
+            model_display_infos,
             hovered_provider_id: None,
             copied_id: None,
             copy_seq: 0,
@@ -414,9 +433,10 @@ impl PivotApp {
                 Ok(new_log) => {
                     let keep_going = this
                         .update(cx, |app, cx| {
-                            resolve_display_names_for_models(
+                            resolve_display_infos_for_models(
                                 [&new_log.routed_model, &new_log.incoming_model].into_iter(),
-                                &mut app.model_display_names,
+                                &mut app.model_display_infos,
+                                false,
                             );
                             let errors_only =
                                 app.dashboard_log_filter == DashboardLogFilter::Errors;
@@ -631,9 +651,10 @@ impl PivotApp {
                 let _ = this.update(cx, |app, cx| {
                     if let Ok(providers) = p_res {
                         for prov in &providers {
-                            resolve_display_names_for_models(
+                            resolve_display_infos_for_models(
                                 prov.models.iter(),
-                                &mut app.model_display_names,
+                                &mut app.model_display_infos,
+                                false,
                             );
                         }
                         app.providers = providers;
@@ -648,16 +669,18 @@ impl PivotApp {
                     }
                     if app.dashboard_req_seq == dash_seq {
                         if let Ok(st) = raw_stats_res {
-                            resolve_display_names_for_models(
+                            resolve_display_infos_for_models(
                                 st.route_model_slices.iter().map(|s| &s.model),
-                                &mut app.model_display_names,
+                                &mut app.model_display_infos,
+                                false,
                             );
                             app.dashboard_stats = st;
                         }
                         if let Ok(logs) = l_res {
-                            resolve_display_names_for_models(
+                            resolve_display_infos_for_models(
                                 logs.iter().flat_map(|l| [&l.routed_model, &l.incoming_model]),
-                                &mut app.model_display_names,
+                                &mut app.model_display_infos,
+                                false,
                             );
                             app.logs = logs;
                         }
@@ -710,16 +733,18 @@ impl PivotApp {
                         return;
                     }
                     if let Ok(st) = stats_res {
-                        resolve_display_names_for_models(
+                        resolve_display_infos_for_models(
                             st.route_model_slices.iter().map(|s| &s.model),
-                            &mut app.model_display_names,
+                            &mut app.model_display_infos,
+                            false,
                         );
                         app.dashboard_stats = st;
                     }
                     if let Ok(logs) = logs_res {
-                        resolve_display_names_for_models(
+                        resolve_display_infos_for_models(
                             logs.iter().flat_map(|l| [&l.routed_model, &l.incoming_model]),
-                            &mut app.model_display_names,
+                            &mut app.model_display_infos,
+                            false,
                         );
                         app.logs = logs;
                     }
@@ -761,9 +786,10 @@ impl PivotApp {
             if let Ok((Ok(providers), stats, inter_res)) = res {
                 let _ = this.update(cx, |app, cx| {
                     for prov in &providers {
-                        resolve_display_names_for_models(
+                        resolve_display_infos_for_models(
                             prov.models.iter(),
-                            &mut app.model_display_names,
+                            &mut app.model_display_infos,
+                            false,
                         );
                     }
                     app.providers = providers;
@@ -868,6 +894,11 @@ impl PivotApp {
             self.prefs.locale,
             window,
             cx,
+        );
+        resolve_display_infos_for_models(
+            ed.model_pool.iter(),
+            &mut self.model_display_infos,
+            false,
         );
         self.editor = Some(ed);
         self.is_provider_editor_open = true;
@@ -1285,15 +1316,21 @@ impl PivotApp {
                     return;
                 }
             }
-            resolve_display_names_for_models(
+            resolve_display_infos_for_models(
                 pr.default_models.iter(),
-                &mut self.model_display_names,
+                &mut self.model_display_infos,
+                false,
             );
         }
 
         let pools = self.saved_pools.clone();
         if let Some(mut ed) = self.editor.take() {
             ed.apply_preset(preset, &pools, window, cx);
+            resolve_display_infos_for_models(
+                ed.model_pool.iter(),
+                &mut self.model_display_infos,
+                false,
+            );
             self.editor = Some(ed);
             cx.notify();
         }
@@ -1527,10 +1564,6 @@ impl PivotApp {
                             }
                             match fetch_res {
                                 Ok(fetched) => {
-                                    resolve_display_names_for_models(
-                                        fetched.iter(),
-                                        &mut app.model_display_names,
-                                    );
                                     ed.upstream_models = Some(fetched.clone());
                                     // 合并入候选模型池并持久化，同时记录本次新增的池内模型
                                     let mut seen: HashSet<String> =
@@ -1544,6 +1577,11 @@ impl PivotApp {
                                             newly_added.push(owned);
                                         }
                                     }
+                                    resolve_display_infos_for_models(
+                                        ed.model_pool.iter().chain(fetched.iter()),
+                                        &mut app.model_display_infos,
+                                        true,
+                                    );
                                     save_provider_pool(&ed.provider_id, &ed.model_pool);
 
                                     // 若订阅模式当前尚未选任何模型，自动默认选中全池；
@@ -1658,7 +1696,11 @@ impl PivotApp {
             .collect();
 
         if !parts.is_empty() {
-            resolve_display_names_for_models(parts.iter(), &mut self.model_display_names);
+            resolve_display_infos_for_models(
+                parts.iter(),
+                &mut self.model_display_infos,
+                false,
+            );
             for m in parts {
                 if !ed.model_pool.contains(&m) {
                     ed.model_pool.push(m.clone());

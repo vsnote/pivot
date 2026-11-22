@@ -126,6 +126,22 @@ fn clean_model_id(raw_id: &str) -> String {
     trimmed.to_string()
 }
 
+fn extract_upstream_display_name(protocol: &str, item: &Value) -> Option<String> {
+    let raw = if protocol == "gemini" {
+        item.get("displayName")
+            .or_else(|| item.get("display_name"))
+            .and_then(|v| v.as_str())
+    } else {
+        item.get("displayName")
+            .or_else(|| item.get("display_name"))
+            .or_else(|| item.get("name"))
+            .and_then(|v| v.as_str())
+    };
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn parse_page(protocol: &str, body: &Value) -> Result<(Vec<String>, Option<String>), String> {
     let items = body[if protocol == "gemini" {
         "models"
@@ -135,6 +151,7 @@ fn parse_page(protocol: &str, body: &Value) -> Result<(Vec<String>, Option<Strin
     .as_array()
     .ok_or("服务商未返回兼容的模型列表")?;
     let mut models = Vec::new();
+    let mut discovered_names: Vec<(String, String)> = Vec::new();
     for item in items {
         if protocol == "gemini"
             && !item["supportedGenerationMethods"]
@@ -157,15 +174,14 @@ fn parse_page(protocol: &str, body: &Value) -> Result<(Vec<String>, Option<Strin
         };
         let cleaned = clean_model_id(id);
         if !cleaned.trim().is_empty() {
-            let upstream_name = item.get("name")
-                .or_else(|| item.get("displayName"))
-                .or_else(|| item.get("display_name"))
-                .and_then(|v| v.as_str());
-            if let Some(n) = upstream_name {
-                crate::model_catalog::register_dynamic_model(&cleaned, n, None);
+            if let Some(n) = extract_upstream_display_name(protocol, item) {
+                discovered_names.push((cleaned.clone(), n));
             }
             models.push(cleaned);
         }
+    }
+    if !discovered_names.is_empty() {
+        crate::model_catalog::register_dynamic_models(&discovered_names);
     }
     let next = if protocol == "gemini" {
         body["nextPageToken"]
@@ -447,6 +463,46 @@ mod tests {
         assert_eq!(
             clean_model_id("claude-sonnet-4-6"),
             "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn gemini_extracts_display_name_without_resource_name_pollution() {
+        let item_without_display = json!({
+            "name": "models/gemini-2.5-pro",
+            "supportedGenerationMethods": ["generateContent"]
+        });
+        assert_eq!(
+            extract_upstream_display_name("gemini", &item_without_display),
+            None
+        );
+
+        let item_with_display = json!({
+            "name": "models/gemini-test-dyn-a",
+            "displayName": "Gemini Test Dynamic A",
+            "supportedGenerationMethods": ["generateContent"]
+        });
+        assert_eq!(
+            extract_upstream_display_name("gemini", &item_with_display).as_deref(),
+            Some("Gemini Test Dynamic A")
+        );
+
+        let (parsed, _) = parse_page(
+            "gemini",
+            &json!({
+                "models": [item_with_display, item_without_display]
+            }),
+        )
+        .unwrap();
+        assert_eq!(parsed, vec!["gemini-test-dyn-a", "gemini-2.5-pro"]);
+        assert_eq!(
+            crate::model_catalog::resolve_model_display_name("gemini-test-dyn-a", None),
+            "Gemini Test Dynamic A"
+        );
+        // 没有 displayName 时不污染 models/gemini-2.5-pro
+        assert_ne!(
+            crate::model_catalog::resolve_model_display_name("gemini-2.5-pro", None),
+            "models/gemini-2.5-pro"
         );
     }
 }

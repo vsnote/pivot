@@ -836,15 +836,28 @@ pub async fn fetch_chatgpt_account_models(
         .ok_or_else(|| "ChatGPT 模型列表响应缺少 models 字段".to_string())?;
 
     let mut entries = Vec::new();
+    let mut discovered_names: Vec<(String, String)> = Vec::new();
     for m in arr {
         if let Some(slug) = m["slug"].as_str() {
             let trimmed = slug.trim();
             if trimmed.is_empty() || trimmed == "codex-auto-review" {
                 continue;
             }
+            if let Some(title) = m["title"]
+                .as_str()
+                .or_else(|| m["display_name"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                discovered_names.push((trimmed.to_string(), title.to_string()));
+            }
             let priority = m["priority"].as_i64().unwrap_or(999);
             entries.push((priority, trimmed.to_string()));
         }
+    }
+
+    if !discovered_names.is_empty() {
+        crate::model_catalog::register_dynamic_models(&discovered_names);
     }
 
     if entries.is_empty() {
@@ -1840,6 +1853,7 @@ pub async fn fetch_antigravity_models(
         .map_err(|e| format!("解析模型响应失败: {}", e))?;
 
     let mut models = Vec::new();
+    let mut discovered_names: Vec<(String, String)> = Vec::new();
     if let Some(map) = json["models"].as_object() {
         for (id, val) in map {
             let id_lower = id.to_lowercase();
@@ -1851,10 +1865,11 @@ pub async fn fetch_antigravity_models(
                 continue;
             }
             // 过滤没有有效显示名称的内部占位模型
-            let display_name = val["displayName"].as_str().unwrap_or("");
+            let display_name = val["displayName"].as_str().unwrap_or("").trim();
             if display_name.is_empty() || display_name == "undefined" {
                 continue;
             }
+            discovered_names.push((id.clone(), display_name.to_string()));
             models.push(id.clone());
         }
     } else if let Some(arr) = json["models"].as_array() {
@@ -1871,6 +1886,13 @@ pub async fn fetch_antigravity_models(
                         && !id_lower.starts_with("tab_")
                         && !id_lower.ends_with("-disabled")
                     {
+                        if let Some(dn) = m["displayName"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty() && *s != "undefined")
+                        {
+                            discovered_names.push((id.to_string(), dn.to_string()));
+                        }
                         models.push(id.to_string());
                     }
                 }
@@ -1887,6 +1909,13 @@ pub async fn fetch_antigravity_models(
                         && !id_lower.starts_with("tab_")
                         && !id_lower.ends_with("-disabled")
                     {
+                        if let Some(dn) = m["displayName"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty() && *s != "undefined")
+                        {
+                            discovered_names.push((id.to_string(), dn.to_string()));
+                        }
                         models.push(id.to_string());
                     }
                 }
@@ -1898,38 +1927,71 @@ pub async fn fetch_antigravity_models(
         return Err("上游未返回任何可用模型".to_string());
     }
 
-    // 智能排序：优先将 Claude 与主流 Gemini 模型置于前列
-    models.sort_by(|a, b| {
-        let score = |id: &str| {
-            let s = id.to_lowercase();
-            if s.contains("claude-sonnet") {
-                0
-            } else if s.contains("claude-opus") {
-                1
-            } else if s.contains("gemini-2.5-pro") {
-                2
-            } else if s.contains("gemini-3-flash") {
-                3
-            } else if s.contains("gemini-2.5-flash-thinking") {
-                4
-            } else if s.contains("gemini-2.5-flash") {
-                5
-            } else if s.contains("gemini-3.1-flash-lite") {
-                6
-            } else if s.contains("gpt-oss") {
-                7
-            } else if s.contains("claude") {
-                10
-            } else if s.contains("gemini") {
-                20
-            } else {
-                30
-            }
-        };
-        score(a).cmp(&score(b))
-    });
+    if !discovered_names.is_empty() {
+        crate::model_catalog::register_dynamic_models(&discovered_names);
+    }
+
+    sort_antigravity_models(&mut models);
 
     Ok(models)
+}
+
+/// 将 Antigravity 模型按家族优先级、同源基础型号及推理档位 (Minimal -> Low -> Medium -> High -> XHigh) 聚类排序
+pub(crate) fn sort_antigravity_models(models: &mut [String]) {
+    let priority_bucket = |id: &str| -> u8 {
+        let s = id.to_lowercase();
+        if s.contains("claude-sonnet") {
+            0
+        } else if s.contains("claude-opus") {
+            1
+        } else if s.contains("gemini-2.5-pro") {
+            2
+        } else if s.contains("gemini-3-flash") {
+            3
+        } else if s.contains("gemini-2.5-flash-thinking") {
+            4
+        } else if s.contains("gemini-2.5-flash") {
+            5
+        } else if s.contains("gemini-3.1-flash-lite") {
+            6
+        } else if s.contains("gpt-oss") {
+            7
+        } else if s.contains("claude") {
+            10
+        } else if s.contains("gemini") {
+            20
+        } else {
+            30
+        }
+    };
+
+    let effort_rank = |eff: Option<crate::model_catalog::ModelEffort>| -> u8 {
+        match eff {
+            None => 0,
+            Some(crate::model_catalog::ModelEffort::Minimal) => 1,
+            Some(crate::model_catalog::ModelEffort::Low) => 2,
+            Some(crate::model_catalog::ModelEffort::Medium) => 3,
+            Some(crate::model_catalog::ModelEffort::High) => 4,
+            Some(crate::model_catalog::ModelEffort::XHigh) => 5,
+        }
+    };
+
+    models.sort_by(|a, b| {
+        let (a_stem, a_eff) = match crate::model_catalog::ModelEffort::from_suffix(a) {
+            Some((s, e)) => (s.to_lowercase(), Some(e)),
+            None => (a.to_lowercase(), None),
+        };
+        let (b_stem, b_eff) = match crate::model_catalog::ModelEffort::from_suffix(b) {
+            Some((s, e)) => (s.to_lowercase(), Some(e)),
+            None => (b.to_lowercase(), None),
+        };
+
+        priority_bucket(a)
+            .cmp(&priority_bucket(b))
+            .then_with(|| a_stem.cmp(&b_stem))
+            .then_with(|| effort_rank(a_eff).cmp(&effort_rank(b_eff)))
+            .then_with(|| a.cmp(b))
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2753,6 +2815,36 @@ mod tests {
                 30
             ),
             15
+        );
+    }
+
+    #[test]
+    fn test_sort_antigravity_models_clusters_and_orders_efforts() {
+        let mut models = vec![
+            "gemini-4-neon-xhigh".to_string(),
+            "gemini-4-hydrogen-tiered-xhigh".to_string(),
+            "gemini-4-neon-low".to_string(),
+            "claude-sonnet-5-5-high".to_string(),
+            "gemini-4-hydrogen-tiered-high".to_string(),
+            "gemini-4-neon-high".to_string(),
+            "claude-sonnet-5-5-low".to_string(),
+            "gemini-4-neon-medium".to_string(),
+        ];
+
+        sort_antigravity_models(&mut models);
+
+        assert_eq!(
+            models,
+            vec![
+                "claude-sonnet-5-5-low",
+                "claude-sonnet-5-5-high",
+                "gemini-4-hydrogen-tiered-high",
+                "gemini-4-hydrogen-tiered-xhigh",
+                "gemini-4-neon-low",
+                "gemini-4-neon-medium",
+                "gemini-4-neon-high",
+                "gemini-4-neon-xhigh",
+            ]
         );
     }
 }

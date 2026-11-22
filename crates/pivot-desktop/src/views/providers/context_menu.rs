@@ -7,6 +7,7 @@ use crate::PivotApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Align, Placement, Positioner};
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use pivot_core::db::SubscriptionAccount;
@@ -105,10 +106,9 @@ pub fn render_provider_context_menu(
             }
             let match_id = m.to_lowercase().contains(&search_q);
             let match_disp = app
-                .model_display_names
-                .get(*m)
-                .map(|d| d.to_lowercase().contains(&search_q))
-                .unwrap_or(false);
+                .model_display_name(m)
+                .to_lowercase()
+                .contains(&search_q);
             match_id || match_disp
         })
         .cloned()
@@ -526,18 +526,33 @@ pub fn render_provider_context_menu(
                                 .gap(px(1.0))
                                 .px(px(4.0));
 
-                            for (idx, model_id) in filtered_models.into_iter().enumerate() {
-                                let disp = app
-                                    .model_display_names
-                                    .get(&model_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| model_id.clone());
+                            let disp_rows: Vec<(String, String)> = filtered_models
+                                .into_iter()
+                                .map(|id| {
+                                    let disp = app.model_display_name(&id);
+                                    (id, disp)
+                                })
+                                .collect();
+                            let mut disp_counts: HashMap<String, usize> = HashMap::new();
+                            for (_, disp) in &disp_rows {
+                                *disp_counts.entry(disp.to_lowercase()).or_insert(0) += 1;
+                            }
+
+                            for (idx, (model_id, disp)) in disp_rows.into_iter().enumerate() {
+                                let has_dup_disp = disp_counts
+                                    .get(&disp.to_lowercase())
+                                    .copied()
+                                    .unwrap_or(0)
+                                    > 1;
                                 let copy_key = format!("ctx_model_{}", model_id);
                                 let is_copied = app.copied_id.as_deref() == Some(copy_key.as_str());
                                 let is_row_hovered =
                                     menu.hovered_model.as_deref() == Some(model_id.as_str());
+                                let needs_tooltip = disp != model_id;
+                                let tip_id = model_id.clone();
                                 let m_hover = model_id.clone();
                                 let m_copy = model_id.clone();
+                                let raw_disambig = model_id.clone();
 
                                 list = list.child(
                                     div()
@@ -554,6 +569,11 @@ pub fn render_provider_context_menu(
                                         .rounded(px(5.0))
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(palette.accent))
+                                        .when(needs_tooltip, |el| {
+                                            el.tooltip(move |w, cx| {
+                                                Tooltip::new(tip_id.clone()).build(w, cx)
+                                            })
+                                        })
                                         .on_hover(cx.listener(
                                             move |this, hovered: &bool, _, cx| {
                                                 if let Some(cm) = &mut this.context_menu {
@@ -617,7 +637,17 @@ pub fn render_provider_context_menu(
                                                         }),
                                                     )
                                                 }),
-                                        ),
+                                        )
+                                        .when(has_dup_disp, |row| {
+                                            row.child(
+                                                div()
+                                                    .max_w(px(108.0))
+                                                    .text_size(px(9.5))
+                                                    .text_color(palette.subtext)
+                                                    .truncate()
+                                                    .child(raw_disambig),
+                                            )
+                                        }),
                                 );
                             }
                             list.into_any_element()

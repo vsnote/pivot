@@ -855,13 +855,23 @@ fn render_overview_body(
         .unwrap_or(1.0)
         .max(1e-9);
 
+    let friendly_labels: Vec<String> = all_models
+        .iter()
+        .map(|m| app.model_display_name(&m.model))
+        .collect();
+    let mut friendly_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for f in &friendly_labels {
+        *friendly_counts.entry(f.to_lowercase()).or_insert(0) += 1;
+    }
+
     let mut model_rows = div().flex().flex_col().gap(px(8.0));
-    for (idx, m) in all_models.iter().enumerate() {
-        let friendly = app
-            .model_display_names
-            .get(&m.model)
-            .cloned()
-            .unwrap_or_else(|| m.model.clone());
+    for (idx, (m, friendly)) in all_models.iter().zip(friendly_labels).enumerate() {
+        let is_dup_friendly = friendly_counts
+            .get(&friendly.to_lowercase())
+            .copied()
+            .unwrap_or(0)
+            > 1;
         let cur_val = match metric_mode {
             ProviderMetricMode::Calls => m.calls as f64,
             ProviderMetricMode::Cost => {
@@ -908,7 +918,16 @@ fn render_overview_body(
                                         .text_color(palette.foreground)
                                         .truncate()
                                         .child(friendly),
-                                ),
+                                )
+                                .when(is_dup_friendly, |el| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(palette.subtext)
+                                            .truncate()
+                                            .child(m.model.clone()),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -1587,11 +1606,7 @@ fn render_log_item(
     } else {
         "unknown"
     };
-    let display_model = app
-        .model_display_names
-        .get(raw_model)
-        .cloned()
-        .unwrap_or_else(|| raw_model.to_string());
+    let display_model = app.model_display_name(raw_model);
 
     let prov_label = if is_unrouted {
         None
