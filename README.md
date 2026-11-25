@@ -1,7 +1,7 @@
 <div align="center">
   <img src="public/app-icon.png" width="96" height="96" alt="Pivot Logo" />
   <h1>Pivot</h1>
-  <p><strong>面向 AI 智能体的本地轻量路由网关</strong></p>
+  <p><strong>本地 AI 智能体网关</strong></p>
 
   <p>
     <a href="https://github.com/vsnote/pivot/releases/latest">
@@ -16,7 +16,7 @@
 
 ---
 
-Pivot 是面向现代主流 AI Coding Agent 打造的本地轻量路由网关。在本机提供兼具 OpenAI 与 Anthropic 兼容的统一网关端点，支持多 Agent 配置无感接管、独立启动模型设定、协议即时转换与官方订阅池接入。
+Pivot 是一款本地 AI 智能体网关，面向现代主流 AI Coding Agent 打造。在本机提供兼具 OpenAI 与 Anthropic 兼容的统一网关端点，支持多 Agent 配置无感接管、独立启动模型设定、协议即时转换与官方订阅池接入。
 
 ---
 
@@ -24,7 +24,7 @@ Pivot 是面向现代主流 AI Coding Agent 打造的本地轻量路由网关。
 
 - **⚡ 统一本地网关**：监听 `127.0.0.1:16888`，双向兼容 Anthropic 与 OpenAI 标准端点。
 - **🔄 协议无损转换**：Anthropic ⇋ OpenAI ⇋ Gemini 实时互转，完整支持流式、Tool Call 与思维链。
-- **🎯 精确透明路由**：按前缀与模型池严格路由，未声明模型直接报错，绝无跨模型静默篡改。
+- **🎯 严格模型匹配**：按服务商前缀与模型池精确分发，未声明模型直接报错，绝无跨模型静默篡改。
 - **🔌 Agent 一键接管**：一键接管与无损还原 Agent 本地配置，支持独立设定启动模型。
 - **👥 订阅账号池**：原生支持 Antigravity 与 ChatGPT 等官方订阅，免 Key 轮换与故障自愈。
 - **🔑 负载均衡**：多 API Key 支持 Round-Robin 轮询与会话亲和 (Session Affinity)。
@@ -51,11 +51,11 @@ Pivot 是面向现代主流 AI Coding Agent 打造的本地轻量路由网关。
 
 ---
 
-## 🧭 路由机制
+## 🎯 模型分发机制
 
-网关按以下优先级精确分发请求（未声明模型直接返回报错）：
+网关按以下优先级精确匹配服务商（未声明模型直接返回报错）：
 
-1. **前缀路由**：显式指定前缀（如 `deepseek/deepseek-chat`）时直达目标服务商。
+1. **前缀直达**：显式指定服务商前缀（如 `deepseek/deepseek-chat`）时直达目标服务商。
 2. **精确匹配**：命中已启用服务商声明的模型池。
 3. **智能归一化**：自动剥离日期后缀（`-20250219`）、`-latest` 或上下文标记（`[1M]`、`[thinking]`）。
 4. **厂商家族启发**：同家族特定前缀（如 `deepseek-*`）由对应服务商承接。

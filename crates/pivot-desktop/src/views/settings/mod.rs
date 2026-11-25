@@ -352,8 +352,8 @@ pub fn render_settings_view(
                                                         .text_size(px(11.0))
                                                         .text_color(palette.muted_foreground)
                                                         .child(locale.pick(
-                                                            "AI 编程客户端本地网关与统一路由中枢",
-                                                            "Local AI Coding Agent Gateway & Router",
+                                                            "本地 AI 智能体网关",
+                                                            "Local AI Agent Gateway",
                                                         )),
                                                 ),
                                         ),

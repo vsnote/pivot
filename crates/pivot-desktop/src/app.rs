@@ -3041,8 +3041,8 @@ impl PivotApp {
                 ),
                 details: vec![locale
                     .pick(
-                        "删除后将移除该服务商的凭据与模型路由配置，此操作无法撤销。",
-                        "Credentials and model routing rules for this provider will be permanently removed.",
+                        "删除后将移除该服务商的凭据与模型配置，此操作无法撤销。",
+                        "Credentials and model configuration for this provider will be permanently removed.",
                     )
                     .to_string()],
                 confirm_label: locale.pick("确认删除", "Delete").to_string(),
