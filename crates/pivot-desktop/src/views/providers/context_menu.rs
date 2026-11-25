@@ -3,11 +3,11 @@ use crate::components::text_input::NativeTextInput;
 use crate::i18n::Locale;
 use crate::theme::ThemePalette;
 use crate::views::providers::list::is_subscription_provider;
+use crate::views::providers::model_pool::render_compact_tooltip;
 use crate::PivotApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Align, Placement, Positioner};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use pivot_core::db::SubscriptionAccount;
@@ -569,11 +569,6 @@ pub fn render_provider_context_menu(
                                         .rounded(px(5.0))
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(palette.accent))
-                                        .when(needs_tooltip, |el| {
-                                            el.tooltip(move |w, cx| {
-                                                Tooltip::new(tip_id.clone()).build(w, cx)
-                                            })
-                                        })
                                         .on_hover(cx.listener(
                                             move |this, hovered: &bool, _, cx| {
                                                 if let Some(cm) = &mut this.context_menu {
@@ -622,19 +617,32 @@ pub fn render_provider_context_menu(
                                                 )
                                                 .when(is_copied || is_row_hovered, |r| {
                                                     r.child(
-                                                        div().flex_shrink_0().child(if is_copied {
-                                                            lucide_icon(
-                                                                IconName::Check,
-                                                                11.5,
-                                                                palette.emerald_text,
-                                                            )
-                                                        } else {
-                                                            lucide_icon(
-                                                                IconName::Copy,
-                                                                11.5,
-                                                                palette.muted_foreground,
-                                                            )
-                                                        }),
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "ctx_copy_tip_{}",
+                                                                idx
+                                                            )))
+                                                            .flex_shrink_0()
+                                                            .when(needs_tooltip, |btn| {
+                                                                btn.tooltip(move |w, cx| {
+                                                                    render_compact_tooltip(
+                                                                        &tip_id, w, cx,
+                                                                    )
+                                                                })
+                                                            })
+                                                            .child(if is_copied {
+                                                                lucide_icon(
+                                                                    IconName::Check,
+                                                                    11.5,
+                                                                    palette.emerald_text,
+                                                                )
+                                                            } else {
+                                                                lucide_icon(
+                                                                    IconName::Copy,
+                                                                    11.5,
+                                                                    palette.muted_foreground,
+                                                                )
+                                                            }),
                                                     )
                                                 }),
                                         )

@@ -1973,6 +1973,7 @@ pub(crate) fn sort_antigravity_models(models: &mut [String]) {
             Some(crate::model_catalog::ModelEffort::Medium) => 3,
             Some(crate::model_catalog::ModelEffort::High) => 4,
             Some(crate::model_catalog::ModelEffort::XHigh) => 5,
+            Some(crate::model_catalog::ModelEffort::Max) => 6,
         }
     };
 

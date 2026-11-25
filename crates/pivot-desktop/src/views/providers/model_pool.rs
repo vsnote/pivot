@@ -8,183 +8,159 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use pivot_core::model_catalog::{ModelDisplayInfo, ModelEffort};
+use pivot_core::model_catalog::{collapse_provider_models, LogicalModelEntry};
 use std::collections::{HashMap, HashSet};
+
+pub(crate) fn render_compact_tooltip(text: &str, window: &mut Window, cx: &mut App) -> AnyView {
+    let label = text.to_string();
+    Tooltip::element(move |_, _| {
+        div()
+            .text_size(px(10.5))
+            .line_height(px(13.5))
+            .child(label.clone())
+    })
+    .m(px(4.0))
+    .px(px(6.5))
+    .py(px(2.5))
+    .rounded(px(5.0))
+    .text_size(px(10.5))
+    .build(window, cx)
+}
 
 struct FamilyGroup {
     label: &'static str,
-    members: Vec<String>,
+    logical_count: usize,
+    raw_members: Vec<String>,
 }
 
 type FamilySpec = (&'static str, fn(&str) -> bool);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct VariantItem {
-    model_id: String,
-    effort: ModelEffort,
+struct PoolEntry {
+    logical: LogicalModelEntry,
+    disambiguation: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PoolRow {
-    VariantGroup {
-        group_key: String,
-        base_name: String,
-        extra_tags: Vec<String>,
-        variants: Vec<VariantItem>,
-        disambiguation: Option<String>,
-    },
-    Single {
-        model_id: String,
-        base_name: String,
-        effort: Option<ModelEffort>,
-        extra_tags: Vec<String>,
-        disambiguation: Option<String>,
-    },
-}
-
-fn build_pool_rows(
-    models: &[String],
-    resolve_info: impl Fn(&str) -> ModelDisplayInfo,
-) -> Vec<PoolRow> {
-    let mut slots: Vec<Vec<(String, ModelDisplayInfo)>> = Vec::new();
-    let mut slot_map: HashMap<(String, Vec<String>), usize> = HashMap::new();
-
-    for m in models {
-        let info = resolve_info(m);
-        let key = (info.group_key.clone(), info.extra_tags.clone());
-        if let Some(&idx) = slot_map.get(&key) {
-            slots[idx].push((m.clone(), info));
-        } else {
-            let idx = slots.len();
-            slot_map.insert(key, idx);
-            slots.push(vec![(m.clone(), info)]);
-        }
-    }
-
-    let mut rows = Vec::new();
-    for members in slots {
-        let eff_members: Vec<&(String, ModelDisplayInfo)> = members
-            .iter()
-            .filter(|(_, info)| info.effort.is_some())
-            .collect();
-        let unique_efforts: HashSet<ModelEffort> = eff_members
-            .iter()
-            .filter_map(|(_, info)| info.effort)
-            .collect();
-
-        let can_group_efforts =
-            eff_members.len() >= 2 && unique_efforts.len() == eff_members.len();
-
-        if can_group_efforts {
-            let mut variants: Vec<VariantItem> = eff_members
-                .iter()
-                .filter_map(|(id, info)| {
-                    info.effort.map(|effort| VariantItem {
-                        model_id: id.clone(),
-                        effort,
-                    })
-                })
-                .collect();
-            variants.sort_by_key(|v| v.effort);
-
-            let first_eff = &eff_members[0].1;
-            let group_row = PoolRow::VariantGroup {
-                group_key: first_eff.group_key.clone(),
-                base_name: first_eff.base_name.clone(),
-                extra_tags: first_eff.extra_tags.clone(),
-                variants,
-                disambiguation: None,
-            };
-
-            let mut emitted_group = false;
-            for (id, info) in members {
-                if info.effort.is_none() {
-                    rows.push(PoolRow::Single {
-                        model_id: id,
-                        base_name: info.base_name,
-                        effort: None,
-                        extra_tags: info.extra_tags,
-                        disambiguation: None,
-                    });
-                } else if !emitted_group {
-                    rows.push(group_row.clone());
-                    emitted_group = true;
-                }
-            }
-        } else {
-            for (id, info) in members {
-                rows.push(PoolRow::Single {
-                    model_id: id,
-                    base_name: info.base_name,
-                    effort: info.effort,
-                    extra_tags: info.extra_tags,
-                    disambiguation: None,
-                });
-            }
-        }
-    }
-
-    // 列表级同名冲突自动消歧：绝不允许任意两行呈现完全一致的视觉文本
-    let mut single_sig_counts: HashMap<(String, Option<ModelEffort>, Vec<String>), usize> =
-        HashMap::new();
+fn build_pool_entries(logical_models: Vec<LogicalModelEntry>) -> Vec<PoolEntry> {
+    let mut single_sig_counts: HashMap<
+        (String, Option<pivot_core::model_catalog::ModelEffort>, Vec<String>),
+        usize,
+    > = HashMap::new();
     let mut group_sig_counts: HashMap<(String, Vec<String>), usize> = HashMap::new();
 
-    for row in &rows {
-        match row {
-            PoolRow::Single {
-                base_name,
-                effort,
-                extra_tags,
-                ..
-            } => {
-                let sig = (base_name.to_lowercase(), *effort, extra_tags.clone());
-                *single_sig_counts.entry(sig).or_insert(0) += 1;
-            }
-            PoolRow::VariantGroup {
-                base_name,
-                extra_tags,
-                ..
-            } => {
-                let sig = (base_name.to_lowercase(), extra_tags.clone());
-                *group_sig_counts.entry(sig).or_insert(0) += 1;
-            }
+    for entry in &logical_models {
+        if entry.variants.is_empty() {
+            let sig = (
+                entry.base_name.to_lowercase(),
+                entry.single_effort,
+                entry.extra_tags.clone(),
+            );
+            *single_sig_counts.entry(sig).or_insert(0) += 1;
+        } else {
+            let sig = (entry.base_name.to_lowercase(), entry.extra_tags.clone());
+            *group_sig_counts.entry(sig).or_insert(0) += 1;
         }
     }
 
-    for row in &mut rows {
-        match row {
-            PoolRow::Single {
-                model_id,
-                base_name,
-                effort,
-                extra_tags,
-                disambiguation,
-            } => {
-                let sig = (base_name.to_lowercase(), *effort, extra_tags.clone());
+    logical_models
+        .into_iter()
+        .map(|entry| {
+            let disambiguation = if entry.variants.is_empty() {
+                let sig = (
+                    entry.base_name.to_lowercase(),
+                    entry.single_effort,
+                    entry.extra_tags.clone(),
+                );
                 if single_sig_counts.get(&sig).copied().unwrap_or(0) > 1 {
-                    *disambiguation = Some(model_id.clone());
+                    Some(entry.logical_id.clone())
+                } else {
+                    None
                 }
-            }
-            PoolRow::VariantGroup {
-                group_key,
-                base_name,
-                extra_tags,
-                disambiguation,
-                ..
-            } => {
-                let sig = (base_name.to_lowercase(), extra_tags.clone());
+            } else {
+                let sig = (entry.base_name.to_lowercase(), entry.extra_tags.clone());
                 if group_sig_counts.get(&sig).copied().unwrap_or(0) > 1 {
-                    *disambiguation = Some(group_key.clone());
+                    Some(entry.logical_id.clone())
+                } else {
+                    None
                 }
+            };
+            PoolEntry {
+                logical: entry,
+                disambiguation,
             }
-        }
-    }
-
-    rows
+        })
+        .collect()
 }
 
-fn detect_family_groups(pool: &[String]) -> Vec<FamilyGroup> {
-    if pool.len() < 5 {
+fn entry_matches_query(entry: &LogicalModelEntry, search_q: &str) -> bool {
+    if search_q.is_empty() {
+        return true;
+    }
+    if entry.logical_id.to_lowercase().contains(search_q)
+        || entry.base_name.to_lowercase().contains(search_q)
+    {
+        return true;
+    }
+    if entry
+        .extra_tags
+        .iter()
+        .any(|t| t.to_lowercase().contains(search_q))
+    {
+        return true;
+    }
+    if entry
+        .single_effort
+        .map(|e| {
+            e.short_label().to_lowercase().contains(search_q)
+                || e.full_label().to_lowercase().contains(search_q)
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    entry.variants.iter().any(|v| {
+        v.model_id.to_lowercase().contains(search_q)
+            || v.effort.short_label().to_lowercase().contains(search_q)
+            || v.effort.full_label().to_lowercase().contains(search_q)
+    })
+}
+
+fn filter_pool_entries(
+    entries: &[LogicalModelEntry],
+    selected_set: &HashSet<&str>,
+    filter: ModelFilterTab,
+    search_q: &str,
+) -> Vec<PoolEntry> {
+    let matched: Vec<LogicalModelEntry> = entries
+        .iter()
+        .filter(|entry| {
+            let any_sel = entry
+                .raw_ids
+                .iter()
+                .any(|id| selected_set.contains(id.as_str()));
+            match filter {
+                ModelFilterTab::All => {}
+                ModelFilterTab::Selected => {
+                    if !any_sel {
+                        return false;
+                    }
+                }
+                ModelFilterTab::Unselected => {
+                    if any_sel {
+                        return false;
+                    }
+                }
+            }
+            entry_matches_query(entry, search_q)
+        })
+        .cloned()
+        .collect();
+
+    build_pool_entries(matched)
+}
+
+fn detect_family_groups(logical_pool: &[LogicalModelEntry]) -> Vec<FamilyGroup> {
+    if logical_pool.len() < 5 {
         return Vec::new();
     }
     let specs: [FamilySpec; 5] = [
@@ -205,13 +181,20 @@ fn detect_family_groups(pool: &[String]) -> Vec<FamilyGroup> {
 
     let mut out = Vec::new();
     for (label, pred) in specs {
-        let members: Vec<String> = pool
-            .iter()
-            .filter(|m| pred(&m.to_lowercase()))
-            .cloned()
-            .collect();
-        if members.len() >= 2 {
-            out.push(FamilyGroup { label, members });
+        let mut logical_count = 0usize;
+        let mut raw_members = Vec::new();
+        for entry in logical_pool {
+            if pred(&entry.logical_id.to_lowercase()) {
+                logical_count += 1;
+                raw_members.extend(entry.raw_ids.iter().cloned());
+            }
+        }
+        if logical_count >= 2 {
+            out.push(FamilyGroup {
+                label,
+                logical_count,
+                raw_members,
+            });
         }
     }
     out
@@ -239,9 +222,18 @@ pub fn render_model_pool_section(
     cx: &mut Context<PivotApp>,
 ) -> Div {
     let locale = app.prefs.locale;
-    let total_pool = editor.model_pool.len();
+    let logical_pool = collapse_provider_models(&editor.model_pool);
+    let total_pool = logical_pool.len();
     let selected_set: HashSet<&str> = editor.selected_models.iter().map(|s| s.as_str()).collect();
-    let selected_count = editor.selected_models.len();
+    let selected_count = logical_pool
+        .iter()
+        .filter(|entry| {
+            entry
+                .raw_ids
+                .iter()
+                .any(|id| selected_set.contains(id.as_str()))
+        })
+        .count();
 
     let upstream_set: Option<HashSet<&str>> = editor
         .upstream_models
@@ -265,62 +257,18 @@ pub fn render_model_pool_section(
         .trim()
         .to_lowercase();
 
-    let mut info_cache: HashMap<String, ModelDisplayInfo> =
-        HashMap::with_capacity(editor.model_pool.len());
-    for m in &editor.model_pool {
-        info_cache.insert(m.clone(), app.model_display_info(m));
-    }
-
-    let filtered_models: Vec<String> = editor
-        .model_pool
+    let filtered_entries =
+        filter_pool_entries(&logical_pool, &selected_set, editor.model_filter, &search_q);
+    let filtered_raw_ids: Vec<String> = filtered_entries
         .iter()
-        .filter(|m| {
-            let is_sel = selected_set.contains(m.as_str());
-            match editor.model_filter {
-                ModelFilterTab::All => {}
-                ModelFilterTab::Selected => {
-                    if !is_sel {
-                        return false;
-                    }
-                }
-                ModelFilterTab::Unselected => {
-                    if is_sel {
-                        return false;
-                    }
-                }
-            }
-            if search_q.is_empty() {
-                return true;
-            }
-            let info = info_cache
-                .get(*m)
-                .cloned()
-                .unwrap_or_else(|| app.model_display_info(m));
-            let match_id = m.to_lowercase().contains(&search_q);
-            let match_disp = info.display_name.to_lowercase().contains(&search_q);
-            let match_base = info.base_name.to_lowercase().contains(&search_q);
-            let match_effort = info
-                .effort
-                .map(|e| {
-                    e.short_label().to_lowercase().contains(&search_q)
-                        || e.full_label().to_lowercase().contains(&search_q)
-                })
-                .unwrap_or(false);
-            let match_tags = info
-                .extra_tags
-                .iter()
-                .any(|t| t.to_lowercase().contains(&search_q));
-            match_id || match_disp || match_base || match_effort || match_tags
-        })
-        .cloned()
+        .flat_map(|pe| pe.logical.raw_ids.iter().cloned())
         .collect();
-
-    let all_filtered_selected = !filtered_models.is_empty()
-        && filtered_models
+    let all_filtered_selected = !filtered_raw_ids.is_empty()
+        && filtered_raw_ids
             .iter()
             .all(|m| selected_set.contains(m.as_str()));
 
-    let family_groups = detect_family_groups(&editor.model_pool);
+    let family_groups = detect_family_groups(&logical_pool);
     let app_entity = cx.entity();
 
     let can_sync = if is_subscription {
@@ -477,7 +425,7 @@ pub fn render_model_pool_section(
                         ),
                 ),
         )
-        // 2. 一体化紧凑模型池卡片容器（自适应高度 + max_h 176px 无轨道滚动）
+        // 2. 一体化紧凑模型池卡片容器
         .child(
             div()
                 .w_full()
@@ -533,8 +481,8 @@ pub fn render_model_pool_section(
                                     });
                                 },
                             ))
-                            .when(!filtered_models.is_empty(), |el| {
-                                let batch_targets = filtered_models.clone();
+                            .when(!filtered_raw_ids.is_empty(), |el| {
+                                let batch_targets = filtered_raw_ids.clone();
                                 let should_select = !all_filtered_selected;
                                 el.child(
                                     NativeButton::new(
@@ -574,14 +522,14 @@ pub fn render_model_pool_section(
 
                     for grp in family_groups {
                         let all_on = grp
-                            .members
+                            .raw_members
                             .iter()
                             .all(|m| selected_set.contains(m.as_str()));
                         let any_on = grp
-                            .members
+                            .raw_members
                             .iter()
                             .any(|m| selected_set.contains(m.as_str()));
-                        let members = grp.members.clone();
+                        let members = grp.raw_members.clone();
                         let next_state = !all_on;
 
                         bar = bar.child(
@@ -622,7 +570,7 @@ pub fn render_model_pool_section(
                                         );
                                     }),
                                 )
-                                .child(format!("{} ({})", grp.label, grp.members.len())),
+                                .child(format!("{} ({})", grp.label, grp.logical_count)),
                         );
                     }
                     el.child(bar)
@@ -650,7 +598,7 @@ pub fn render_model_pool_section(
                             )
                         })
                         .into_any_element()
-                } else if filtered_models.is_empty() {
+                } else if filtered_entries.is_empty() {
                     div()
                         .py(px(16.0))
                         .px(px(14.0))
@@ -662,13 +610,6 @@ pub fn render_model_pool_section(
                         .child(locale.pick("无匹配的模型", "No matching models"))
                         .into_any_element()
                 } else {
-                    let pool_rows = build_pool_rows(&filtered_models, |id| {
-                        info_cache
-                            .get(id)
-                            .cloned()
-                            .unwrap_or_else(|| app.model_display_info(id))
-                    });
-
                     let mut scroll_list = div()
                         .id("editor_model_pool_scroll")
                         .max_h(px(176.0))
@@ -679,267 +620,110 @@ pub fn render_model_pool_section(
                         .flex_col()
                         .gap(px(1.5));
 
-                    for (idx, row) in pool_rows.into_iter().enumerate() {
-                        match row {
-                            PoolRow::VariantGroup {
-                                group_key,
-                                base_name,
-                                extra_tags,
-                                variants,
-                                disambiguation,
-                            } => {
-                                let group_ids: Vec<String> =
-                                    variants.iter().map(|v| v.model_id.clone()).collect();
-                                let checked_count = group_ids
-                                    .iter()
-                                    .filter(|id| selected_set.contains(id.as_str()))
-                                    .count();
-                                let all_checked = checked_count == group_ids.len();
-                                let any_checked = checked_count > 0;
-                                let partial_checked = any_checked && !all_checked;
+                    for (idx, pool_entry) in filtered_entries.into_iter().enumerate() {
+                        let entry = pool_entry.logical;
+                        let disambiguation = pool_entry.disambiguation;
 
-                                let hover_key = format!("group:{}", group_key);
-                                let is_hovered =
-                                    editor.hovered_pool_model.as_deref() == Some(hover_key.as_str());
-                                let expand_key =
-                                    format!("{}|{}", group_key, extra_tags.join(","));
-                                let is_expanded =
-                                    editor.expanded_pool_groups.contains(&expand_key);
-                                let wrap_pills = (base_name.chars().count() > 22
-                                    && variants.len() >= 4)
-                                    || (disambiguation.is_some() && variants.len() >= 3);
+                        if entry.variants.is_empty() {
+                            let model_id = entry.logical_id;
+                            let is_checked = selected_set.contains(model_id.as_str());
+                            let is_stale = is_model_stale(&model_id);
+                            let no_supporting_account = is_model_no_account(&model_id);
+                            let is_hovered =
+                                editor.hovered_pool_model.as_deref() == Some(model_id.as_str());
+                            let copy_key = format!("pool_copy_{}", model_id);
+                            let is_copied = app.copied_id.as_deref() == Some(copy_key.as_str());
 
-                                let m_hover_enter = hover_key.clone();
-                                let m_hover_leave = hover_key;
-                                let group_ids_toggle = group_ids.clone();
-                                let group_ids_del = group_ids.clone();
-                                let expand_key_btn = expand_key;
-                                let next_group_select = !all_checked;
+                            let needs_copy_tip = entry.base_name != model_id
+                                || entry.single_effort.is_some()
+                                || !entry.extra_tags.is_empty();
+                            let tip_id = model_id.clone();
 
-                                let mut pills_row = div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(3.5))
-                                    .flex_shrink_0();
+                            let m_toggle = model_id.clone();
+                            let m_hover = model_id.clone();
+                            let m_copy_id = copy_key.clone();
+                            let m_copy_val = model_id.clone();
+                            let m_delete = model_id.clone();
 
-                                for (v_idx, variant) in variants.iter().enumerate() {
-                                    let is_v_checked =
-                                        selected_set.contains(variant.model_id.as_str());
-                                    let v_stale = is_model_stale(&variant.model_id);
-                                    let v_no_acc = is_model_no_account(&variant.model_id);
-                                    let has_warn = is_v_checked && (v_stale || v_no_acc);
-
-                                    let copy_key = format!("pool_copy_{}", variant.model_id);
-                                    let is_v_copied =
-                                        app.copied_id.as_deref() == Some(copy_key.as_str());
-
-                                    let tip_text = if is_v_checked && v_stale {
-                                        format!(
-                                            "{} · {}",
-                                            variant.model_id,
-                                            locale.pick("上游未见", "Unlisted")
-                                        )
-                                    } else if is_v_checked && v_no_acc {
-                                        format!(
-                                            "{} · {}",
-                                            variant.model_id,
-                                            locale.pick("无可用账号", "No active account")
-                                        )
-                                    } else {
-                                        variant.model_id.clone()
-                                    };
-
-                                    let m_toggle_v = variant.model_id.clone();
-                                    let m_copy_val = variant.model_id.clone();
-                                    let m_copy_key = copy_key;
-
-                                    let copied_check_color = if is_v_checked {
-                                        if palette.is_dark {
-                                            rgb(0x059669)
+                            let mut left_content = div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .size(px(13.0))
+                                        .rounded(px(3.5))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .mr(px(2.0))
+                                        .border_1()
+                                        .border_color(if is_checked {
+                                            palette.primary
                                         } else {
-                                            rgb(0x34d399)
-                                        }
-                                    } else {
-                                        palette.emerald_text
-                                    };
+                                            palette.input
+                                        })
+                                        .bg(if is_checked {
+                                            palette.primary
+                                        } else {
+                                            palette.background
+                                        })
+                                        .when(is_checked, |box_el| {
+                                            box_el.child(lucide_icon(
+                                                IconName::Check,
+                                                9.5,
+                                                palette.primary_foreground,
+                                            ))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(11.5))
+                                        .font_weight(if is_checked {
+                                            FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(if is_checked {
+                                            palette.foreground
+                                        } else {
+                                            palette.muted_foreground
+                                        })
+                                        .truncate()
+                                        .child(entry.base_name),
+                                );
 
-                                    pills_row = pills_row.child(
+                            for tag in entry.extra_tags {
+                                left_content =
+                                    left_content.child(render_compact_tag(&tag, palette));
+                            }
+
+                            if let Some(eff) = entry.single_effort {
+                                left_content = left_content
+                                    .child(render_compact_tag(eff.short_label(), palette));
+                            }
+
+                            if let Some(disambig) = disambiguation {
+                                left_content = left_content.child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(10.0))
+                                        .text_color(palette.subtext)
+                                        .truncate()
+                                        .child(disambig),
+                                );
+                            }
+
+                            left_content = left_content
+                                .when(is_hovered || is_copied, |el| {
+                                    el.child(
                                         div()
                                             .id(SharedString::from(format!(
-                                                "pool_var_{}_{}",
-                                                idx, v_idx
-                                            )))
-                                            .relative()
-                                            .h(px(19.0))
-                                            .px(px(5.5))
-                                            .rounded(px(4.0))
-                                            .border_1()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(3.0))
-                                            .cursor_pointer()
-                                            .border_color(if is_v_checked {
-                                                palette.primary
-                                            } else {
-                                                palette.border
-                                            })
-                                            .bg(if is_v_checked {
-                                                palette.primary
-                                            } else {
-                                                palette.background
-                                            })
-                                            .text_size(px(10.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(if is_v_checked {
-                                                palette.primary_foreground
-                                            } else {
-                                                palette.muted_foreground
-                                            })
-                                            .when(!is_v_checked, |el| {
-                                                el.hover(move |s| {
-                                                    s.bg(palette.secondary)
-                                                        .text_color(palette.foreground)
-                                                })
-                                            })
-                                            .tooltip(move |w, cx| {
-                                                Tooltip::new(tip_text.clone()).build(w, cx)
-                                            })
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.editor_toggle_single_model(
-                                                        m_toggle_v.clone(),
-                                                        cx,
-                                                    );
-                                                }),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Right,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.copy_to_clipboard(
-                                                        m_copy_key.clone(),
-                                                        m_copy_val.clone(),
-                                                        cx,
-                                                    );
-                                                }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(3.0))
-                                                    .when(is_v_copied, |el| el.opacity(0.0))
-                                                    .child(variant.effort.short_label())
-                                                    .when(has_warn, |el| {
-                                                        el.child(
-                                                            div()
-                                                                .size(px(4.5))
-                                                                .rounded_full()
-                                                                .bg(palette.amber_text),
-                                                        )
-                                                    }),
-                                            )
-                                            .when(is_v_copied, |el| {
-                                                el.child(
-                                                    div()
-                                                        .absolute()
-                                                        .inset_0()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .child(lucide_icon(
-                                                            IconName::Check,
-                                                            10.0,
-                                                            copied_check_color,
-                                                        )),
-                                                )
-                                            }),
-                                    );
-                                }
-
-                                let mut header_left = div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .size(px(13.0))
-                                            .rounded(px(3.5))
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .mr(px(2.0))
-                                            .border_1()
-                                            .border_color(if any_checked {
-                                                palette.primary
-                                            } else {
-                                                palette.input
-                                            })
-                                            .bg(if any_checked {
-                                                palette.primary
-                                            } else {
-                                                palette.background
-                                            })
-                                            .when(all_checked, |box_el| {
-                                                box_el.child(lucide_icon(
-                                                    IconName::Check,
-                                                    9.5,
-                                                    palette.primary_foreground,
-                                                ))
-                                            })
-                                            .when(partial_checked, |box_el| {
-                                                box_el.child(
-                                                    div()
-                                                        .w(px(6.5))
-                                                        .h(px(1.5))
-                                                        .rounded(px(1.0))
-                                                        .bg(palette.primary_foreground),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_size(px(11.5))
-                                            .font_weight(if any_checked {
-                                                FontWeight::MEDIUM
-                                            } else {
-                                                FontWeight::NORMAL
-                                            })
-                                            .text_color(if any_checked {
-                                                palette.foreground
-                                            } else {
-                                                palette.muted_foreground
-                                            })
-                                            .truncate()
-                                            .child(base_name),
-                                    );
-
-                                for tag in extra_tags {
-                                    header_left = header_left.child(render_compact_tag(&tag, palette));
-                                }
-
-                                if let Some(ref disambig) = disambiguation {
-                                    header_left = header_left.child(
-                                        div()
-                                            .min_w_0()
-                                            .text_size(px(10.0))
-                                            .text_color(palette.subtext)
-                                            .truncate()
-                                            .child(disambig.clone()),
-                                    );
-                                }
-
-                                if is_hovered || is_expanded {
-                                    header_left = header_left.child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "btn_expand_group_{}",
+                                                "btn_copy_pool_{}",
                                                 idx
                                             )))
                                             .size(px(18.0))
@@ -950,72 +734,400 @@ pub fn render_model_pool_section(
                                             .justify_center()
                                             .cursor_pointer()
                                             .hover(move |s| s.bg(palette.secondary))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.editor_toggle_pool_group_expanded(
-                                                        expand_key_btn.clone(),
-                                                        cx,
-                                                    );
-                                                }),
-                                            )
-                                            .child(lucide_icon(
-                                                if is_expanded {
-                                                    IconName::ChevronUp
-                                                } else {
-                                                    IconName::ChevronDown
-                                                },
-                                                11.0,
-                                                palette.muted_foreground,
-                                            )),
-                                    );
-                                }
-
-                                if is_hovered {
-                                    let del_tip = locale
-                                        .pick("移除该组模型", "Remove group")
-                                        .to_string();
-                                    header_left = header_left.child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "btn_del_group_{}",
-                                                idx
-                                            )))
-                                            .size(px(18.0))
-                                            .rounded(px(4.0))
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(move |s| s.bg(palette.destructive_soft_bg))
-                                            .tooltip(move |w, cx| {
-                                                Tooltip::new(del_tip.clone()).build(w, cx)
+                                            .when(needs_copy_tip, |btn| {
+                                                btn.tooltip(move |w, cx| {
+                                                    render_compact_tooltip(&tip_id, w, cx)
+                                                })
                                             })
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _, _, cx| {
                                                     cx.stop_propagation();
-                                                    this.editor_delete_pool_models(
-                                                        group_ids_del.clone(),
+                                                    this.copy_to_clipboard(
+                                                        m_copy_id.clone(),
+                                                        m_copy_val.clone(),
                                                         cx,
                                                     );
                                                 }),
                                             )
                                             .child(lucide_icon(
-                                                IconName::Trash,
+                                                if is_copied {
+                                                    IconName::Check
+                                                } else {
+                                                    IconName::Copy
+                                                },
                                                 11.0,
-                                                palette.muted_foreground,
+                                                if is_copied {
+                                                    palette.emerald_text
+                                                } else {
+                                                    palette.muted_foreground
+                                                },
                                             )),
-                                    );
-                                }
+                                    )
+                                })
+                                .when(is_stale && is_checked, |el| {
+                                    el.child(
+                                        div()
+                                            .px(px(4.5))
+                                            .py(px(0.5))
+                                            .rounded(px(3.0))
+                                            .bg(palette.amber_soft_bg)
+                                            .text_size(px(9.5))
+                                            .text_color(palette.amber_text)
+                                            .flex_shrink_0()
+                                            .child(locale.pick("上游未见", "Unlisted")),
+                                    )
+                                })
+                                .when(
+                                    is_checked && !is_stale && no_supporting_account,
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .px(px(4.5))
+                                                .py(px(0.5))
+                                                .rounded(px(3.0))
+                                                .bg(palette.amber_soft_bg)
+                                                .text_size(px(9.5))
+                                                .text_color(palette.amber_text)
+                                                .flex_shrink_0()
+                                                .child(locale.pick(
+                                                    "无可用账号",
+                                                    "No active account",
+                                                )),
+                                        )
+                                    },
+                                );
 
-                                let row_el = div()
+                            scroll_list = scroll_list.child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "pool_row_{}_{}",
+                                        idx, model_id
+                                    )))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(6.0))
+                                    .h(px(27.0))
+                                    .px(px(8.0))
+                                    .rounded(px(5.0))
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .bg(if is_hovered {
+                                        palette.accent
+                                    } else if is_checked {
+                                        palette.muted_subtle
+                                    } else {
+                                        rgba(0x00000000)
+                                    })
+                                    .on_hover(cx.listener(
+                                        move |this, hovered: &bool, _, cx| {
+                                            if let Some(ed) = this.editor.as_mut() {
+                                                if *hovered {
+                                                    ed.hovered_pool_model =
+                                                        Some(m_hover.clone());
+                                                } else if ed.hovered_pool_model.as_deref()
+                                                    == Some(m_hover.as_str())
+                                                {
+                                                    ed.hovered_pool_model = None;
+                                                }
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.editor_toggle_single_model(
+                                                m_toggle.clone(),
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                    .child(left_content)
+                                    .when(is_hovered, |el| {
+                                        el.child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "btn_del_pool_{}",
+                                                    idx
+                                                )))
+                                                .size(px(20.0))
+                                                .rounded(px(4.0))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .hover(move |s| {
+                                                    s.bg(palette.destructive_soft_bg)
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.editor_delete_pool_model(
+                                                            m_delete.clone(),
+                                                            cx,
+                                                        );
+                                                    }),
+                                                )
+                                                .child(lucide_icon(
+                                                    IconName::Trash,
+                                                    11.0,
+                                                    palette.muted_foreground,
+                                                )),
+                                        )
+                                    }),
+                            );
+                        } else {
+                            let group_ids = entry.raw_ids;
+                            let checked_count = group_ids
+                                .iter()
+                                .filter(|id| selected_set.contains(id.as_str()))
+                                .count();
+                            let all_checked = checked_count == group_ids.len();
+                            let any_checked = checked_count > 0;
+                            let partial_checked = any_checked && !all_checked;
+
+                            let expand_key = format!(
+                                "{}|{}",
+                                entry.logical_id,
+                                entry.extra_tags.join(",")
+                            );
+                            let hover_key = format!("group:{}", expand_key);
+                            let is_hovered =
+                                editor.hovered_pool_model.as_deref() == Some(hover_key.as_str());
+                            let is_expanded =
+                                editor.expanded_pool_groups.contains(&expand_key);
+
+                            let tiers_summary = entry
+                                .variants
+                                .iter()
+                                .map(|v| v.effort.short_label())
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+
+                            let mut has_stale_checked = false;
+                            let mut has_no_acc_checked = false;
+                            for v in &entry.variants {
+                                if selected_set.contains(v.model_id.as_str()) {
+                                    if is_model_stale(&v.model_id) {
+                                        has_stale_checked = true;
+                                    } else if is_model_no_account(&v.model_id) {
+                                        has_no_acc_checked = true;
+                                    }
+                                }
+                            }
+                            let warn_tip = if has_stale_checked {
+                                Some(locale.pick("部分档位上游未见", "Some tiers unlisted").to_string())
+                            } else if has_no_acc_checked {
+                                Some(locale.pick("部分档位无可用账号", "Some tiers have no active account").to_string())
+                            } else {
+                                None
+                            };
+
+                            let m_hover_enter = hover_key.clone();
+                            let m_hover_leave = hover_key;
+                            let group_ids_toggle = group_ids.clone();
+                            let group_ids_del = group_ids;
+                            let expand_key_btn = expand_key;
+                            let next_group_select = !all_checked;
+
+                            let mut left_content = div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .size(px(13.0))
+                                        .rounded(px(3.5))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .mr(px(2.0))
+                                        .border_1()
+                                        .border_color(if any_checked {
+                                            palette.primary
+                                        } else {
+                                            palette.input
+                                        })
+                                        .bg(if any_checked {
+                                            palette.primary
+                                        } else {
+                                            palette.background
+                                        })
+                                        .when(all_checked, |box_el| {
+                                            box_el.child(lucide_icon(
+                                                IconName::Check,
+                                                9.5,
+                                                palette.primary_foreground,
+                                            ))
+                                        })
+                                        .when(partial_checked, |box_el| {
+                                            box_el.child(
+                                                div()
+                                                    .w(px(6.5))
+                                                    .h(px(1.5))
+                                                    .rounded(px(1.0))
+                                                    .bg(palette.primary_foreground),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(11.5))
+                                        .font_weight(if any_checked {
+                                            FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(if any_checked {
+                                            palette.foreground
+                                        } else {
+                                            palette.muted_foreground
+                                        })
+                                        .truncate()
+                                        .child(entry.base_name),
+                                );
+
+                            for tag in entry.extra_tags {
+                                left_content =
+                                    left_content.child(render_compact_tag(&tag, palette));
+                            }
+
+                            if let Some(disambig) = disambiguation {
+                                left_content = left_content.child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(10.0))
+                                        .text_color(palette.subtext)
+                                        .truncate()
+                                        .child(disambig),
+                                );
+                            }
+
+                            left_content = left_content.child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "btn_expand_group_{}",
+                                        idx
+                                    )))
+                                    .size(px(16.0))
+                                    .rounded(px(3.5))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(palette.secondary))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.editor_toggle_pool_group_expanded(
+                                                expand_key_btn.clone(),
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                    .child(lucide_icon(
+                                        if is_expanded {
+                                            IconName::ChevronUp
+                                        } else {
+                                            IconName::ChevronDown
+                                        },
+                                        10.0,
+                                        if is_hovered || is_expanded {
+                                            palette.muted_foreground
+                                        } else {
+                                            palette.subtext
+                                        },
+                                    )),
+                            );
+
+                            let mut right_content = div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .flex_shrink_0()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(palette.subtext)
+                                        .child(tiers_summary),
+                                );
+
+                            if let Some(wtip) = warn_tip {
+                                right_content = right_content.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "group_warn_dot_{}",
+                                            idx
+                                        )))
+                                        .size(px(5.0))
+                                        .rounded_full()
+                                        .bg(palette.amber_text)
+                                        .tooltip(move |w, cx| {
+                                            render_compact_tooltip(&wtip, w, cx)
+                                        }),
+                                );
+                            }
+
+                            if is_hovered {
+                                let del_tip = locale
+                                    .pick("移除该组模型", "Remove group")
+                                    .to_string();
+                                right_content = right_content.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "btn_del_group_{}",
+                                            idx
+                                        )))
+                                        .size(px(20.0))
+                                        .rounded(px(4.0))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(palette.destructive_soft_bg))
+                                        .tooltip(move |w, cx| {
+                                            render_compact_tooltip(&del_tip, w, cx)
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.editor_delete_pool_models(
+                                                    group_ids_del.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        )
+                                        .child(lucide_icon(
+                                            IconName::Trash,
+                                            11.0,
+                                            palette.muted_foreground,
+                                        )),
+                                );
+                            }
+
+                            scroll_list = scroll_list.child(
+                                div()
                                     .id(SharedString::from(format!(
                                         "pool_group_row_{}_{}",
-                                        idx, group_key
+                                        idx, entry.logical_id
                                     )))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(6.0))
+                                    .h(px(27.0))
                                     .px(px(8.0))
                                     .rounded(px(5.0))
                                     .flex_shrink_0()
@@ -1049,549 +1161,129 @@ pub fn render_model_pool_section(
                                                 cx,
                                             );
                                         }),
-                                    );
+                                    )
+                                    .child(left_content)
+                                    .child(right_content),
+                            );
 
-                                let row_el = if wrap_pills {
-                                    row_el
-                                        .py(px(5.0))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(4.0))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .min_w_0()
-                                                .child(header_left),
-                                        )
-                                        .child(
-                                            div()
-                                                .pl(px(20.0))
-                                                .flex()
-                                                .items_center()
-                                                .child(pills_row),
-                                        )
-                                } else {
-                                    row_el
-                                        .min_h(px(28.0))
-                                        .py(px(3.0))
+                            if is_expanded {
+                                let mut sub_list = div()
+                                    .ml(px(14.0))
+                                    .pl(px(8.0))
+                                    .border_l_1()
+                                    .border_color(palette.border_subtle)
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.0));
+
+                                for (v_idx, variant) in entry.variants.iter().enumerate() {
+                                    let is_sub_checked =
+                                        selected_set.contains(variant.model_id.as_str());
+                                    let sub_stale = is_model_stale(&variant.model_id);
+                                    let sub_no_acc = is_model_no_account(&variant.model_id);
+                                    let sub_copy_key = format!("pool_copy_{}", variant.model_id);
+                                    let is_sub_copied =
+                                        app.copied_id.as_deref() == Some(sub_copy_key.as_str());
+                                    let m_sub_copy_val = variant.model_id.clone();
+
+                                    let sub_left = div()
                                         .flex()
                                         .items_center()
-                                        .justify_between()
-                                        .gap(px(6.0))
-                                        .child(header_left)
-                                        .child(pills_row)
-                                };
-
-                                scroll_list = scroll_list.child(row_el);
-
-                                if is_expanded {
-                                    let mut sub_list = div()
-                                        .ml(px(14.0))
-                                        .pl(px(8.0))
-                                        .border_l_1()
-                                        .border_color(palette.border_subtle)
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(1.0));
-
-                                    for (v_idx, variant) in variants.iter().enumerate() {
-                                        let is_sub_checked =
-                                            selected_set.contains(variant.model_id.as_str());
-                                        let sub_stale = is_model_stale(&variant.model_id);
-                                        let sub_no_acc = is_model_no_account(&variant.model_id);
-                                        let is_sub_hovered = editor.hovered_pool_model.as_deref()
-                                            == Some(variant.model_id.as_str());
-                                        let sub_copy_key =
-                                            format!("pool_copy_{}", variant.model_id);
-                                        let is_sub_copied =
-                                            app.copied_id.as_deref() == Some(sub_copy_key.as_str());
-
-                                        let m_sub_hover = variant.model_id.clone();
-                                        let m_sub_toggle = variant.model_id.clone();
-                                        let m_sub_copy_val = variant.model_id.clone();
-                                        let m_sub_copy_id = sub_copy_key;
-                                        let m_sub_delete = variant.model_id.clone();
-
-                                        let sub_left = div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(5.0))
-                                            .min_w_0()
-                                            .flex_1()
-                                            .child(
+                                        .gap(px(5.0))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(render_compact_tag(
+                                            variant.effort.short_label(),
+                                            palette,
+                                        ))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_size(px(10.5))
+                                                .text_color(palette.muted_foreground)
+                                                .truncate()
+                                                .child(variant.model_id.clone()),
+                                        )
+                                        .when(sub_stale && is_sub_checked, |el| {
+                                            el.child(
                                                 div()
-                                                    .size(px(12.0))
+                                                    .px(px(4.0))
+                                                    .py(px(0.5))
                                                     .rounded(px(3.0))
+                                                    .bg(palette.amber_soft_bg)
+                                                    .text_size(px(9.0))
+                                                    .text_color(palette.amber_text)
                                                     .flex_shrink_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .mr(px(1.0))
-                                                    .border_1()
-                                                    .border_color(if is_sub_checked {
-                                                        palette.primary
-                                                    } else {
-                                                        palette.input
-                                                    })
-                                                    .bg(if is_sub_checked {
-                                                        palette.primary
-                                                    } else {
-                                                        palette.background
-                                                    })
-                                                    .when(is_sub_checked, |box_el| {
-                                                        box_el.child(lucide_icon(
-                                                            IconName::Check,
-                                                            8.5,
-                                                            palette.primary_foreground,
-                                                        ))
-                                                    }),
+                                                    .child(locale.pick("上游未见", "Unlisted")),
                                             )
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .text_size(px(11.0))
-                                                    .font_weight(if is_sub_checked {
-                                                        FontWeight::MEDIUM
-                                                    } else {
-                                                        FontWeight::NORMAL
-                                                    })
-                                                    .text_color(if is_sub_checked {
-                                                        palette.foreground
-                                                    } else {
-                                                        palette.muted_foreground
-                                                    })
-                                                    .truncate()
-                                                    .child(variant.model_id.clone()),
-                                            )
-                                            .when(is_sub_hovered || is_sub_copied, |el| {
+                                        })
+                                        .when(
+                                            is_sub_checked && !sub_stale && sub_no_acc,
+                                            |el| {
                                                 el.child(
                                                     div()
-                                                        .id(SharedString::from(format!(
-                                                            "btn_copy_sub_{}_{}",
-                                                            idx, v_idx
-                                                        )))
-                                                        .size(px(17.0))
-                                                        .rounded(px(3.5))
-                                                        .flex_shrink_0()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .cursor_pointer()
-                                                        .hover(move |s| s.bg(palette.secondary))
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                this.copy_to_clipboard(
-                                                                    m_sub_copy_id.clone(),
-                                                                    m_sub_copy_val.clone(),
-                                                                    cx,
-                                                                );
-                                                            }),
-                                                        )
-                                                        .child(lucide_icon(
-                                                            if is_sub_copied {
-                                                                IconName::Check
-                                                            } else {
-                                                                IconName::Copy
-                                                            },
-                                                            10.5,
-                                                            if is_sub_copied {
-                                                                palette.emerald_text
-                                                            } else {
-                                                                palette.muted_foreground
-                                                            },
-                                                        )),
-                                                )
-                                            })
-                                            .when(sub_stale && is_sub_checked, |el| {
-                                                el.child(
-                                                    div()
-                                                        .px(px(4.5))
+                                                        .px(px(4.0))
                                                         .py(px(0.5))
                                                         .rounded(px(3.0))
                                                         .bg(palette.amber_soft_bg)
-                                                        .text_size(px(9.5))
+                                                        .text_size(px(9.0))
                                                         .text_color(palette.amber_text)
                                                         .flex_shrink_0()
-                                                        .child(locale.pick("上游未见", "Unlisted")),
+                                                        .child(locale.pick(
+                                                            "无可用账号",
+                                                            "No active account",
+                                                        )),
                                                 )
-                                            })
-                                            .when(
-                                                is_sub_checked && !sub_stale && sub_no_acc,
-                                                |el| {
-                                                    el.child(
-                                                        div()
-                                                            .px(px(4.5))
-                                                            .py(px(0.5))
-                                                            .rounded(px(3.0))
-                                                            .bg(palette.amber_soft_bg)
-                                                            .text_size(px(9.5))
-                                                            .text_color(palette.amber_text)
-                                                            .flex_shrink_0()
-                                                            .child(locale.pick(
-                                                                "无可用账号",
-                                                                "No active account",
-                                                            )),
-                                                    )
-                                                },
-                                            );
-
-                                        sub_list = sub_list.child(
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "pool_sub_row_{}_{}_{}",
-                                                    idx, v_idx, variant.model_id
-                                                )))
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap(px(6.0))
-                                                .h(px(24.0))
-                                                .px(px(6.0))
-                                                .rounded(px(4.5))
-                                                .flex_shrink_0()
-                                                .cursor_pointer()
-                                                .bg(if is_sub_hovered {
-                                                    palette.accent
-                                                } else if is_sub_checked {
-                                                    palette.muted_subtle
-                                                } else {
-                                                    rgba(0x00000000)
-                                                })
-                                                .on_hover(cx.listener(
-                                                    move |this, hovered: &bool, _, cx| {
-                                                        if let Some(ed) = this.editor.as_mut() {
-                                                            if *hovered {
-                                                                ed.hovered_pool_model =
-                                                                    Some(m_sub_hover.clone());
-                                                            } else if ed
-                                                                .hovered_pool_model
-                                                                .as_deref()
-                                                                == Some(m_sub_hover.as_str())
-                                                            {
-                                                                ed.hovered_pool_model = None;
-                                                            }
-                                                            cx.notify();
-                                                        }
-                                                    },
-                                                ))
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        this.editor_toggle_single_model(
-                                                            m_sub_toggle.clone(),
-                                                            cx,
-                                                        );
-                                                    }),
-                                                )
-                                                .child(sub_left)
-                                                .when(is_sub_hovered, |el| {
-                                                    el.child(
-                                                        div()
-                                                            .id(SharedString::from(format!(
-                                                                "btn_del_sub_{}_{}",
-                                                                idx, v_idx
-                                                            )))
-                                                            .size(px(18.0))
-                                                            .rounded(px(3.5))
-                                                            .flex_shrink_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .cursor_pointer()
-                                                            .hover(move |s| {
-                                                                s.bg(palette.destructive_soft_bg)
-                                                            })
-                                                            .on_mouse_down(
-                                                                MouseButton::Left,
-                                                                cx.listener(
-                                                                    move |this, _, _, cx| {
-                                                                        cx.stop_propagation();
-                                                                        this.editor_delete_pool_model(
-                                                                            m_sub_delete.clone(),
-                                                                            cx,
-                                                                        );
-                                                                    },
-                                                                ),
-                                                            )
-                                                            .child(lucide_icon(
-                                                                IconName::Trash,
-                                                                10.5,
-                                                                palette.muted_foreground,
-                                                            )),
-                                                    )
-                                                }),
+                                            },
                                         );
-                                    }
 
-                                    scroll_list = scroll_list.child(sub_list);
-                                }
-                            }
-                            PoolRow::Single {
-                                model_id,
-                                base_name,
-                                effort,
-                                extra_tags,
-                                disambiguation,
-                            } => {
-                                let is_checked = selected_set.contains(model_id.as_str());
-                                let is_stale = is_model_stale(&model_id);
-                                let no_supporting_account = is_model_no_account(&model_id);
-                                let is_hovered = editor.hovered_pool_model.as_deref()
-                                    == Some(model_id.as_str());
-                                let copy_key = format!("pool_copy_{}", model_id);
-                                let is_copied =
-                                    app.copied_id.as_deref() == Some(copy_key.as_str());
-
-                                let needs_tooltip = base_name != model_id
-                                    || effort.is_some()
-                                    || !extra_tags.is_empty();
-                                let tip_id = model_id.clone();
-
-                                let m_toggle = model_id.clone();
-                                let m_hover = model_id.clone();
-                                let m_copy_id = copy_key.clone();
-                                let m_copy_val = model_id.clone();
-                                let m_delete = model_id.clone();
-
-                                let mut left_content = div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
+                                    sub_list = sub_list.child(
                                         div()
-                                            .size(px(13.0))
-                                            .rounded(px(3.5))
-                                            .flex_shrink_0()
+                                            .id(SharedString::from(format!(
+                                                "pool_sub_row_{}_{}_{}",
+                                                idx, v_idx, variant.model_id
+                                            )))
                                             .flex()
                                             .items_center()
-                                            .justify_center()
-                                            .mr(px(2.0))
-                                            .border_1()
-                                            .border_color(if is_checked {
-                                                palette.primary
-                                            } else {
-                                                palette.input
-                                            })
-                                            .bg(if is_checked {
-                                                palette.primary
-                                            } else {
-                                                palette.background
-                                            })
-                                            .when(is_checked, |box_el| {
-                                                box_el.child(lucide_icon(
-                                                    IconName::Check,
-                                                    9.5,
-                                                    palette.primary_foreground,
-                                                ))
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_size(px(11.5))
-                                            .font_weight(if is_checked {
-                                                FontWeight::MEDIUM
-                                            } else {
-                                                FontWeight::NORMAL
-                                            })
-                                            .text_color(if is_checked {
-                                                palette.foreground
-                                            } else {
-                                                palette.muted_foreground
-                                            })
-                                            .truncate()
-                                            .child(base_name),
-                                    );
-
-                                for tag in extra_tags {
-                                    left_content =
-                                        left_content.child(render_compact_tag(&tag, palette));
-                                }
-
-                                if let Some(eff) = effort {
-                                    left_content = left_content
-                                        .child(render_compact_tag(eff.short_label(), palette));
-                                }
-
-                                if let Some(disambig) = disambiguation {
-                                    left_content = left_content.child(
-                                        div()
-                                            .min_w_0()
-                                            .text_size(px(10.0))
-                                            .text_color(palette.subtext)
-                                            .truncate()
-                                            .child(disambig),
-                                    );
-                                }
-
-                                left_content = left_content
-                                    .when(is_hovered || is_copied, |el| {
-                                        el.child(
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "btn_copy_pool_{}",
-                                                    idx
-                                                )))
-                                                .size(px(18.0))
-                                                .rounded(px(4.0))
-                                                .flex_shrink_0()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .hover(move |s| s.bg(palette.secondary))
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        cx.stop_propagation();
-                                                        this.copy_to_clipboard(
-                                                            m_copy_id.clone(),
-                                                            m_copy_val.clone(),
-                                                            cx,
-                                                        );
-                                                    }),
-                                                )
-                                                .child(lucide_icon(
-                                                    if is_copied {
+                                            .justify_between()
+                                            .gap(px(6.0))
+                                            .h(px(22.0))
+                                            .px(px(6.0))
+                                            .rounded(px(4.0))
+                                            .flex_shrink_0()
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(palette.accent))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.copy_to_clipboard(
+                                                        sub_copy_key.clone(),
+                                                        m_sub_copy_val.clone(),
+                                                        cx,
+                                                    );
+                                                }),
+                                            )
+                                            .child(sub_left)
+                                            .child(
+                                                div().flex_shrink_0().child(lucide_icon(
+                                                    if is_sub_copied {
                                                         IconName::Check
                                                     } else {
                                                         IconName::Copy
                                                     },
-                                                    11.0,
-                                                    if is_copied {
+                                                    10.5,
+                                                    if is_sub_copied {
                                                         palette.emerald_text
                                                     } else {
-                                                        palette.muted_foreground
+                                                        palette.subtext
                                                     },
                                                 )),
-                                        )
-                                    })
-                                    .when(is_stale && is_checked, |el| {
-                                        el.child(
-                                            div()
-                                                .px(px(4.5))
-                                                .py(px(0.5))
-                                                .rounded(px(3.0))
-                                                .bg(palette.amber_soft_bg)
-                                                .text_size(px(9.5))
-                                                .text_color(palette.amber_text)
-                                                .flex_shrink_0()
-                                                .child(locale.pick("上游未见", "Unlisted")),
-                                        )
-                                    })
-                                    .when(
-                                        is_checked && !is_stale && no_supporting_account,
-                                        |el| {
-                                            el.child(
-                                                div()
-                                                    .px(px(4.5))
-                                                    .py(px(0.5))
-                                                    .rounded(px(3.0))
-                                                    .bg(palette.amber_soft_bg)
-                                                    .text_size(px(9.5))
-                                                    .text_color(palette.amber_text)
-                                                    .flex_shrink_0()
-                                                    .child(locale.pick(
-                                                        "无可用账号",
-                                                        "No active account",
-                                                    )),
-                                            )
-                                        },
+                                            ),
                                     );
+                                }
 
-                                scroll_list = scroll_list.child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "pool_row_{}_{}",
-                                            idx, model_id
-                                        )))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap(px(6.0))
-                                        .h(px(26.0))
-                                        .px(px(8.0))
-                                        .rounded(px(5.0))
-                                        .flex_shrink_0()
-                                        .cursor_pointer()
-                                        .bg(if is_hovered {
-                                            palette.accent
-                                        } else if is_checked {
-                                            palette.muted_subtle
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .when(needs_tooltip, |el| {
-                                            el.tooltip(move |w, cx| {
-                                                Tooltip::new(tip_id.clone()).build(w, cx)
-                                            })
-                                        })
-                                        .on_hover(cx.listener(
-                                            move |this, hovered: &bool, _, cx| {
-                                                if let Some(ed) = this.editor.as_mut() {
-                                                    if *hovered {
-                                                        ed.hovered_pool_model =
-                                                            Some(m_hover.clone());
-                                                    } else if ed.hovered_pool_model.as_deref()
-                                                        == Some(m_hover.as_str())
-                                                    {
-                                                        ed.hovered_pool_model = None;
-                                                    }
-                                                    cx.notify();
-                                                }
-                                            },
-                                        ))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.editor_toggle_single_model(
-                                                    m_toggle.clone(),
-                                                    cx,
-                                                );
-                                            }),
-                                        )
-                                        .child(left_content)
-                                        // 行最右侧仅保留悬停删除按钮
-                                        .when(is_hovered, |el| {
-                                            el.child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "btn_del_pool_{}",
-                                                        idx
-                                                    )))
-                                                    .size(px(20.0))
-                                                    .rounded(px(4.0))
-                                                    .flex_shrink_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor_pointer()
-                                                    .hover(move |s| {
-                                                        s.bg(palette.destructive_soft_bg)
-                                                    })
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(move |this, _, _, cx| {
-                                                            cx.stop_propagation();
-                                                            this.editor_delete_pool_model(
-                                                                m_delete.clone(),
-                                                                cx,
-                                                            );
-                                                        }),
-                                                    )
-                                                    .child(lucide_icon(
-                                                        IconName::Trash,
-                                                        11.0,
-                                                        palette.muted_foreground,
-                                                    )),
-                                            )
-                                        }),
-                                );
+                                scroll_list = scroll_list.child(sub_list);
                             }
                         }
                     }
@@ -1632,219 +1324,83 @@ pub fn render_model_pool_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_resolve(id: &str) -> ModelDisplayInfo {
-        let base_map = |stem: &str| -> Option<&'static str> {
-            match stem {
-                "gemini-4-neon" => Some("Gemini 4 Neon"),
-                "gemini-4-hydrogen" => Some("Gemini 4 Hydrogen"),
-                "gemini-4-hydrogen-tiered" => Some("Gemini 4 Hydrogen Tiered"),
-                "gemini-4-argon" => Some("Gemini 4 Argon"),
-                "gemini-4-carbon" => Some("Gemini 4 Carbon"),
-                "gemini-3.8-flash" => Some("Gemini 3.8 Flash"),
-                "claude-sonnet-5-5" => Some("Claude Sonnet 5.5"),
-                "claude-opus-5-5" => Some("Claude Opus 5.5"),
-                "claude-opus-4-6-thinking" => Some("Claude Opus 4.6 Thinking"),
-                "claude-sonnet-4-6" => Some("Claude Sonnet 4.6"),
-                "gpt-oss-120b" => Some("GPT-OSS 120B"),
-                _ => None,
-            }
-        };
-
-        let (stem, effort) = match ModelEffort::from_suffix(id) {
-            Some((s, e)) => (s, Some(e)),
-            None => (id, None),
-        };
-        let base_name = base_map(stem).unwrap_or(stem).to_string();
-        let display_name = match effort {
-            Some(e) => format!("{} ({})", base_name, e.full_label()),
-            None => base_name.clone(),
-        };
-        ModelDisplayInfo {
-            raw_id: id.to_string(),
-            group_key: stem.to_lowercase(),
-            base_name,
-            effort,
-            extra_tags: Vec::new(),
-            display_name,
-        }
-    }
+    use pivot_core::model_catalog::ModelEffort;
 
     #[::core::prelude::v1::test]
-    fn antigravity_pool_groups_and_sorts_efforts_while_keeping_single_effort_single() {
+    fn logical_pool_counts_collapses_variants_and_searches_efforts() {
         let pool: Vec<String> = vec![
-            "claude-opus-4-6-thinking",
-            "gemini-3.8-flash-high",
-            "gemini-4-hydrogen-low",
-            "gemini-4-hydrogen-high",
-            "claude-sonnet-4-6",
-            "gpt-oss-120b-medium",
-            "gemini-3.8-flash-low",
-            "gemini-3.8-flash-medium",
-            "claude-sonnet-5-5-low",
-            "claude-sonnet-5-5-medium",
-            "claude-sonnet-5-5-high",
-            "gemini-4-hydrogen-medium",
-            "gemini-4-hydrogen-xhigh",
-            "gemini-4-neon-medium",
-            "gemini-4-neon-xhigh",
             "gemini-4-neon-low",
-            "gemini-4-hydrogen-tiered-xhigh",
+            "gemini-4-neon-medium",
             "gemini-4-neon-high",
-            "gemini-4-hydrogen-tiered-high",
+            "gemini-4-neon-xhigh",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+            "custom-foo-low",
+            "custom-foo-high",
+            "custom-foo-max",
+            "qwen-max",
         ]
         .into_iter()
         .map(String::from)
         .collect();
 
-        let rows = build_pool_rows(&pool, test_resolve);
+        let logical = collapse_provider_models(&pool);
+        // 4 neon -> 1, opus-4-6-thinking -> 1, gpt-oss -> 1, 3 custom-foo -> 1, qwen-max -> 1 => 5 logical models
+        assert_eq!(logical.len(), 5);
 
-        // 7 rows: claude-opus-4-6-thinking (Single), gemini-3.8-flash (Group 3),
-        // gemini-4-hydrogen (Group 4), claude-sonnet-4-6 (Single), gpt-oss-120b-medium (Single),
-        // claude-sonnet-5-5 (Group 3), gemini-4-neon (Group 4), gemini-4-hydrogen-tiered (Group 2) -> 8 rows
-        assert_eq!(rows.len(), 8);
+        let selected: HashSet<&str> = ["gemini-4-neon-xhigh"].into_iter().collect();
+        let filtered_xhigh = filter_pool_entries(&logical, &selected, ModelFilterTab::All, "xhigh");
+        assert_eq!(filtered_xhigh.len(), 1);
+        assert_eq!(filtered_xhigh[0].logical.logical_id, "gemini-4-neon");
 
-        // 首次出现顺序聚合：gemini-3.8-flash 在 index 1
-        match &rows[1] {
-            PoolRow::VariantGroup {
-                group_key,
-                base_name,
-                variants,
-                ..
-            } => {
-                assert_eq!(group_key, "gemini-3.8-flash");
-                assert_eq!(base_name, "Gemini 3.8 Flash");
-                let efforts: Vec<ModelEffort> = variants.iter().map(|v| v.effort).collect();
-                assert_eq!(
-                    efforts,
-                    vec![ModelEffort::Low, ModelEffort::Medium, ModelEffort::High]
-                );
-            }
-            other => panic!("expected VariantGroup, got {other:?}"),
-        }
+        let filtered_max = filter_pool_entries(&logical, &selected, ModelFilterTab::All, "max");
+        assert_eq!(filtered_max.len(), 2);
+        assert_eq!(filtered_max[0].logical.logical_id, "custom-foo");
+        assert_eq!(filtered_max[1].logical.logical_id, "qwen-max");
 
-        // 单成员 gpt-oss-120b-medium 不合组
-        assert_eq!(
-            rows[4],
-            PoolRow::Single {
-                model_id: "gpt-oss-120b-medium".to_string(),
+        let filtered_on = filter_pool_entries(&logical, &selected, ModelFilterTab::Selected, "");
+        assert_eq!(filtered_on.len(), 1);
+        assert_eq!(filtered_on[0].logical.logical_id, "gemini-4-neon");
+    }
+
+    #[::core::prelude::v1::test]
+    fn build_pool_entries_disambiguates_identical_display_names() {
+        let entries = vec![
+            LogicalModelEntry {
+                logical_id: "claude-3-5-sonnet-20240620".to_string(),
+                base_name: "Claude 3.5 Sonnet".to_string(),
+                extra_tags: Vec::new(),
+                single_effort: None,
+                variants: Vec::new(),
+                raw_ids: vec!["claude-3-5-sonnet-20240620".to_string()],
+            },
+            LogicalModelEntry {
+                logical_id: "claude-3-5-sonnet-20241022".to_string(),
+                base_name: "Claude 3.5 Sonnet".to_string(),
+                extra_tags: Vec::new(),
+                single_effort: None,
+                variants: Vec::new(),
+                raw_ids: vec!["claude-3-5-sonnet-20241022".to_string()],
+            },
+            LogicalModelEntry {
+                logical_id: "gpt-oss-120b-medium".to_string(),
                 base_name: "GPT-OSS 120B".to_string(),
-                effort: Some(ModelEffort::Medium),
                 extra_tags: Vec::new(),
-                disambiguation: None,
-            }
-        );
-
-        // gemini-4-neon 按 Low -> Medium -> High -> XHigh 排序
-        match &rows[6] {
-            PoolRow::VariantGroup { variants, .. } => {
-                let ids: Vec<&str> = variants.iter().map(|v| v.model_id.as_str()).collect();
-                assert_eq!(
-                    ids,
-                    vec![
-                        "gemini-4-neon-low",
-                        "gemini-4-neon-medium",
-                        "gemini-4-neon-high",
-                        "gemini-4-neon-xhigh",
-                    ]
-                );
-            }
-            other => panic!("expected VariantGroup for neon, got {other:?}"),
-        }
-
-        // gemini-4-hydrogen-tiered 独立成组，不与 gemini-4-hydrogen 混淆
-        match &rows[7] {
-            PoolRow::VariantGroup {
-                base_name,
-                variants,
-                ..
-            } => {
-                assert_eq!(base_name, "Gemini 4 Hydrogen Tiered");
-                let ids: Vec<&str> = variants.iter().map(|v| v.model_id.as_str()).collect();
-                assert_eq!(
-                    ids,
-                    vec![
-                        "gemini-4-hydrogen-tiered-high",
-                        "gemini-4-hydrogen-tiered-xhigh",
-                    ]
-                );
-            }
-            other => panic!("expected VariantGroup for tiered, got {other:?}"),
-        }
-    }
-
-    #[::core::prelude::v1::test]
-    fn filtered_single_variant_renders_as_single_with_effort_badge() {
-        let filtered = vec!["gemini-4-neon-xhigh".to_string()];
-        let rows = build_pool_rows(&filtered, test_resolve);
-        assert_eq!(
-            rows,
-            vec![PoolRow::Single {
-                model_id: "gemini-4-neon-xhigh".to_string(),
-                base_name: "Gemini 4 Neon".to_string(),
-                effort: Some(ModelEffort::XHigh),
-                extra_tags: Vec::new(),
-                disambiguation: None,
-            }]
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn collision_disambiguates_identical_display_rows() {
-        let models = vec![
-            "claude-3-5-sonnet-20240620".to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
+                single_effort: Some(ModelEffort::Medium),
+                variants: Vec::new(),
+                raw_ids: vec!["gpt-oss-120b-medium".to_string()],
+            },
         ];
-        let rows = build_pool_rows(&models, |id| ModelDisplayInfo {
-            raw_id: id.to_string(),
-            group_key: id.to_string(),
-            base_name: "Claude 3.5 Sonnet".to_string(),
-            effort: None,
-            extra_tags: Vec::new(),
-            display_name: "Claude 3.5 Sonnet".to_string(),
-        });
-        assert_eq!(rows.len(), 2);
-        match (&rows[0], &rows[1]) {
-            (
-                PoolRow::Single {
-                    disambiguation: d1, ..
-                },
-                PoolRow::Single {
-                    disambiguation: d2, ..
-                },
-            ) => {
-                assert_eq!(d1.as_deref(), Some("claude-3-5-sonnet-20240620"));
-                assert_eq!(d2.as_deref(), Some("claude-3-5-sonnet-20241022"));
-            }
-            _ => panic!("expected two Single rows with disambiguation"),
-        }
-    }
 
-    #[::core::prelude::v1::test]
-    fn mixed_base_and_effort_group_splits_cleanly_without_conflict() {
-        let models = vec![
-            "claude-opus-5-5".to_string(),
-            "claude-opus-5-5-high".to_string(),
-            "claude-opus-5-5-low".to_string(),
-        ];
-        let rows = build_pool_rows(&models, test_resolve);
-        assert_eq!(rows.len(), 2);
+        let built = build_pool_entries(entries);
         assert_eq!(
-            rows[0],
-            PoolRow::Single {
-                model_id: "claude-opus-5-5".to_string(),
-                base_name: "Claude Opus 5.5".to_string(),
-                effort: None,
-                extra_tags: Vec::new(),
-                disambiguation: None,
-            }
+            built[0].disambiguation.as_deref(),
+            Some("claude-3-5-sonnet-20240620")
         );
-        match &rows[1] {
-            PoolRow::VariantGroup { variants, .. } => {
-                let ids: Vec<&str> = variants.iter().map(|v| v.model_id.as_str()).collect();
-                assert_eq!(ids, vec!["claude-opus-5-5-low", "claude-opus-5-5-high"]);
-            }
-            other => panic!("expected VariantGroup, got {other:?}"),
-        }
+        assert_eq!(
+            built[1].disambiguation.as_deref(),
+            Some("claude-3-5-sonnet-20241022")
+        );
+        assert_eq!(built[2].disambiguation, None);
     }
 }

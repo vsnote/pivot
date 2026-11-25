@@ -5,8 +5,9 @@ use crate::gateway::adapters::{
     parse_gemini_chunk_to_anthropic_events, parse_openai_chunk_to_anthropic_events, responses,
     AnthropicToOpenAiSseState, SseLineBuffer, SseState,
 };
-use crate::gateway::router::{RouteCandidate, RoutingEngine};
+use crate::gateway::router::{EffortRouteHint, RouteCandidate, RoutingEngine};
 use crate::gateway::types::*;
+use crate::model_catalog::ModelEffort;
 use async_stream::stream;
 use axum::{
     body::Body,
@@ -747,40 +748,44 @@ async fn get_stats(State(state): State<GatewayState>) -> Json<Value> {
 async fn list_models(State(state): State<GatewayState>) -> Json<Value> {
     let providers = state.db.get_providers().unwrap_or_default();
     let mut model_list = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    let mut push_model = |id: String, owned_by: &str, root: &str| {
+        if seen_ids.insert(id.clone()) {
+            model_list.push(json!({
+                "id": id,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": owned_by,
+                "permission": [],
+                "root": root,
+                "parent": null
+            }));
+        }
+    };
 
     for p in providers.iter().filter(|p| p.enabled) {
+        let provider_prefix = crate::gateway::router::provider_route_prefix(&p.name);
+        for entry in crate::model_catalog::collapse_provider_models(&p.models) {
+            if !entry.variants.is_empty() {
+                push_model(entry.logical_id.clone(), &p.id, &entry.logical_id);
+                push_model(
+                    format!("{}/{}", p.id, entry.logical_id),
+                    &p.id,
+                    &entry.logical_id,
+                );
+                let named = format!("{}/{}", provider_prefix, entry.logical_id);
+                if named != entry.logical_id {
+                    push_model(named, &p.id, &entry.logical_id);
+                }
+            }
+        }
         for m in &p.models {
-            model_list.push(json!({
-                "id": m,
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": p.id,
-                "permission": [],
-                "root": m,
-                "parent": null
-            }));
-            // Also expose prefix alias, e.g. "openai/gpt-4o"
-            model_list.push(json!({
-                "id": format!("{}/{}", p.id, m),
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": p.id,
-                "permission": [],
-                "root": m,
-                "parent": null
-            }));
-            let provider_prefix = crate::gateway::router::provider_route_prefix(&p.name);
+            push_model(m.clone(), &p.id, m);
+            push_model(format!("{}/{}", p.id, m), &p.id, m);
             let named_id = format!("{}/{}", provider_prefix, m);
             if named_id != *m {
-                model_list.push(json!({
-                    "id": named_id,
-                    "object": "model",
-                    "created": 1700000000,
-                    "owned_by": p.id,
-                    "permission": [],
-                    "root": m,
-                    "parent": null
-                }));
+                push_model(named_id, &p.id, m);
             }
         }
     }
@@ -993,6 +998,138 @@ fn resolve_forward_user_agent(client_ua: Option<&str>, client_type: &str) -> Str
     }
 }
 
+fn effort_from_budget(budget: u64) -> ModelEffort {
+    if budget <= 1500 {
+        ModelEffort::Minimal
+    } else if budget <= 4096 {
+        ModelEffort::Low
+    } else if budget <= 12000 {
+        ModelEffort::Medium
+    } else if budget <= 24000 {
+        ModelEffort::High
+    } else {
+        ModelEffort::XHigh
+    }
+}
+
+fn extract_anthropic_effort_hint(req: &AnthropicMessageRequest) -> EffortRouteHint {
+    if req
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type.trim().eq_ignore_ascii_case("disabled"))
+    {
+        return EffortRouteHint {
+            effort: None,
+            thinking_disabled: true,
+        };
+    }
+    if let Some(eff_raw) = req.output_effort() {
+        if eff_raw.eq_ignore_ascii_case("none") {
+            return EffortRouteHint {
+                effort: None,
+                thinking_disabled: true,
+            };
+        }
+        return EffortRouteHint {
+            effort: ModelEffort::parse_request_effort(eff_raw),
+            thinking_disabled: false,
+        };
+    }
+    if let Some(ref th) = req.thinking {
+        let kind = th.thinking_type.trim().to_ascii_lowercase();
+        if kind == "enabled" {
+            let eff = th
+                .budget_tokens
+                .map(|b| effort_from_budget(b as u64))
+                .unwrap_or(ModelEffort::Medium);
+            return EffortRouteHint {
+                effort: Some(eff),
+                thinking_disabled: false,
+            };
+        }
+        if kind == "adaptive" {
+            return EffortRouteHint {
+                effort: Some(ModelEffort::High),
+                thinking_disabled: false,
+            };
+        }
+    }
+    EffortRouteHint::default()
+}
+
+fn extract_openai_effort_hint(req: &OpenAIChatRequest) -> EffortRouteHint {
+    let Some(eff_raw) = req
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return EffortRouteHint::default();
+    };
+    if eff_raw.eq_ignore_ascii_case("none") {
+        EffortRouteHint {
+            effort: None,
+            thinking_disabled: true,
+        }
+    } else {
+        EffortRouteHint {
+            effort: ModelEffort::parse_request_effort(eff_raw),
+            thinking_disabled: false,
+        }
+    }
+}
+
+fn extract_gemini_effort_hint(body: &Value) -> EffortRouteHint {
+    let tc = body
+        .get("generationConfig")
+        .or_else(|| body.get("generation_config"))
+        .and_then(|g| g.get("thinkingConfig").or_else(|| g.get("thinking_config")));
+    let Some(tc) = tc else {
+        return EffortRouteHint::default();
+    };
+
+    if let Some(lvl) = tc
+        .get("thinkingLevel")
+        .or_else(|| tc.get("thinking_level"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if lvl.eq_ignore_ascii_case("none")
+            || lvl.eq_ignore_ascii_case("off")
+            || lvl.eq_ignore_ascii_case("disabled")
+        {
+            return EffortRouteHint {
+                effort: None,
+                thinking_disabled: true,
+            };
+        }
+        return EffortRouteHint {
+            effort: ModelEffort::parse_request_effort(lvl),
+            thinking_disabled: false,
+        };
+    }
+
+    if let Some(budget) = tc
+        .get("thinkingBudget")
+        .or_else(|| tc.get("thinking_budget"))
+        .and_then(Value::as_u64)
+    {
+        if budget == 0 {
+            return EffortRouteHint {
+                effort: None,
+                thinking_disabled: true,
+            };
+        }
+        return EffortRouteHint {
+            effort: Some(effort_from_budget(budget)),
+            thinking_disabled: false,
+        };
+    }
+
+    EffortRouteHint::default()
+}
+
 /// Handler for Claude Code and Anthropic clients calling `/v1/messages`
 async fn handle_messages(
     State(state): State<GatewayState>,
@@ -1011,10 +1148,11 @@ async fn handle_messages(
     let providers = state.db.get_providers().unwrap_or_default();
 
     let is_stream = req.stream.unwrap_or(false);
+    let effort_hint = extract_anthropic_effort_hint(&req);
     let route_match =
         match state
             .router
-            .resolve_route(&req.model, session_id.as_deref(), &providers)
+            .resolve_route_with_effort(&req.model, session_id.as_deref(), &providers, effort_hint)
         {
             Ok(rm) => rm,
             Err(err) => {
@@ -1195,10 +1333,13 @@ async fn handle_messages_count_tokens(
     let client_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
     let providers = state.db.get_providers().unwrap_or_default();
 
-    let route_match = match state
-        .router
-        .resolve_route(&req.model, session_id.as_deref(), &providers)
-    {
+    let effort_hint = extract_anthropic_effort_hint(&req);
+    let route_match = match state.router.resolve_route_with_effort(
+        &req.model,
+        session_id.as_deref(),
+        &providers,
+        effort_hint,
+    ) {
         Ok(rm) => rm,
         Err(err) => {
             return (
@@ -2333,10 +2474,11 @@ async fn handle_chat_completions(
     let providers = state.db.get_providers().unwrap_or_default();
 
     let is_stream = req.stream.unwrap_or(false);
+    let effort_hint = extract_openai_effort_hint(&req);
     let route_match =
         match state
             .router
-            .resolve_route(&req.model, session_id.as_deref(), &providers)
+            .resolve_route_with_effort(&req.model, session_id.as_deref(), &providers, effort_hint)
         {
             Ok(rm) => rm,
             Err(err) => {
@@ -2565,10 +2707,13 @@ async fn handle_responses(
             .into_response();
     }
 
-    let route_match = match state
-        .router
-        .resolve_route(&req.model, session_id.as_deref(), &providers)
-    {
+    let effort_hint = extract_openai_effort_hint(&req);
+    let route_match = match state.router.resolve_route_with_effort(
+        &req.model,
+        session_id.as_deref(),
+        &providers,
+        effort_hint,
+    ) {
         Ok(rm) => rm,
         Err(err) => {
             state.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
@@ -4916,10 +5061,12 @@ async fn handle_gemini_generate_content(
     let session_id = extract_session_id(&headers);
     let providers = state.db.get_providers().unwrap_or_default();
 
-    let route_match = match state.router.resolve_route(
+    let effort_hint = extract_gemini_effort_hint(&req_body);
+    let route_match = match state.router.resolve_route_with_effort(
         model,
         session_id.as_deref(),
         &providers,
+        effort_hint,
     ) {
         Ok(rm) => rm,
         Err(err) => {
@@ -6535,6 +6682,88 @@ mod tests {
         assert_eq!(beta.as_deref(), Some("effort-2025-11-24"));
         assert_eq!(captured["thinking"]["type"], "adaptive");
         assert_eq!(captured["output_config"]["effort"], "max");
+
+        gw_handle.abort();
+        up_handle.abort();
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn anthropic_logical_model_routes_by_effort_to_exact_variant() {
+        let seen_path = Arc::new(tokio::sync::Mutex::new(None::<String>));
+        let seen_clone = seen_path.clone();
+
+        let upstream_app = axum::Router::new().route(
+            "/v1beta/models/{action}",
+            axum::routing::post(move |Path(action): Path<String>| {
+                let seen_clone = seen_clone.clone();
+                async move {
+                    *seen_clone.lock().await = Some(action);
+                    axum::Json(json!({
+                        "candidates": [{
+                            "content": { "role": "model", "parts": [{ "text": "done" }] },
+                            "finishReason": "STOP"
+                        }],
+                        "usageMetadata": { "promptTokenCount": 5, "candidatesTokenCount": 2 }
+                    }))
+                }
+            }),
+        );
+        let up_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = up_listener.local_addr().unwrap();
+        let up_handle = tokio::spawn(async move {
+            axum::serve(up_listener, upstream_app).await.unwrap();
+        });
+
+        let (db, tmp_dir) = test_temp_db("logical_effort_route");
+        db.save_provider(&crate::db::Provider {
+            id: "prov_gem".to_string(),
+            name: "Antigravity".to_string(),
+            protocol: "gemini".to_string(),
+            base_url: format!("http://{}/v1beta", up_addr),
+            preset_id: None,
+            auth_type: None,
+            api_keys: vec!["gem-key".to_string()],
+            models: vec![
+                "gemini-4-neon-low".to_string(),
+                "gemini-4-neon-medium".to_string(),
+                "gemini-4-neon-high".to_string(),
+                "gemini-4-neon-xhigh".to_string(),
+            ],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 20,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .unwrap();
+
+        let (gw_base, gw_handle) = spawn_test_gateway(db.clone()).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let resp = client
+            .post(format!("{}/v1/messages", gw_base))
+            .json(&json!({
+                "model": "gemini-4-neon",
+                "max_tokens": 1024,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "thinking": { "type": "adaptive" },
+                "output_config": { "effort": "max" }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let action = seen_path.lock().await.clone().expect("upstream called");
+        assert_eq!(action, "gemini-4-neon-xhigh:generateContent");
+
+        let logs = db.get_logs(10, 0).unwrap();
+        assert_eq!(logs[0].incoming_model, "gemini-4-neon");
+        assert_eq!(logs[0].routed_model, "gemini-4-neon-xhigh");
 
         gw_handle.abort();
         up_handle.abort();

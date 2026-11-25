@@ -7,6 +7,12 @@ use std::sync::OnceLock;
 
 static RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EffortRouteHint {
+    pub effort: Option<crate::model_catalog::ModelEffort>,
+    pub thinking_disabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RouteCandidate {
     pub provider: Provider,
@@ -85,7 +91,23 @@ impl RoutingEngine {
         session_id: Option<&str>,
         providers: &[Provider],
     ) -> Result<RouteMatch, String> {
-        let plan = plan_route(incoming_model, providers)?;
+        self.resolve_route_with_effort(
+            incoming_model,
+            session_id,
+            providers,
+            EffortRouteHint::default(),
+        )
+    }
+
+    /// Resolve routing decision with effort-aware variant selection within the same logical model
+    pub fn resolve_route_with_effort(
+        &self,
+        incoming_model: &str,
+        session_id: Option<&str>,
+        providers: &[Provider],
+        effort_hint: EffortRouteHint,
+    ) -> Result<RouteMatch, String> {
+        let plan = plan_route_with_effort(incoming_model, providers, effort_hint)?;
         let provider_map: HashMap<&str, &Provider> =
             providers.iter().map(|p| (p.id.as_str(), p)).collect();
 
@@ -126,7 +148,20 @@ pub fn plan_route(
     incoming_model: &str,
     providers: &[Provider],
 ) -> Result<RoutePlan, String> {
-    plan_route_inner(incoming_model, providers, &mut None)
+    plan_route_inner(
+        incoming_model,
+        providers,
+        EffortRouteHint::default(),
+        &mut None,
+    )
+}
+
+pub fn plan_route_with_effort(
+    incoming_model: &str,
+    providers: &[Provider],
+    effort_hint: EffortRouteHint,
+) -> Result<RoutePlan, String> {
+    plan_route_inner(incoming_model, providers, effort_hint, &mut None)
 }
 
 /// One evaluated step in the resolution pipeline.
@@ -157,7 +192,12 @@ pub fn explain_route(
     let mut steps = Vec::new();
     let result = {
         let mut trace = Some(&mut steps);
-        plan_route_inner(incoming_model, providers, &mut trace)
+        plan_route_inner(
+            incoming_model,
+            providers,
+            EffortRouteHint::default(),
+            &mut trace,
+        )
     };
     let (plan, error) = match result {
         Ok(plan) => (Some(plan), None),
@@ -214,6 +254,7 @@ pub fn provider_route_prefix(name: &str) -> String {
 fn plan_route_inner(
     incoming_model: &str,
     providers: &[Provider],
+    effort_hint: EffortRouteHint,
     trace: &mut Option<&mut Vec<RouteStep>>,
 ) -> Result<RoutePlan, String> {
     let mut active_providers: Vec<&Provider> = providers.iter().filter(|p| p.enabled).collect();
@@ -245,7 +286,9 @@ fn plan_route_inner(
 
         if !matched_providers.is_empty() {
             for provider in &matched_providers {
-                if let Some(resolved_sub) = find_declared_or_normalized_model(provider, sub_model) {
+                if let Some(resolved_sub) =
+                    find_declared_or_normalized_model(provider, sub_model, effort_hint)
+                {
                     note(trace, "prefix", true, || {
                         format!("前缀 {} 命中服务商 {} (目标 {})", prefix, provider.name, resolved_sub)
                     });
@@ -257,9 +300,9 @@ fn plan_route_inner(
             }
 
             // 匹配了服务商前缀，但其未声明 sub_model：若其他服务商声明了完整的 incoming_model（如 openrouter 声明 "anthropic/claude-3-opus"），放行到 exact 层
-            let any_declared_full = active_providers
-                .iter()
-                .any(|p| find_declared_or_normalized_model(p, incoming_model).is_some());
+            let any_declared_full = active_providers.iter().any(|p| {
+                find_declared_or_normalized_model(p, incoming_model, effort_hint).is_some()
+            });
             if !any_declared_full {
                 let first_name = &matched_providers[0].name;
                 note(trace, "prefix", false, || {
@@ -299,9 +342,11 @@ fn plan_route_inner(
         "没有已启用的服务商精确声明该模型".to_string()
     });
 
-    // 2.5. Smart normalized match (e.g. date versions, bracketed [1M], latest suffixes)
+    // 2.5. Smart normalized match (e.g. date versions, bracketed [1M], latest suffixes, and same-model effort families)
     for provider in &active_providers {
-        if let Some(matched) = find_declared_or_normalized_model(provider, incoming_model) {
+        if let Some(matched) =
+            find_declared_or_normalized_model(provider, incoming_model, effort_hint)
+        {
             note(trace, "normalized", true, || {
                 format!("{} 通过归一化匹配到 {}", provider.name, matched)
             });
@@ -381,19 +426,45 @@ pub fn normalize_model_candidates(model: &str) -> Vec<String> {
     candidates
 }
 
-fn find_declared_or_normalized_model(provider: &Provider, incoming: &str) -> Option<String> {
+fn find_declared_or_normalized_model(
+    provider: &Provider,
+    incoming: &str,
+    effort_hint: EffortRouteHint,
+) -> Option<String> {
     if lists_model(provider, incoming) {
         return Some(incoming.to_string());
     }
-    for candidate in normalize_model_candidates(incoming) {
-        if lists_model(provider, &candidate) {
-            return Some(candidate);
+    let norm_candidates = normalize_model_candidates(incoming);
+    for candidate in &norm_candidates {
+        if lists_model(provider, candidate) {
+            return Some(candidate.clone());
         }
     }
     for declared in &provider.models {
         for candidate in normalize_model_candidates(declared) {
             if candidate.eq_ignore_ascii_case(incoming) {
                 return Some(declared.clone());
+            }
+        }
+    }
+    if provider.models.len() >= 2 {
+        let collapsed = crate::model_catalog::collapse_provider_models(&provider.models);
+        for entry in collapsed {
+            if entry.variants.len() < 2 {
+                continue;
+            }
+            let matches_logical = entry.logical_id.eq_ignore_ascii_case(incoming)
+                || norm_candidates
+                    .iter()
+                    .any(|c| entry.logical_id.eq_ignore_ascii_case(c));
+            if matches_logical {
+                if let Some(selected) = crate::model_catalog::select_variant_for_effort(
+                    &entry.variants,
+                    effort_hint.effort,
+                    effort_hint.thinking_disabled,
+                ) {
+                    return Some(selected.model_id.clone());
+                }
             }
         }
     }
@@ -705,4 +776,86 @@ mod tests {
         assert_eq!(plan.primary.model, "kimi-k2.5");
     }
 
+    #[test]
+    fn logical_model_routes_and_clamps_within_same_model_effort_variants() {
+        use crate::model_catalog::ModelEffort;
+
+        let antigravity = provider(
+            "antigravity",
+            &[
+                "gemini-4-neon-low",
+                "gemini-4-neon-medium",
+                "gemini-4-neon-high",
+                "gemini-4-neon-xhigh",
+                "claude-sonnet-5-5-low",
+                "claude-sonnet-5-5-medium",
+                "claude-sonnet-5-5-high",
+            ],
+            20,
+        );
+
+        let plan_max = plan_route_with_effort(
+            "gemini-4-neon",
+            std::slice::from_ref(&antigravity),
+            EffortRouteHint {
+                effort: Some(ModelEffort::Max),
+                thinking_disabled: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan_max.primary.model, "gemini-4-neon-xhigh");
+
+        let plan_clamp = plan_route_with_effort(
+            "antigravity/claude-sonnet-5-5",
+            std::slice::from_ref(&antigravity),
+            EffortRouteHint {
+                effort: Some(ModelEffort::Max),
+                thinking_disabled: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan_clamp.primary.model, "claude-sonnet-5-5-high");
+
+        let plan_disabled = plan_route_with_effort(
+            "claude-sonnet-5-5",
+            std::slice::from_ref(&antigravity),
+            EffortRouteHint {
+                effort: Some(ModelEffort::High),
+                thinking_disabled: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan_disabled.primary.model, "claude-sonnet-5-5-low");
+
+        let plan_default = plan_route_with_effort(
+            "gemini-4-neon",
+            std::slice::from_ref(&antigravity),
+            EffortRouteHint::default(),
+        )
+        .unwrap();
+        assert_eq!(plan_default.primary.model, "gemini-4-neon-medium");
+
+        // 显式精确 ID 绝不被 effort 改写
+        let plan_exact = plan_route_with_effort(
+            "gemini-4-neon-high",
+            std::slice::from_ref(&antigravity),
+            EffortRouteHint {
+                effort: Some(ModelEffort::Low),
+                thinking_disabled: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan_exact.primary.model, "gemini-4-neon-high");
+
+        // 未声明的跨模型名称依然严格报错
+        assert!(plan_route_with_effort(
+            "unknown-model",
+            &[antigravity],
+            EffortRouteHint {
+                effort: Some(ModelEffort::High),
+                thinking_disabled: false,
+            },
+        )
+        .is_err());
+    }
 }

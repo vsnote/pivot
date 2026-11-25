@@ -2731,7 +2731,7 @@ pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Opti
         return None;
     }
 
-    let model_counts = count_model_providers(providers);
+    let model_counts = count_logical_model_providers(providers);
     let format_selected = |p: &Provider, m: &str| -> String {
         if model_counts.get(m).copied().unwrap_or(0) > 1 && !m.contains('/') {
             format!("{}/{}", crate::gateway::router::provider_route_prefix(&p.name), m)
@@ -2744,57 +2744,68 @@ pub fn resolve_default_tool_model(tool_id: &str, providers: &[Provider]) -> Opti
         "claude_code" => {
             // 优先匹配 Anthropic 协议/名称的服务商首个模型，或包含 claude 的模型
             for p in &active_providers {
+                let logical = provider_logical_models(p);
                 if p.protocol == "anthropic" || p.name.to_lowercase().contains("anthropic") {
-                    if let Some(m) = p.models.first() {
-                        return Some(format_selected(p, m));
+                    if let Some(entry) = logical.first() {
+                        return Some(format_selected(p, &entry.logical_id));
                     }
                 }
-                if let Some(m) = p.models.iter().find(|m| m.to_lowercase().contains("claude")) {
-                    return Some(format_selected(p, m));
+                if let Some(entry) = logical
+                    .iter()
+                    .find(|e| e.logical_id.to_lowercase().contains("claude"))
+                {
+                    return Some(format_selected(p, &entry.logical_id));
                 }
             }
         }
         "codex_cli" => {
             // 优先匹配 OpenAI/ChatGPT 协议/名称的服务商首个模型，或包含 gpt / codex 的模型
             for p in &active_providers {
+                let logical = provider_logical_models(p);
                 let lower_name = p.name.to_lowercase();
                 if p.protocol == "openai"
                     || p.protocol == "chatgpt"
                     || lower_name.contains("openai")
                     || lower_name.contains("chatgpt")
                 {
-                    if let Some(m) = p.models.first() {
-                        return Some(format_selected(p, m));
+                    if let Some(entry) = logical.first() {
+                        return Some(format_selected(p, &entry.logical_id));
                     }
                 }
-                if let Some(m) = p.models.iter().find(|m| {
-                    let lower = m.to_lowercase();
+                if let Some(entry) = logical.iter().find(|e| {
+                    let lower = e.logical_id.to_lowercase();
                     lower.contains("gpt") || lower.contains("codex")
                 }) {
-                    return Some(format_selected(p, m));
+                    return Some(format_selected(p, &entry.logical_id));
                 }
             }
         }
         "gemini_cli" => {
             // 优先匹配 Gemini 协议/名称的服务商首个模型，或包含 gemini 的模型
             for p in &active_providers {
+                let logical = provider_logical_models(p);
                 if p.protocol == "gemini" || p.name.to_lowercase().contains("gemini") {
-                    if let Some(m) = p.models.first() {
-                        return Some(format_selected(p, m));
+                    if let Some(entry) = logical.first() {
+                        return Some(format_selected(p, &entry.logical_id));
                     }
                 }
-                if let Some(m) = p.models.iter().find(|m| m.to_lowercase().contains("gemini")) {
-                    return Some(format_selected(p, m));
+                if let Some(entry) = logical
+                    .iter()
+                    .find(|e| e.logical_id.to_lowercase().contains("gemini"))
+                {
+                    return Some(format_selected(p, &entry.logical_id));
                 }
             }
         }
         _ => {}
     }
 
-    // 未命中家族匹配时，一律回退到排在第一位的已启用服务商的首个模型
-    active_providers
-        .first()
-        .and_then(|p| p.models.first().map(|m| format_selected(p, m)))
+    // 未命中家族匹配时，一律回退到排在第一位的已启用服务商的首个逻辑模型
+    active_providers.first().and_then(|p| {
+        provider_logical_models(p)
+            .first()
+            .map(|e| format_selected(p, &e.logical_id))
+    })
 }
 
 /// 获取服务商已声明的全部模型（去重）
@@ -2809,15 +2820,33 @@ fn provider_declared_models(provider: &Provider) -> Vec<String> {
     models
 }
 
-/// 统计每个模型在已启用的服务商中被多少个服务商所声明，用于同名冲突加前缀消歧
-fn count_model_providers(providers: &[Provider]) -> HashMap<String, usize> {
+fn provider_logical_models(provider: &Provider) -> Vec<crate::model_catalog::LogicalModelEntry> {
+    crate::model_catalog::collapse_provider_models(&provider_declared_models(provider))
+}
+
+fn count_logical_model_providers(providers: &[Provider]) -> HashMap<String, usize> {
     let mut count = HashMap::new();
     for provider in providers.iter().filter(|p| p.enabled) {
-        for m in provider_declared_models(provider) {
-            *count.entry(m).or_insert(0) += 1;
+        let mut seen_in_provider = HashSet::new();
+        for entry in provider_logical_models(provider) {
+            if seen_in_provider.insert(entry.logical_id.clone()) {
+                *count.entry(entry.logical_id).or_insert(0) += 1;
+            }
         }
     }
     count
+}
+
+fn codex_effort_description(effort: crate::model_catalog::ModelEffort) -> &'static str {
+    use crate::model_catalog::ModelEffort;
+    match effort {
+        ModelEffort::Minimal => "Minimal reasoning depth for instant responses",
+        ModelEffort::Low => "Fast responses with lighter reasoning",
+        ModelEffort::Medium => "Balances speed and reasoning depth for everyday tasks",
+        ModelEffort::High => "Greater reasoning depth for complex problems",
+        ModelEffort::XHigh => "Extra high reasoning depth for complex problems",
+        ModelEffort::Max => "Maximum reasoning depth for the hardest problems",
+    }
 }
 
 pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
@@ -2826,12 +2855,13 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
     let mut seen_slugs = HashSet::new();
     let mut priority = 1000;
 
-    let model_provider_count = count_model_providers(providers);
+    let model_provider_count = count_logical_model_providers(providers);
 
     for provider in providers.iter().filter(|p| p.enabled) {
-        let all_models = provider_declared_models(provider);
+        let logical_models = provider_logical_models(provider);
         let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
-        for model_name in all_models {
+        for entry in logical_models {
+            let model_name = entry.logical_id;
             let is_duplicate = model_provider_count
                 .get(&model_name)
                 .copied()
@@ -2856,18 +2886,77 @@ pub fn generate_codex_catalog_json(providers: &[Provider]) -> Value {
             let lower = model_name.to_lowercase();
             let base_name = lower.split('/').last().unwrap_or(&lower);
 
-            let model_entry = if let Some(native_item) = native_cache.get(base_name) {
-                let mut entry = native_item.clone();
-                entry["slug"] = json!(slug);
-                entry["display_name"] = json!(display_name);
-                entry["description"] = json!(description);
-                entry["priority"] = json!(priority);
-                entry["visibility"] = json!("list");
-                entry["supported_in_api"] = json!(true);
-                entry
+            let model_entry = if entry.variants.is_empty() {
+                if let Some(native_item) = native_cache.get(base_name) {
+                    let mut obj = native_item.clone();
+                    obj["slug"] = json!(slug);
+                    obj["display_name"] = json!(display_name);
+                    obj["description"] = json!(description);
+                    obj["priority"] = json!(priority);
+                    obj["visibility"] = json!("list");
+                    obj["supported_in_api"] = json!(true);
+                    obj
+                } else {
+                    let (supported_reasoning_levels, default_reasoning_level) =
+                        resolve_model_reasoning_spec(&model_name);
+                    let (context_window, max_context_window) =
+                        resolve_model_context_window(&model_name);
+                    let effective_context_window_percent = if context_window >= 1_000_000 {
+                        90
+                    } else {
+                        95
+                    };
+
+                    json!({
+                        "slug": slug,
+                        "display_name": display_name,
+                        "description": description,
+                        "priority": priority,
+                        "visibility": "list",
+                        "supported_in_api": true,
+                        "context_window": context_window,
+                        "max_context_window": max_context_window,
+                        "effective_context_window_percent": effective_context_window_percent,
+                        "input_modalities": resolve_model_input_modalities(&model_name),
+                        "shell_type": "shell_command",
+                        "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
+                        "default_reasoning_level": default_reasoning_level,
+                        "default_reasoning_summary": "none",
+                        "supported_reasoning_levels": supported_reasoning_levels,
+                        "supports_image_detail_original": false,
+                        "supports_parallel_tool_calls": false,
+                        "supports_reasoning_summaries": true,
+                        "supports_search_tool": false,
+                        "truncation_policy": {
+                            "limit": 10000,
+                            "mode": "bytes"
+                        },
+                        "additional_speed_tiers": [],
+                        "service_tiers": [],
+                        "experimental_supported_tools": [],
+                        "support_verbosity": false,
+                        "availability_nux": Value::Null,
+                        "upgrade": Value::Null
+                    })
+                }
             } else {
-                let (supported_reasoning_levels, default_reasoning_level) =
-                    resolve_model_reasoning_spec(&model_name);
+                let supported_reasoning_levels: Vec<Value> = entry
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        json!({
+                            "description": codex_effort_description(v.effort),
+                            "effort": v.effort.api_value(),
+                        })
+                    })
+                    .collect();
+                let default_reasoning_level = crate::model_catalog::select_variant_for_effort(
+                    &entry.variants,
+                    None,
+                    false,
+                )
+                .map(|v| v.effort.api_value())
+                .unwrap_or("medium");
                 let (context_window, max_context_window) =
                     resolve_model_context_window(&model_name);
                 let effective_context_window_percent = if context_window >= 1_000_000 {
@@ -3009,49 +3098,59 @@ pub fn generate_claude_model_picker(
     let mut options = Vec::new();
     let mut seen_models = HashSet::new();
 
-    // 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
-    let model_provider_count = count_model_providers(providers);
+    // 统计各逻辑模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
+    let model_provider_count = count_logical_model_providers(providers);
 
-    // 所有已启用服务商的所有可用模型
+    // 所有已启用服务商的所有可用逻辑模型
     for provider in providers.iter().filter(|p| p.enabled) {
-        let provider_models = provider_declared_models(provider);
+        let provider_models = provider_logical_models(provider);
         let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
 
-        for model_name in provider_models {
+        for entry in provider_models {
+            let model_name = entry.logical_id.clone();
             let behaves_as = resolve_claude_behaves_as(&model_name);
-            let display_name = crate::model_catalog::resolve_model_display_name(&model_name, Some(&provider.name));
             let is_duplicate = model_provider_count
                 .get(&model_name)
                 .copied()
                 .unwrap_or(0) > 1;
 
-            let label_name = if display_name != model_name {
-                display_name
+            let (label_name, description) = if !entry.variants.is_empty() {
+                let title = if entry.extra_tags.is_empty() {
+                    entry.base_name.clone()
+                } else {
+                    format!("{} ({})", entry.base_name, entry.extra_tags.join(", "))
+                };
+                let tiers = entry
+                    .variants
+                    .iter()
+                    .map(|v| v.effort.short_label())
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                (title, format!("via Pivot ({}) · {}", provider.name, tiers))
             } else {
-                model_name.clone()
+                let display_name =
+                    crate::model_catalog::resolve_model_display_name(&model_name, Some(&provider.name));
+                let lbl = if display_name != model_name {
+                    display_name
+                } else {
+                    model_name.clone()
+                };
+                (lbl, format!("via Pivot ({}) · {}", provider.name, model_name))
             };
 
-            if is_duplicate {
-                let prefixed = format!("{}/{}", provider_prefix, model_name);
-                if !seen_models.contains(&prefixed) {
-                    seen_models.insert(prefixed.clone());
-                    options.push(json!({
-                        "model": prefixed,
-                        "label": format!("{} · {}", label_name, provider.name),
-                        "description": format!("via Pivot ({}) · {}", provider.name, model_name),
-                        "behavesAs": behaves_as,
-                    }));
-                }
+            let option_model = if is_duplicate && !model_name.to_lowercase().starts_with(&format!("{}/", provider_prefix)) {
+                format!("{}/{}", provider_prefix, model_name)
             } else {
-                if !seen_models.contains(&model_name) {
-                    seen_models.insert(model_name.clone());
-                    options.push(json!({
-                        "model": model_name,
-                        "label": format!("{} · {}", label_name, provider.name),
-                        "description": format!("via Pivot ({}) · {}", provider.name, model_name),
-                        "behavesAs": behaves_as,
-                    }));
-                }
+                model_name
+            };
+
+            if seen_models.insert(option_model.clone()) {
+                options.push(json!({
+                    "model": option_model,
+                    "label": format!("{} · {}", label_name, provider.name),
+                    "description": description,
+                    "behavesAs": behaves_as,
+                }));
             }
         }
     }
@@ -3070,13 +3169,14 @@ pub fn generate_pi_models_list(
     let mut seen_ids = HashSet::new();
 
     // 统计各模型在不同服务商中的出现频次以判断是否需要前缀以防同名冲突
-    let model_provider_count = count_model_providers(providers);
+    let model_provider_count = count_logical_model_providers(providers);
 
     for provider in providers.iter().filter(|p| p.enabled) {
-        let provider_models = provider_declared_models(provider);
+        let provider_models = provider_logical_models(provider);
         let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
 
-        for model_name in provider_models {
+        for entry in provider_models {
+            let model_name = entry.logical_id;
             let is_duplicate = model_provider_count
                 .get(&model_name)
                 .copied()
@@ -3095,8 +3195,12 @@ pub fn generate_pi_models_list(
                 continue;
             }
 
-            let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
-            let is_reasoning = !levels.is_empty() && default_lvl != "none";
+            let is_reasoning = if !entry.variants.is_empty() {
+                true
+            } else {
+                let (levels, default_lvl) = resolve_model_reasoning_spec(&model_name);
+                !levels.is_empty() && default_lvl != "none"
+            };
             let (ctx, _) = resolve_model_context_window(&model_name);
             models.push(json!({
                 "id": id,
@@ -3120,13 +3224,14 @@ pub fn generate_opencode_models_map(
 ) -> (serde_json::Map<String, Value>, Option<String>) {
     let mut map = serde_json::Map::new();
     let mut preferred_model = None;
-    let model_provider_count = count_model_providers(providers);
+    let model_provider_count = count_logical_model_providers(providers);
 
     for provider in providers.iter().filter(|p| p.enabled) {
-        let provider_models = provider_declared_models(provider);
+        let provider_models = provider_logical_models(provider);
         let provider_prefix = crate::gateway::router::provider_route_prefix(&provider.name);
 
-        for model_name in provider_models {
+        for entry in provider_models {
+            let model_name = entry.logical_id;
             let is_duplicate = model_provider_count
                 .get(&model_name)
                 .copied()
@@ -4103,6 +4208,71 @@ followUpQueueMode = "queue"
         let p2 = make_provider("2", "Backup Proxy");
         let selected = resolve_default_tool_model("claude_code", &[p1, p2]);
         assert_eq!(selected, Some("my-proxy-one/claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_antigravity_variants_collapse_in_claude_and_codex_pickers() {
+        let antigravity = Provider {
+            id: "ag".to_string(),
+            name: "Antigravity".to_string(),
+            protocol: "gemini".to_string(),
+            base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
+            preset_id: Some("antigravity".to_string()),
+            auth_type: Some("subscription_pool".to_string()),
+            api_keys: vec![],
+            models: vec![
+                "gemini-4-neon-low".to_string(),
+                "gemini-4-neon-medium".to_string(),
+                "gemini-4-neon-high".to_string(),
+                "gemini-4-neon-xhigh".to_string(),
+                "gemini-3.8-flash-low".to_string(),
+                "gemini-3.8-flash-medium".to_string(),
+                "gemini-3.8-flash-high".to_string(),
+                "claude-opus-4-6-thinking".to_string(),
+            ],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+
+        let picker = generate_claude_model_picker(std::slice::from_ref(&antigravity));
+        let options = picker["options"].as_array().unwrap();
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0]["model"], "gemini-4-neon");
+        assert!(options[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Low / Med / High / XHigh"));
+        assert_eq!(options[1]["model"], "gemini-3.8-flash");
+        assert!(options[1]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Low / Med / High"));
+        assert_eq!(options[2]["model"], "claude-opus-4-6-thinking");
+
+        let codex = generate_codex_catalog_json(&[antigravity]);
+        let codex_models = codex["models"].as_array().unwrap();
+        assert_eq!(codex_models.len(), 3);
+        assert_eq!(codex_models[0]["slug"], "gemini-4-neon");
+        assert_eq!(codex_models[0]["default_reasoning_level"], "medium");
+        let neon_levels = codex_models[0]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap();
+        assert_eq!(neon_levels.len(), 4);
+        assert_eq!(neon_levels[3]["effort"], "xhigh");
+
+        assert_eq!(codex_models[1]["slug"], "gemini-3.8-flash");
+        let g38_levels = codex_models[1]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap();
+        assert_eq!(g38_levels.len(), 3);
+        assert_eq!(g38_levels[2]["effort"], "high");
     }
 
     #[test]

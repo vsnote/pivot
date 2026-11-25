@@ -15,6 +15,7 @@ use std::rc::Rc;
 pub struct GroupedModelOption {
     pub value: String,
     pub label: String,
+    pub member_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,10 +45,10 @@ pub fn build_grouped_models(providers: &[Provider]) -> Vec<GroupedModel> {
         if !p.enabled {
             continue;
         }
-        for m in &p.models {
-            let trimmed = m.trim();
-            if !trimmed.is_empty() {
-                *model_count.entry(trimmed.to_string()).or_insert(0) += 1;
+        let mut seen_in_p = HashSet::new();
+        for entry in pivot_core::model_catalog::collapse_provider_models(&p.models) {
+            if seen_in_p.insert(entry.logical_id.clone()) {
+                *model_count.entry(entry.logical_id).or_insert(0) += 1;
             }
         }
     }
@@ -61,20 +62,25 @@ pub fn build_grouped_models(providers: &[Provider]) -> Vec<GroupedModel> {
         let prefix = provider_slug_prefix(&p.name);
         let mut items = Vec::new();
 
-        for m in &p.models {
-            let trimmed = m.trim();
-            if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+        for entry in pivot_core::model_catalog::collapse_provider_models(&p.models) {
+            if !seen.insert(entry.logical_id.clone()) {
                 continue;
             }
-            let is_dup = model_count.get(trimmed).copied().unwrap_or(0) > 1;
-            let value = if is_dup {
-                format!("{}/{}", prefix, trimmed)
+            let is_dup = model_count.get(&entry.logical_id).copied().unwrap_or(0) > 1;
+            let value = if is_dup
+                && !entry
+                    .logical_id
+                    .to_lowercase()
+                    .starts_with(&format!("{}/", prefix))
+            {
+                format!("{}/{}", prefix, entry.logical_id)
             } else {
-                trimmed.to_string()
+                entry.logical_id.clone()
             };
             items.push(GroupedModelOption {
                 value,
-                label: trimmed.to_string(),
+                label: entry.logical_id,
+                member_ids: entry.raw_ids,
             });
         }
 
@@ -171,6 +177,19 @@ pub fn resolve_display_label(
         for opt in &g.models {
             if opt.value == value || opt.label == value {
                 return (opt.label.clone(), true);
+            }
+        }
+    }
+    for g in groups {
+        let prefix = provider_slug_prefix(&g.name);
+        for opt in &g.models {
+            if opt.member_ids.iter().any(|id| id == value) {
+                return (value.to_string(), true);
+            }
+            if let Some((val_prefix, val_sub)) = value.split_once('/') {
+                if val_prefix == prefix && opt.member_ids.iter().any(|id| id == val_sub) {
+                    return (val_sub.to_string(), true);
+                }
             }
         }
     }
@@ -664,6 +683,7 @@ mod tests {
                     .map(|mi| GroupedModelOption {
                         value: format!("m-{}-{}", gi, mi),
                         label: format!("m-{}-{}", gi, mi),
+                        member_ids: vec![format!("m-{}-{}", gi, mi)],
                     })
                     .collect(),
             })
@@ -723,10 +743,12 @@ mod tests {
                     GroupedModelOption {
                         value: "antigravity/gpt-4o".to_string(),
                         label: "gpt-4o".to_string(),
+                        member_ids: vec!["gpt-4o".to_string()],
                     },
                     GroupedModelOption {
                         value: "claude-opus".to_string(),
                         label: "claude-opus".to_string(),
+                        member_ids: vec!["claude-opus".to_string()],
                     },
                 ],
             },
@@ -738,6 +760,7 @@ mod tests {
                 models: vec![GroupedModelOption {
                     value: "chatgpt/gpt-4o".to_string(),
                     label: "gpt-4o".to_string(),
+                    member_ids: vec!["gpt-4o".to_string()],
                 }],
             },
         ];
@@ -746,5 +769,50 @@ mod tests {
         assert_eq!(find_selected_flat_index("claude-opus", &groups), Some(2));
         assert_eq!(find_selected_flat_index("chatgpt/gpt-4o", &groups), Some(4));
         assert_eq!(find_selected_flat_index("gpt-4o", &groups), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn build_grouped_models_collapses_variants_and_keeps_legacy_ids_in_pool() {
+        let ag = Provider {
+            id: "ag".to_string(),
+            name: "Antigravity".to_string(),
+            protocol: "gemini".to_string(),
+            base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
+            preset_id: Some("antigravity".to_string()),
+            auth_type: Some("subscription_pool".to_string()),
+            api_keys: vec![],
+            models: vec![
+                "gemini-4-neon-low".to_string(),
+                "gemini-4-neon-medium".to_string(),
+                "gemini-4-neon-high".to_string(),
+                "gemini-4-neon-xhigh".to_string(),
+            ],
+            default_model: None,
+            is_default: false,
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            timeout_secs: 60,
+            latency_ms: None,
+            created_at: None,
+            updated_at: None,
+        };
+
+        let groups = build_grouped_models(&[ag]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].models.len(), 1);
+        assert_eq!(groups[0].models[0].value, "gemini-4-neon");
+        assert_eq!(groups[0].models[0].label, "gemini-4-neon");
+        assert_eq!(groups[0].models[0].member_ids.len(), 4);
+
+        let (lbl_agg, in_agg) = resolve_display_label("gemini-4-neon", &groups, "Pick");
+        assert_eq!((lbl_agg.as_str(), in_agg), ("gemini-4-neon", true));
+
+        let (lbl_leg, in_leg) = resolve_display_label("gemini-4-neon-high", &groups, "Pick");
+        assert_eq!((lbl_leg.as_str(), in_leg), ("gemini-4-neon-high", true));
+
+        let (lbl_pref, in_pref) =
+            resolve_display_label("antigravity/gemini-4-neon-high", &groups, "Pick");
+        assert_eq!((lbl_pref.as_str(), in_pref), ("gemini-4-neon-high", true));
     }
 }

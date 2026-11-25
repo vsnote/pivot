@@ -84,6 +84,7 @@ pub enum ModelEffort {
     Medium,
     High,
     XHigh,
+    Max,
 }
 
 impl ModelEffort {
@@ -94,6 +95,7 @@ impl ModelEffort {
             Self::Medium => "Med",
             Self::High => "High",
             Self::XHigh => "XHigh",
+            Self::Max => "Max",
         }
     }
 
@@ -104,10 +106,22 @@ impl ModelEffort {
             Self::Medium => "Medium",
             Self::High => "High",
             Self::XHigh => "XHigh",
+            Self::Max => "Max",
         }
     }
 
-    /// 仅从模型 ID 尾部识别规则推理强度后缀，严禁把 `-max` 当作 effort 剥离
+    pub fn api_value(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// 仅从模型 ID 尾部识别规则推理强度后缀，严禁把 `-max` 当作 effort 孤立剥离
     pub fn from_suffix(id: &str) -> Option<(&str, Self)> {
         let lower = id.to_ascii_lowercase();
         for (suffix, effort) in [
@@ -126,6 +140,50 @@ impl ModelEffort {
         }
         None
     }
+
+    /// 匹配尾部 `-max` 后缀，仅供同池存在标准 effort 变体时的上下文识别
+    pub fn from_max_suffix(id: &str) -> Option<&str> {
+        let lower = id.to_ascii_lowercase();
+        if lower.ends_with("-max") && id.len() > 4 {
+            let stem = &id[..id.len() - 4];
+            if !stem.ends_with('/') {
+                return Some(stem);
+            }
+        }
+        None
+    }
+
+    pub fn parse_request_effort(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" | "ultra" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortVariant {
+    pub model_id: String,
+    pub effort: ModelEffort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalModelEntry {
+    /// 多档位组为基础模型 ID（如 "gemini-4-neon"、"gemini-4-hydrogen-tiered"）；单模型为原始 ID
+    pub logical_id: String,
+    pub base_name: String,
+    pub extra_tags: Vec<String>,
+    /// 仅单模型且自带孤立 effort 时有值（如 "gpt-oss-120b-medium"）
+    pub single_effort: Option<ModelEffort>,
+    /// 多档位合并组时 len >= 2 且按 ModelEffort 升序；单模型时为空
+    pub variants: Vec<EffortVariant>,
+    /// 底层全部真实上游模型 ID
+    pub raw_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -665,6 +723,219 @@ pub fn parse_model_display(model_id: &str, provider_hint: Option<&str>) -> Model
 /// 解析模型的用户友好显示名称 (name)，无损保留档位与变体后缀，无法匹配时回落至 model_id
 pub fn resolve_model_display_name(model_id: &str, provider_hint: Option<&str>) -> String {
     parse_model_display(model_id, provider_hint).display_name
+}
+
+fn collapse_provider_models_with<D, C>(
+    models: &[String],
+    dynamic_lookup: D,
+    catalog_exact: C,
+) -> Vec<LogicalModelEntry>
+where
+    D: Fn(&str) -> Option<String>,
+    C: Fn(&str, Option<&str>) -> Option<String>,
+{
+    let mut standard_effort_stems: std::collections::HashSet<(String, Vec<String>)> =
+        std::collections::HashSet::new();
+    for raw in models {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (wb, cap_tags) = split_capacity_brackets(trimmed);
+        if let Some((stem, _)) = ModelEffort::from_suffix(wb) {
+            standard_effort_stems.insert((stem.to_lowercase(), cap_tags));
+        }
+    }
+
+    struct ParsedMember {
+        logical_stem: String,
+        info: ModelDisplayInfo,
+    }
+
+    let mut seen_raw = std::collections::HashSet::new();
+    let mut slots: Vec<Vec<ParsedMember>> = Vec::new();
+    let mut slot_map: HashMap<(String, Vec<String>), usize> = HashMap::new();
+
+    for raw in models {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || !seen_raw.insert(trimmed.to_string()) {
+            continue;
+        }
+
+        let (wb, cap_tags) = split_capacity_brackets(trimmed);
+        let bracket_suffix = trimmed[wb.len()..].trim();
+
+        let (logical_stem, info) = if let Some((stem, _)) = ModelEffort::from_suffix(wb) {
+            let l_stem = if bracket_suffix.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{}{}", stem, bracket_suffix)
+            };
+            let info =
+                parse_model_display_with(trimmed, None, &dynamic_lookup, &catalog_exact);
+            (l_stem, info)
+        } else if let Some(stem) = ModelEffort::from_max_suffix(wb) {
+            if standard_effort_stems.contains(&(stem.to_lowercase(), cap_tags)) {
+                let without_max = if bracket_suffix.is_empty() {
+                    stem.to_string()
+                } else {
+                    format!("{}{}", stem, bracket_suffix)
+                };
+                let mut base_info = parse_model_display_with(
+                    &without_max,
+                    None,
+                    &dynamic_lookup,
+                    &catalog_exact,
+                );
+                let raw_lower = trimmed.to_lowercase();
+                let raw_tail_lower = raw_lower
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&raw_lower)
+                    .to_string();
+                let wb_lower = wb.to_lowercase();
+                let wb_tail_lower = wb_lower.rsplit('/').next().unwrap_or(&wb_lower).to_string();
+                if let Some(dyn_name) = dynamic_lookup(&raw_lower)
+                    .or_else(|| dynamic_lookup(&wb_lower))
+                    .or_else(|| dynamic_lookup(&raw_tail_lower))
+                    .or_else(|| dynamic_lookup(&wb_tail_lower))
+                {
+                    base_info.base_name =
+                        strip_effort_decoration_from_name(&dyn_name, ModelEffort::Max);
+                }
+                let mut suffix_parts = base_info.extra_tags.clone();
+                suffix_parts.push(ModelEffort::Max.full_label().to_string());
+                let display_name =
+                    format!("{} ({})", base_info.base_name, suffix_parts.join(", "));
+                let info = ModelDisplayInfo {
+                    raw_id: trimmed.to_string(),
+                    group_key: base_info.group_key,
+                    base_name: base_info.base_name,
+                    effort: Some(ModelEffort::Max),
+                    extra_tags: base_info.extra_tags,
+                    display_name,
+                };
+                (without_max, info)
+            } else {
+                let info = parse_model_display_with(
+                    trimmed,
+                    None,
+                    &dynamic_lookup,
+                    &catalog_exact,
+                );
+                (trimmed.to_string(), info)
+            }
+        } else {
+            let info = parse_model_display_with(trimmed, None, &dynamic_lookup, &catalog_exact);
+            (trimmed.to_string(), info)
+        };
+
+        let key = (info.group_key.clone(), info.extra_tags.clone());
+        let member = ParsedMember { logical_stem, info };
+        if let Some(&idx) = slot_map.get(&key) {
+            slots[idx].push(member);
+        } else {
+            let idx = slots.len();
+            slot_map.insert(key, idx);
+            slots.push(vec![member]);
+        }
+    }
+
+    let mut out = Vec::new();
+    for members in slots {
+        let has_none_effort = members.iter().any(|m| m.info.effort.is_none());
+        let unique_efforts: std::collections::HashSet<ModelEffort> = members
+            .iter()
+            .filter_map(|m| m.info.effort)
+            .collect();
+
+        if !has_none_effort && members.len() >= 2 && unique_efforts.len() == members.len() {
+            let mut variants: Vec<EffortVariant> = members
+                .iter()
+                .filter_map(|m| {
+                    m.info.effort.map(|effort| EffortVariant {
+                        model_id: m.info.raw_id.clone(),
+                        effort,
+                    })
+                })
+                .collect();
+            variants.sort_by_key(|v| v.effort);
+            let raw_ids: Vec<String> = variants.iter().map(|v| v.model_id.clone()).collect();
+            let first = &members[0];
+            out.push(LogicalModelEntry {
+                logical_id: first.logical_stem.clone(),
+                base_name: first.info.base_name.clone(),
+                extra_tags: first.info.extra_tags.clone(),
+                single_effort: None,
+                variants,
+                raw_ids,
+            });
+        } else {
+            for m in members {
+                let raw_id = m.info.raw_id;
+                out.push(LogicalModelEntry {
+                    logical_id: raw_id.clone(),
+                    base_name: m.info.base_name,
+                    extra_tags: m.info.extra_tags,
+                    single_effort: m.info.effort,
+                    variants: Vec::new(),
+                    raw_ids: vec![raw_id],
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// 将服务商原始模型列表折叠为逻辑模型视图（保序、同源多档位聚合并支持同池 `-max` 上下文识别）
+pub fn collapse_provider_models(models: &[String]) -> Vec<LogicalModelEntry> {
+    collapse_provider_models_with(
+        models,
+        |key| {
+            dynamic_names()
+                .read()
+                .ok()
+                .and_then(|map| map.get(key).cloned())
+        },
+        exact_catalog_name_in_store,
+    )
+}
+
+/// 在同一模型的有序档位变体集合中按请求 effort 进行精确命中或就近夹逼
+pub fn select_variant_for_effort<'a>(
+    variants: &'a [EffortVariant],
+    requested: Option<ModelEffort>,
+    thinking_disabled: bool,
+) -> Option<&'a EffortVariant> {
+    if variants.is_empty() {
+        return None;
+    }
+    if thinking_disabled {
+        return variants.first();
+    }
+    match requested {
+        Some(target) => {
+            if let Some(exact) = variants.iter().find(|v| v.effort == target) {
+                return Some(exact);
+            }
+            if target < variants[0].effort {
+                return variants.first();
+            }
+            if target > variants[variants.len() - 1].effort {
+                return variants.last();
+            }
+            variants
+                .iter()
+                .find(|v| v.effort >= target)
+                .or_else(|| variants.last())
+        }
+        None => variants
+            .iter()
+            .find(|v| v.effort == ModelEffort::Medium)
+            .or_else(|| variants.iter().find(|v| v.effort == ModelEffort::High))
+            .or_else(|| variants.get(variants.len() / 2)),
+    }
 }
 
 fn store() -> &'static RwLock<Catalog> {
@@ -1393,5 +1664,182 @@ mod tests {
     fn canonical_keys_still_strip_tiered_for_capability_lookup() {
         assert!(canonical_keys("gemini-4-hydrogen-tiered-xhigh")
             .contains(&"gemini-4-hydrogen".to_string()));
+    }
+
+    #[test]
+    fn collapse_provider_models_handles_subsets_max_context_and_isolated_models() {
+        let index = test_catalog_index();
+        let dyn_map: HashMap<String, String> = HashMap::new();
+        let models: Vec<String> = vec![
+            "gemini-4-neon-xhigh",
+            "gemini-4-neon-low",
+            "gemini-4-neon-high",
+            "gemini-4-neon-medium",
+            "claude-sonnet-5-5-low",
+            "claude-sonnet-5-5-medium",
+            "claude-sonnet-5-5-high",
+            "gemini-4-hydrogen-tiered-xhigh",
+            "gemini-4-hydrogen-tiered-high",
+            "custom-thinker-low",
+            "custom-thinker-high",
+            "custom-thinker-max",
+            "qwen-max",
+            "gpt-oss-120b-medium",
+            "claude-opus-5-5",
+            "claude-opus-5-5-low",
+            "claude-opus-5-5-high",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let entries = collapse_provider_models_with(
+            &models,
+            |k| dyn_map.get(k).cloned(),
+            |q, h| catalog_exact_from_index(&index, q, h),
+        );
+
+        // neon(1) + sonnet5.5(1) + hydrogen-tiered(1) + custom-thinker(1) + qwen-max(1) + gpt-oss(1) + opus5.5本体+low+high(3) = 9
+        assert_eq!(entries.len(), 9);
+
+        assert_eq!(entries[0].logical_id, "gemini-4-neon");
+        assert_eq!(entries[0].base_name, "Gemini 4 Neon");
+        assert_eq!(
+            entries[0]
+                .variants
+                .iter()
+                .map(|v| v.effort)
+                .collect::<Vec<_>>(),
+            vec![
+                ModelEffort::Low,
+                ModelEffort::Medium,
+                ModelEffort::High,
+                ModelEffort::XHigh
+            ]
+        );
+
+        assert_eq!(entries[1].logical_id, "claude-sonnet-5-5");
+        assert_eq!(entries[1].variants.len(), 3);
+
+        assert_eq!(entries[2].logical_id, "gemini-4-hydrogen-tiered");
+        assert_eq!(entries[2].base_name, "Gemini 4 Hydrogen Tiered");
+        assert_eq!(
+            entries[2]
+                .variants
+                .iter()
+                .map(|v| v.effort)
+                .collect::<Vec<_>>(),
+            vec![ModelEffort::High, ModelEffort::XHigh]
+        );
+
+        // 同池共存的 -max 正确识别为 ModelEffort::Max
+        assert_eq!(entries[3].logical_id, "custom-thinker");
+        assert_eq!(
+            entries[3]
+                .variants
+                .iter()
+                .map(|v| v.effort)
+                .collect::<Vec<_>>(),
+            vec![ModelEffort::Low, ModelEffort::High, ModelEffort::Max]
+        );
+
+        // 孤立 qwen-max 与单成员 gpt-oss-120b-medium 不合组也不误拆
+        assert_eq!(entries[4].logical_id, "qwen-max");
+        assert!(entries[4].variants.is_empty());
+        assert_eq!(entries[4].single_effort, None);
+
+        assert_eq!(entries[5].logical_id, "gpt-oss-120b-medium");
+        assert!(entries[5].variants.is_empty());
+        assert_eq!(entries[5].single_effort, Some(ModelEffort::Medium));
+
+        // 存在无 effort 本体 claude-opus-5-5 时，不强行合并抢占 logical_id
+        assert_eq!(entries[6].logical_id, "claude-opus-5-5");
+        assert!(entries[6].variants.is_empty());
+        assert_eq!(entries[7].logical_id, "claude-opus-5-5-low");
+        assert_eq!(entries[8].logical_id, "claude-opus-5-5-high");
+    }
+
+    #[test]
+    fn select_variant_for_effort_clamps_within_model_bounds() {
+        let sonnet_variants = vec![
+            EffortVariant {
+                model_id: "claude-sonnet-5-5-low".into(),
+                effort: ModelEffort::Low,
+            },
+            EffortVariant {
+                model_id: "claude-sonnet-5-5-medium".into(),
+                effort: ModelEffort::Medium,
+            },
+            EffortVariant {
+                model_id: "claude-sonnet-5-5-high".into(),
+                effort: ModelEffort::High,
+            },
+        ];
+
+        assert_eq!(
+            select_variant_for_effort(&sonnet_variants, Some(ModelEffort::Max), false)
+                .unwrap()
+                .model_id,
+            "claude-sonnet-5-5-high"
+        );
+        assert_eq!(
+            select_variant_for_effort(&sonnet_variants, Some(ModelEffort::Minimal), false)
+                .unwrap()
+                .model_id,
+            "claude-sonnet-5-5-low"
+        );
+        assert_eq!(
+            select_variant_for_effort(&sonnet_variants, None, false)
+                .unwrap()
+                .model_id,
+            "claude-sonnet-5-5-medium"
+        );
+        assert_eq!(
+            select_variant_for_effort(&sonnet_variants, Some(ModelEffort::High), true)
+                .unwrap()
+                .model_id,
+            "claude-sonnet-5-5-low"
+        );
+
+        let tiered_variants = vec![
+            EffortVariant {
+                model_id: "gemini-4-hydrogen-tiered-high".into(),
+                effort: ModelEffort::High,
+            },
+            EffortVariant {
+                model_id: "gemini-4-hydrogen-tiered-xhigh".into(),
+                effort: ModelEffort::XHigh,
+            },
+        ];
+        assert_eq!(
+            select_variant_for_effort(&tiered_variants, Some(ModelEffort::Low), false)
+                .unwrap()
+                .model_id,
+            "gemini-4-hydrogen-tiered-high"
+        );
+        assert_eq!(
+            select_variant_for_effort(&tiered_variants, None, false)
+                .unwrap()
+                .model_id,
+            "gemini-4-hydrogen-tiered-high"
+        );
+
+        // 中间空缺夹逼：low, high 请求 medium -> high
+        let gap_variants = vec![
+            EffortVariant {
+                model_id: "m-low".into(),
+                effort: ModelEffort::Low,
+            },
+            EffortVariant {
+                model_id: "m-high".into(),
+                effort: ModelEffort::High,
+            },
+        ];
+        assert_eq!(
+            select_variant_for_effort(&gap_variants, Some(ModelEffort::Medium), false)
+                .unwrap()
+                .model_id,
+            "m-high"
+        );
     }
 }
