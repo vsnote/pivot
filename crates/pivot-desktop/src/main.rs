@@ -58,7 +58,9 @@ fn main() {
 
             // 窗口创建前先设置 Dock 图标，避免先显示 bundle 内静态深色图标再闪变
             let prefs = theme::load_ui_preferences();
-            tray::sync_macos_app_icon(theme::resolve_is_dark(prefs.theme, cx.window_appearance()));
+            let system_dark =
+                theme::resolve_is_dark(theme::ThemePreference::System, cx.window_appearance());
+            tray::sync_dock_icon_for_preference(prefs.theme, system_dark);
 
             let tray_rx = tray::init_system_tray(app_state.port);
             let bounds = Bounds::centered(None, size(px(415.0), px(620.0)), cx);
@@ -89,8 +91,9 @@ fn main() {
                     });
                     cx.new(|cx| {
                         let app = PivotApp::new(state_clone, handle_clone, log_rx, tray_rx, window, cx);
-                        let is_dark = theme::is_dark_appearance(app.prefs.theme, window);
-                        tray::sync_macos_app_icon(is_dark);
+                        let system_dark =
+                            theme::is_dark_appearance(theme::ThemePreference::System, window);
+                        tray::sync_dock_icon_for_preference(app.prefs.theme, system_dark);
                         app
                     })
                 },

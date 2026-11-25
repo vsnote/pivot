@@ -3,6 +3,7 @@
 use crate::app::ActiveTab;
 use crate::i18n::Locale;
 use crate::pricing::TodayUsageSummary;
+use crate::theme::ThemePreference;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
@@ -96,6 +97,7 @@ impl TrayMenuSnapshot {
 
 static SHOULD_QUIT: AtomicBool = AtomicBool::new(false);
 static LAST_DOCK_THEME: AtomicU8 = AtomicU8::new(255);
+static DOCK_THEME_PREF: AtomicU8 = AtomicU8::new(0);
 static TRAY_TX: OnceLock<mpsc::UnboundedSender<TrayCommand>> = OnceLock::new();
 static TRAY_SNAPSHOT: OnceLock<Mutex<TrayMenuSnapshot>> = OnceLock::new();
 
@@ -150,14 +152,54 @@ pub fn reveal_main_window() {
     macos::reveal_window();
 }
 
+fn encode_theme_pref(pref: ThemePreference) -> u8 {
+    match pref {
+        ThemePreference::System => 0,
+        ThemePreference::Light => 1,
+        ThemePreference::Dark => 2,
+    }
+}
+
+fn decode_theme_pref(raw: u8) -> ThemePreference {
+    match raw {
+        1 => ThemePreference::Light,
+        2 => ThemePreference::Dark,
+        _ => ThemePreference::System,
+    }
+}
+
+pub(crate) fn resolve_dock_icon_is_dark(pref: ThemePreference, system_dark: bool) -> bool {
+    match pref {
+        ThemePreference::Light => false,
+        ThemePreference::Dark => true,
+        ThemePreference::System => system_dark,
+    }
+}
+
 /// 同步 macOS 应用级图标（Dock 与 Cmd+Tab 切换器），仅在首次或深浅色变化时更新
-pub fn sync_macos_app_icon(is_dark: bool) {
+fn sync_macos_app_icon(is_dark: bool) {
     let next = u8::from(is_dark);
     if LAST_DOCK_THEME.swap(next, Ordering::SeqCst) == next {
         return;
     }
     #[cfg(target_os = "macos")]
     macos::set_app_dock_icon(is_dark);
+}
+
+/// 根据主题偏好同步 Dock 图标，并记录最新偏好供后台 KVO 回调使用
+pub fn sync_dock_icon_for_preference(pref: ThemePreference, fallback_system_dark: bool) {
+    DOCK_THEME_PREF.store(encode_theme_pref(pref), Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    let system_dark = if pref == ThemePreference::System {
+        macos::is_system_dark_appearance().unwrap_or(fallback_system_dark)
+    } else {
+        fallback_system_dark
+    };
+    #[cfg(not(target_os = "macos"))]
+    let system_dark = fallback_system_dark;
+
+    let is_dark = resolve_dock_icon_is_dark(pref, system_dark);
+    sync_macos_app_icon(is_dark);
 }
 
 pub fn init_system_tray(port: u16) -> mpsc::UnboundedReceiver<TrayCommand> {
@@ -177,11 +219,12 @@ pub fn init_system_tray(port: u16) -> mpsc::UnboundedReceiver<TrayCommand> {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        mark_quitting, resolve_selected_model_index, TrayCommand, TrayMenuSnapshot,
-        TrayUpdateBanner, TRAY_SNAPSHOT, TRAY_TX,
+        decode_theme_pref, mark_quitting, resolve_selected_model_index, TrayCommand,
+        TrayMenuSnapshot, TrayUpdateBanner, DOCK_THEME_PREF, TRAY_SNAPSHOT, TRAY_TX,
     };
     use crate::i18n::Locale;
     use crate::pricing::{format_currency, format_tokens};
+    use crate::theme::ThemePreference;
     use cocoa::appkit::{NSStatusBar, NSVariableStatusItemLength};
     use cocoa::base::{id, nil, BOOL, NO, YES};
     use cocoa::foundation::{NSAutoreleasePool, NSSize, NSString};
@@ -189,13 +232,18 @@ mod macos {
     use objc::runtime::{Class, Object, Sel};
     use objc::{class, msg_send, sel, sel_impl};
     use std::os::raw::c_void;
+    use std::sync::atomic::Ordering;
     use std::sync::{Mutex, Once, OnceLock};
 
     #[link(name = "AppKit", kind = "framework")]
     extern "C" {
         static NSForegroundColorAttributeName: id;
         static NSFontAttributeName: id;
+        static NSAppearanceNameAqua: id;
+        static NSAppearanceNameDarkAqua: id;
     }
+
+    static APPEARANCE_KVO_CONTEXT: u8 = 0;
 
     const STATE_MIXED: isize = -1;
     const STATE_OFF: isize = 0;
@@ -423,6 +471,41 @@ mod macos {
             let pool = NSAutoreleasePool::new(nil);
             unhide_and_focus_app_windows();
             let _: () = msg_send![pool, drain];
+        }
+    }
+
+    unsafe fn detect_system_dark_inner() -> Option<bool> {
+        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        if ns_app == nil {
+            return None;
+        }
+        let appearance: id = msg_send![ns_app, effectiveAppearance];
+        if appearance == nil {
+            return None;
+        }
+        let names: [id; 2] = [NSAppearanceNameAqua, NSAppearanceNameDarkAqua];
+        let arr: id = msg_send![
+            class!(NSArray),
+            arrayWithObjects: names.as_ptr()
+            count: 2usize
+        ];
+        if arr == nil {
+            return None;
+        }
+        let matched: id = msg_send![appearance, bestMatchFromAppearancesWithNames: arr];
+        if matched == nil {
+            return None;
+        }
+        let is_dark: BOOL = msg_send![matched, isEqualToString: NSAppearanceNameDarkAqua];
+        Some(is_dark == YES)
+    }
+
+    pub fn is_system_dark_appearance() -> Option<bool> {
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let res = detect_system_dark_inner();
+            let _: () = msg_send![pool, drain];
+            res
         }
     }
 
@@ -877,6 +960,24 @@ mod macos {
         }
     }
 
+    extern "C" fn handle_appearance_kvo(
+        _this: &Object,
+        _cmd: Sel,
+        _key_path: id,
+        _object: id,
+        _change: id,
+        context: *mut c_void,
+    ) {
+        if context != (&APPEARANCE_KVO_CONTEXT as *const u8 as *mut c_void) {
+            return;
+        }
+        if decode_theme_pref(DOCK_THEME_PREF.load(Ordering::SeqCst)) == ThemePreference::System {
+            if let Some(is_dark) = is_system_dark_appearance() {
+                super::sync_macos_app_icon(is_dark);
+            }
+        }
+    }
+
     fn ensure_target_class() -> *const Class {
         REGISTER_TARGET_CLASS.call_once(|| unsafe {
             if Class::get("PivotGpuiTrayTarget").is_none() {
@@ -888,6 +989,10 @@ mod macos {
                     decl.add_method(
                         sel!(onMenuAction:),
                         handle_menu_action as extern "C" fn(&Object, Sel, id),
+                    );
+                    decl.add_method(
+                        sel!(observeValueForKeyPath:ofObject:change:context:),
+                        handle_appearance_kvo as extern "C" fn(&Object, Sel, id, id, id, *mut c_void),
                     );
                     decl.register();
                 }
@@ -902,6 +1007,17 @@ mod macos {
             let target_cls = ensure_target_class();
             let target: id = msg_send![target_cls, new];
             let _: id = msg_send![target, retain];
+
+            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+            if ns_app != nil {
+                let _: () = msg_send![
+                    ns_app,
+                    addObserver: target
+                    forKeyPath: ns_string("effectiveAppearance")
+                    options: 0usize
+                    context: (&APPEARANCE_KVO_CONTEXT as *const u8 as *mut c_void)
+                ];
+            }
 
             let status_bar = NSStatusBar::systemStatusBar(nil);
             let status_item: id = status_bar.statusItemWithLength_(NSVariableStatusItemLength);
@@ -1009,5 +1125,27 @@ mod tests {
         let groups = sample_groups();
         assert_eq!(resolve_selected_model_index("", &groups), None);
         assert_eq!(resolve_selected_model_index("unknown-model", &groups), None);
+    }
+
+    #[test]
+    fn round_trips_theme_preference_encoding() {
+        for pref in [
+            ThemePreference::System,
+            ThemePreference::Light,
+            ThemePreference::Dark,
+        ] {
+            assert_eq!(decode_theme_pref(encode_theme_pref(pref)), pref);
+        }
+        assert_eq!(decode_theme_pref(255), ThemePreference::System);
+    }
+
+    #[test]
+    fn resolves_dock_icon_darkness_across_preferences() {
+        assert!(!resolve_dock_icon_is_dark(ThemePreference::Light, true));
+        assert!(!resolve_dock_icon_is_dark(ThemePreference::Light, false));
+        assert!(resolve_dock_icon_is_dark(ThemePreference::Dark, true));
+        assert!(resolve_dock_icon_is_dark(ThemePreference::Dark, false));
+        assert!(resolve_dock_icon_is_dark(ThemePreference::System, true));
+        assert!(!resolve_dock_icon_is_dark(ThemePreference::System, false));
     }
 }

@@ -311,6 +311,14 @@ impl PivotApp {
         };
 
         app.sync_tray_snapshot();
+        cx.observe_window_appearance(window, |this, window, cx| {
+            let system_dark = crate::theme::is_dark_appearance(ThemePreference::System, window);
+            let is_dark = crate::theme::is_dark_appearance(this.prefs.theme, window);
+            sync_gpui_component_theme(is_dark, Some(window), cx);
+            tray::sync_dock_icon_for_preference(this.prefs.theme, system_dark);
+            cx.notify();
+        })
+        .detach();
         app.refresh_all(cx);
         app.spawn_log_listener(log_rx, cx);
         app.spawn_tray_listener(tray_rx, cx);
@@ -609,6 +617,11 @@ impl PivotApp {
                         app.today_summary = today;
                     }
                     app.sync_tray_snapshot();
+                    let system_dark = crate::theme::resolve_is_dark(
+                        ThemePreference::System,
+                        cx.window_appearance(),
+                    );
+                    tray::sync_dock_icon_for_preference(app.prefs.theme, system_dark);
                     cx.notify();
                 })
                 .is_ok();
@@ -2459,8 +2472,10 @@ impl PivotApp {
     ) {
         self.prefs.theme = theme;
         save_ui_preferences(&self.prefs);
-        let is_dark = ThemePalette::resolve(theme, window).is_dark;
+        let system_dark = crate::theme::is_dark_appearance(ThemePreference::System, window);
+        let is_dark = crate::theme::is_dark_appearance(theme, window);
         sync_gpui_component_theme(is_dark, Some(window), cx);
+        tray::sync_dock_icon_for_preference(theme, system_dark);
         cx.notify();
     }
 
@@ -3147,7 +3162,8 @@ impl Render for PivotApp {
 
         let palette = ThemePalette::resolve(self.prefs.theme, window);
         sync_gpui_component_theme(palette.is_dark, Some(window), cx);
-        tray::sync_macos_app_icon(palette.is_dark);
+        let system_dark = crate::theme::is_dark_appearance(ThemePreference::System, window);
+        tray::sync_dock_icon_for_preference(self.prefs.theme, system_dark);
 
         let active_tab = self.active_tab;
         let locale = self.prefs.locale;
