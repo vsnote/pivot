@@ -213,6 +213,23 @@ fn render_compact_tag(tag: &str, palette: ThemePalette) -> Div {
         .child(tag.to_string())
 }
 
+fn render_effort_tag(tag: &str, palette: ThemePalette) -> Div {
+    div()
+        .min_w(px(40.0))
+        .px(px(4.5))
+        .py(px(0.5))
+        .rounded(px(3.5))
+        .bg(palette.secondary)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(9.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(palette.muted_foreground)
+        .flex_shrink_0()
+        .child(tag.to_string())
+}
+
 pub fn render_model_pool_section(
     app: &PivotApp,
     editor: &ProviderEditorState,
@@ -718,7 +735,43 @@ pub fn render_model_pool_section(
                                 );
                             }
 
-                            left_content = left_content
+                            let mut right_content = div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .flex_shrink_0()
+                                .when(is_stale && is_checked, |el| {
+                                    el.child(
+                                        div()
+                                            .px(px(4.5))
+                                            .py(px(0.5))
+                                            .rounded(px(3.0))
+                                            .bg(palette.amber_soft_bg)
+                                            .text_size(px(9.5))
+                                            .text_color(palette.amber_text)
+                                            .flex_shrink_0()
+                                            .child(locale.pick("上游未见", "Unlisted")),
+                                    )
+                                })
+                                .when(
+                                    is_checked && !is_stale && no_supporting_account,
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .px(px(4.5))
+                                                .py(px(0.5))
+                                                .rounded(px(3.0))
+                                                .bg(palette.amber_soft_bg)
+                                                .text_size(px(9.5))
+                                                .text_color(palette.amber_text)
+                                                .flex_shrink_0()
+                                                .child(locale.pick(
+                                                    "无可用账号",
+                                                    "No active account",
+                                                )),
+                                        )
+                                    },
+                                )
                                 .when(is_hovered || is_copied, |el| {
                                     el.child(
                                         div()
@@ -726,7 +779,7 @@ pub fn render_model_pool_section(
                                                 "btn_copy_pool_{}",
                                                 idx
                                             )))
-                                            .size(px(18.0))
+                                            .size(px(20.0))
                                             .rounded(px(4.0))
                                             .flex_shrink_0()
                                             .flex()
@@ -764,39 +817,46 @@ pub fn render_model_pool_section(
                                                 },
                                             )),
                                     )
-                                })
-                                .when(is_stale && is_checked, |el| {
-                                    el.child(
-                                        div()
-                                            .px(px(4.5))
-                                            .py(px(0.5))
-                                            .rounded(px(3.0))
-                                            .bg(palette.amber_soft_bg)
-                                            .text_size(px(9.5))
-                                            .text_color(palette.amber_text)
-                                            .flex_shrink_0()
-                                            .child(locale.pick("上游未见", "Unlisted")),
-                                    )
-                                })
-                                .when(
-                                    is_checked && !is_stale && no_supporting_account,
-                                    |el| {
-                                        el.child(
-                                            div()
-                                                .px(px(4.5))
-                                                .py(px(0.5))
-                                                .rounded(px(3.0))
-                                                .bg(palette.amber_soft_bg)
-                                                .text_size(px(9.5))
-                                                .text_color(palette.amber_text)
-                                                .flex_shrink_0()
-                                                .child(locale.pick(
-                                                    "无可用账号",
-                                                    "No active account",
-                                                )),
+                                });
+
+                            if is_hovered {
+                                let del_tip = locale
+                                    .pick("移除该模型", "Remove model")
+                                    .to_string();
+                                right_content = right_content.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "btn_del_pool_{}",
+                                            idx
+                                        )))
+                                        .size(px(20.0))
+                                        .rounded(px(4.0))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(palette.destructive_soft_bg))
+                                        .tooltip(move |w, cx| {
+                                            render_compact_tooltip(&del_tip, w, cx)
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.editor_delete_pool_model(
+                                                    m_delete.clone(),
+                                                    cx,
+                                                );
+                                            }),
                                         )
-                                    },
+                                        .child(lucide_icon(
+                                            IconName::Trash,
+                                            11.0,
+                                            palette.muted_foreground,
+                                        )),
                                 );
+                            }
 
                             scroll_list = scroll_list.child(
                                 div()
@@ -845,40 +905,7 @@ pub fn render_model_pool_section(
                                         }),
                                     )
                                     .child(left_content)
-                                    .when(is_hovered, |el| {
-                                        el.child(
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "btn_del_pool_{}",
-                                                    idx
-                                                )))
-                                                .size(px(20.0))
-                                                .rounded(px(4.0))
-                                                .flex_shrink_0()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .hover(move |s| {
-                                                    s.bg(palette.destructive_soft_bg)
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        cx.stop_propagation();
-                                                        this.editor_delete_pool_model(
-                                                            m_delete.clone(),
-                                                            cx,
-                                                        );
-                                                    }),
-                                                )
-                                                .child(lucide_icon(
-                                                    IconName::Trash,
-                                                    11.0,
-                                                    palette.muted_foreground,
-                                                )),
-                                        )
-                                    }),
+                                    .child(right_content),
                             );
                         } else {
                             let group_ids = entry.raw_ids;
@@ -901,13 +928,6 @@ pub fn render_model_pool_section(
                             let is_expanded =
                                 editor.expanded_pool_groups.contains(&expand_key);
 
-                            let tiers_summary = entry
-                                .variants
-                                .iter()
-                                .map(|v| v.effort.short_label())
-                                .collect::<Vec<_>>()
-                                .join(" · ");
-
                             let mut has_stale_checked = false;
                             let mut has_no_acc_checked = false;
                             for v in &entry.variants {
@@ -927,11 +947,20 @@ pub fn render_model_pool_section(
                                 None
                             };
 
+                            let group_logical_id = entry.logical_id;
+                            let group_copy_key = format!("pool_copy_{}", group_logical_id);
+                            let is_group_copied =
+                                app.copied_id.as_deref() == Some(group_copy_key.as_str());
+                            let needs_group_copy_tip = entry.base_name != group_logical_id
+                                || !entry.extra_tags.is_empty();
+                            let group_tip_id = group_logical_id.clone();
+                            let group_copy_val = group_logical_id.clone();
+
                             let m_hover_enter = hover_key.clone();
                             let m_hover_leave = hover_key;
                             let group_ids_toggle = group_ids.clone();
                             let group_ids_del = group_ids;
-                            let expand_key_btn = expand_key;
+                            let expand_key_btn = expand_key.clone();
                             let next_group_select = !all_checked;
 
                             let mut left_content = div()
@@ -1017,8 +1046,8 @@ pub fn render_model_pool_section(
                                         "btn_expand_group_{}",
                                         idx
                                     )))
-                                    .size(px(16.0))
-                                    .rounded(px(3.5))
+                                    .size(px(18.0))
+                                    .rounded(px(4.0))
                                     .flex_shrink_0()
                                     .flex()
                                     .items_center()
@@ -1041,7 +1070,7 @@ pub fn render_model_pool_section(
                                         } else {
                                             IconName::ChevronDown
                                         },
-                                        10.0,
+                                        11.0,
                                         if is_hovered || is_expanded {
                                             palette.muted_foreground
                                         } else {
@@ -1053,14 +1082,8 @@ pub fn render_model_pool_section(
                             let mut right_content = div()
                                 .flex()
                                 .items_center()
-                                .gap(px(5.0))
-                                .flex_shrink_0()
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(palette.subtext)
-                                        .child(tiers_summary),
-                                );
+                                .gap(px(4.0))
+                                .flex_shrink_0();
 
                             if let Some(wtip) = warn_tip {
                                 right_content = right_content.child(
@@ -1077,6 +1100,60 @@ pub fn render_model_pool_section(
                                         }),
                                 );
                             }
+
+                            right_content = right_content.when(
+                                is_hovered || is_group_copied,
+                                |el| {
+                                    el.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "btn_copy_group_{}",
+                                                idx
+                                            )))
+                                            .size(px(20.0))
+                                            .rounded(px(4.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(palette.secondary))
+                                            .when(needs_group_copy_tip, |btn| {
+                                                btn.tooltip(move |w, cx| {
+                                                    render_compact_tooltip(
+                                                        &group_tip_id,
+                                                        w,
+                                                        cx,
+                                                    )
+                                                })
+                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.copy_to_clipboard(
+                                                        group_copy_key.clone(),
+                                                        group_copy_val.clone(),
+                                                        cx,
+                                                    );
+                                                }),
+                                            )
+                                            .child(lucide_icon(
+                                                if is_group_copied {
+                                                    IconName::Check
+                                                } else {
+                                                    IconName::Copy
+                                                },
+                                                11.0,
+                                                if is_group_copied {
+                                                    palette.emerald_text
+                                                } else {
+                                                    palette.muted_foreground
+                                                },
+                                            )),
+                                    )
+                                },
+                            );
 
                             if is_hovered {
                                 let del_tip = locale
@@ -1121,7 +1198,7 @@ pub fn render_model_pool_section(
                                 div()
                                     .id(SharedString::from(format!(
                                         "pool_group_row_{}_{}",
-                                        idx, entry.logical_id
+                                        idx, group_logical_id
                                     )))
                                     .flex()
                                     .items_center()
@@ -1181,6 +1258,12 @@ pub fn render_model_pool_section(
                                         selected_set.contains(variant.model_id.as_str());
                                     let sub_stale = is_model_stale(&variant.model_id);
                                     let sub_no_acc = is_model_no_account(&variant.model_id);
+                                    let sub_hover_key =
+                                        format!("sub:{}|{}", expand_key, variant.model_id);
+                                    let is_sub_hovered = editor.hovered_pool_model.as_deref()
+                                        == Some(sub_hover_key.as_str());
+                                    let sub_hover_enter = sub_hover_key.clone();
+                                    let sub_hover_leave = sub_hover_key;
                                     let sub_copy_key = format!("pool_copy_{}", variant.model_id);
                                     let is_sub_copied =
                                         app.copied_id.as_deref() == Some(sub_copy_key.as_str());
@@ -1189,10 +1272,10 @@ pub fn render_model_pool_section(
                                     let sub_left = div()
                                         .flex()
                                         .items_center()
-                                        .gap(px(5.0))
+                                        .gap(px(6.0))
                                         .min_w_0()
                                         .flex_1()
-                                        .child(render_compact_tag(
+                                        .child(render_effort_tag(
                                             variant.effort.short_label(),
                                             palette,
                                         ))
@@ -1252,7 +1335,26 @@ pub fn render_model_pool_section(
                                             .rounded(px(4.0))
                                             .flex_shrink_0()
                                             .cursor_pointer()
-                                            .hover(move |s| s.bg(palette.accent))
+                                            .bg(if is_sub_hovered {
+                                                palette.accent
+                                            } else {
+                                                rgba(0x00000000)
+                                            })
+                                            .on_hover(cx.listener(
+                                                move |this, hovered: &bool, _, cx| {
+                                                    if let Some(ed) = this.editor.as_mut() {
+                                                        if *hovered {
+                                                            ed.hovered_pool_model =
+                                                                Some(sub_hover_enter.clone());
+                                                        } else if ed.hovered_pool_model.as_deref()
+                                                            == Some(sub_hover_leave.as_str())
+                                                        {
+                                                            ed.hovered_pool_model = None;
+                                                        }
+                                                        cx.notify();
+                                                    }
+                                                },
+                                            ))
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _, _, cx| {
@@ -1265,21 +1367,30 @@ pub fn render_model_pool_section(
                                                 }),
                                             )
                                             .child(sub_left)
-                                            .child(
-                                                div().flex_shrink_0().child(lucide_icon(
-                                                    if is_sub_copied {
-                                                        IconName::Check
-                                                    } else {
-                                                        IconName::Copy
-                                                    },
-                                                    10.5,
-                                                    if is_sub_copied {
-                                                        palette.emerald_text
-                                                    } else {
-                                                        palette.subtext
-                                                    },
-                                                )),
-                                            ),
+                                            .when(is_sub_hovered || is_sub_copied, |el| {
+                                                el.child(
+                                                    div()
+                                                        .size(px(20.0))
+                                                        .rounded(px(4.0))
+                                                        .flex_shrink_0()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(lucide_icon(
+                                                            if is_sub_copied {
+                                                                IconName::Check
+                                                            } else {
+                                                                IconName::Copy
+                                                            },
+                                                            11.0,
+                                                            if is_sub_copied {
+                                                                palette.emerald_text
+                                                            } else {
+                                                                palette.muted_foreground
+                                                            },
+                                                        )),
+                                                )
+                                            }),
                                     );
                                 }
 
