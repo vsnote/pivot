@@ -370,6 +370,103 @@ fn find_app_in_mount(mount_point: &Path) -> Option<PathBuf> {
     None
 }
 
+const DMG_ATTACH_MAX_ATTEMPTS: usize = 3;
+
+fn summarize_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr_text = String::from_utf8_lossy(stderr);
+    let source = if stderr_text.trim().is_empty() {
+        String::from_utf8_lossy(stdout)
+    } else {
+        stderr_text
+    };
+    let first_line = source
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    first_line.chars().take(160).collect()
+}
+
+fn run_with_retry<F, C>(max_attempts: usize, mut op: F, mut on_retry: C) -> Result<(), String>
+where
+    F: FnMut(usize) -> Result<(), String>,
+    C: FnMut(usize, &str),
+{
+    let attempts = max_attempts.max(1);
+    let mut last_err = String::new();
+    for attempt in 1..=attempts {
+        match op(attempt) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if attempt < attempts {
+                    on_retry(attempt, &err);
+                }
+                last_err = err;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn attach_dmg_with_retry(
+    dmg_path: &Path,
+    mount_point: &Path,
+    locale: Locale,
+) -> Result<(), String> {
+    let res = run_with_retry(
+        DMG_ATTACH_MAX_ATTEMPTS,
+        |attempt| {
+            let attach_out = Command::new("hdiutil")
+                .arg("attach")
+                .arg(dmg_path)
+                .arg("-mountpoint")
+                .arg(mount_point)
+                .arg("-nobrowse")
+                .arg("-readonly")
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| format!("hdiutil: {}", e))?;
+
+            if attach_out.status.success() {
+                return Ok(());
+            }
+
+            let detail = summarize_command_output(&attach_out.stdout, &attach_out.stderr);
+            tracing::warn!(
+                attempt,
+                max_attempts = DMG_ATTACH_MAX_ATTEMPTS,
+                code = ?attach_out.status.code(),
+                detail = %detail,
+                "hdiutil attach failed"
+            );
+            Err(detail)
+        },
+        |attempt, _| {
+            let _ = Command::new("hdiutil")
+                .arg("detach")
+                .arg(mount_point)
+                .arg("-force")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            std::thread::sleep(Duration::from_millis(500 * attempt as u64));
+        },
+    );
+
+    res.map_err(|detail| {
+        let base = locale.pick(
+            "安装包镜像校验或挂载失败，请重试或手动下载",
+            "Failed to verify or mount DMG image",
+        );
+        if detail.is_empty() {
+            base.to_string()
+        } else {
+            format!("{} ({})", base, detail)
+        }
+    })
+}
+
 fn install_dmg_blocking(
     dmg_path: &Path,
     work_dir: &Path,
@@ -380,25 +477,7 @@ fn install_dmg_blocking(
     let mount_point = work_dir.join("mnt");
     fs::create_dir_all(&mount_point).map_err(|e| e.to_string())?;
 
-    let attach_out = Command::new("hdiutil")
-        .arg("attach")
-        .arg(dmg_path)
-        .arg("-mountpoint")
-        .arg(&mount_point)
-        .arg("-nobrowse")
-        .arg("-readonly")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("hdiutil: {}", e))?;
-
-    if !attach_out.status.success() {
-        return Err(locale
-            .pick(
-                "安装包镜像校验或挂载失败，请重试或手动下载",
-                "Failed to verify or mount DMG image",
-            )
-            .to_string());
-    }
+    attach_dmg_with_retry(dmg_path, &mount_point, locale)?;
 
     let mut mount_guard = DmgMountGuard {
         mount_point: mount_point.clone(),
@@ -846,5 +925,56 @@ mod tests {
         assert!(is_newer_semver("1.0.0-rc.1", "1.0.0-beta.9"));
         assert!(!is_newer_semver("v1.0.0+build.2", "1.0.0+build.1"));
         assert!(is_newer_semver("v1.0.1", "1.0.0-alpha.1"));
+    }
+
+    #[test]
+    fn test_summarize_command_output() {
+        assert_eq!(
+            summarize_command_output(b"stdout info\n", b"\n  hdiutil: attach failed - Resource busy  \nsecond line\n"),
+            "hdiutil: attach failed - Resource busy"
+        );
+        assert_eq!(
+            summarize_command_output(b"\nfallback stdout line\n", b"   \n\t "),
+            "fallback stdout line"
+        );
+        assert_eq!(summarize_command_output(b"  \n", b"\n "), "");
+
+        let long_utf8 = "测".repeat(200);
+        let summarized = summarize_command_output(b"", long_utf8.as_bytes());
+        assert_eq!(summarized.chars().count(), 160);
+    }
+
+    #[test]
+    fn test_run_with_retry_recovers_and_reports_last_error() {
+        let mut retries = Vec::new();
+        let res = run_with_retry(
+            3,
+            |attempt| {
+                if attempt < 3 {
+                    Err(format!("err-{}", attempt))
+                } else {
+                    Ok(())
+                }
+            },
+            |attempt, err| retries.push((attempt, err.to_string())),
+        );
+        assert!(res.is_ok());
+        assert_eq!(
+            retries,
+            vec![(1, "err-1".to_string()), (2, "err-2".to_string())]
+        );
+
+        let mut fail_retries = Vec::new();
+        let err = run_with_retry(
+            3,
+            |attempt| Err(format!("fatal-{}", attempt)),
+            |attempt, err| fail_retries.push((attempt, err.to_string())),
+        )
+        .unwrap_err();
+        assert_eq!(err, "fatal-3");
+        assert_eq!(
+            fail_retries,
+            vec![(1, "fatal-1".to_string()), (2, "fatal-2".to_string())]
+        );
     }
 }
